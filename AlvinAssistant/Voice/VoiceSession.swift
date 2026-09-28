@@ -49,6 +49,9 @@ final class VoiceSession: Identifiable {
     @ObservationIgnored private var ticker: Task<Void, Never>?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var recognitionRestarts: [TimeInterval] = []
+    @ObservationIgnored private var recognitionRetry: Task<Void, Never>?
+    @ObservationIgnored private var unavailableEndings = 0
+    @ObservationIgnored private var interruptions = InterruptionMonitor()
 
     init(conversation: Conversation, store: SettingsStore) {
         self.conversation = conversation
@@ -123,8 +126,10 @@ final class VoiceSession: Identifiable {
         ticker = nil
         replyTask?.cancel()
         replyTask = nil
+        recognitionRetry?.cancel()
+        recognitionRetry = nil
         if let reply {
-            ReplyOutcome.keepStopped(reply, text: speaker?.spokenText, in: conversation)
+            keepSpokenPart(of: reply)
         }
         reply = nil
         speaker?.stop()
@@ -178,18 +183,25 @@ final class VoiceSession: Identifiable {
         assistantCaption = ""
         activity = nil
         turn.reset(transcript: carriedText, at: now)
-        recognizer?.startTurn()
+        beginRecognition()
     }
 
     private func handle(_ event: SpeechRecognizer.Event) {
         switch event {
         case .transcript(let text, let isFinal):
+            unavailableEndings = 0
             heard(text, isFinal: isFinal)
-        case .ended:
+        case .ended(let error):
+            if error is SpeechRecognitionUnavailable {
+                unavailableEndings += 1
+                if unavailableEndings >= 5 {
+                    return fail("Speech recognition isn't available right now. Check your internet connection, or pick a language in Settings that your iPhone can recognize offline.")
+                }
+            }
             // The recognizer ended this request (silence limit or a hiccup). Keep the mic live.
             switch phase {
             case .listening:
-                if userCaption.trimmed.isEmpty {
+                if isMuted || userCaption.trimmed.isEmpty {
                     restartRecognition()
                 } else {
                     commitUserTurn()
@@ -206,7 +218,7 @@ final class VoiceSession: Identifiable {
         switch phase {
         case .listening:
             guard !isMuted else { return }
-            let full = Self.join(carriedText, text)
+            let full = Self.join(carriedText, interruptions.userWords(in: text))
             userCaption = full
             turn.transcriptChanged(full, at: now)
             if isFinal { commitUserTurn() }
@@ -217,13 +229,13 @@ final class VoiceSession: Identifiable {
             }
         case .speaking:
             guard store.settings.voiceInterruptions, let speaker else { return }
-            if bargeIn.isInterruption(heard: text, assistantSpeech: speaker.recentSpeech) {
+            if let words = interruptions.interruption(in: text, assistantSpeech: speaker.recentSpeech) {
                 cancelReply()
                 // The running request already holds the interruption, so keep it.
                 phase = .listening
                 carriedText = ""
-                userCaption = text
-                turn.reset(transcript: text, at: now)
+                userCaption = words
+                turn.reset(transcript: words, at: now)
             }
         default:
             break
@@ -234,15 +246,28 @@ final class VoiceSession: Identifiable {
         let time = now
         recognitionRestarts = recognitionRestarts.filter { time - $0 < 5 } + [time]
         guard recognitionRestarts.count > 3 else {
-            recognizer?.startTurn()
+            beginRecognition()
             return
         }
-        // Back off if the recognizer keeps failing straight away.
-        Task { [weak self] in
+        // Back off if the recognizer keeps ending straight away.
+        recognitionRetry?.cancel()
+        recognitionRetry = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_000_000_000)
-            guard let self, self.phase != .idle else { return }
-            self.recognizer?.startTurn()
+            guard !Task.isCancelled, let self, self.isLive else { return }
+            self.beginRecognition()
         }
+    }
+
+    /// Starts a fresh recognition request, forgetting what was judged to be echo in the last one.
+    private func beginRecognition() {
+        recognitionRetry?.cancel()
+        recognitionRetry = nil
+        interruptions.reset()
+        recognizer?.startTurn()
+    }
+
+    private var isLive: Bool {
+        phase == .listening || phase == .thinking || phase == .speaking
     }
 
     private func commitUserTurn() {
@@ -257,7 +282,7 @@ final class VoiceSession: Identifiable {
         carriedText = ""
         startReply()
         // Keep listening while the assistant thinks and talks, so the user can cut in.
-        recognizer?.startTurn()
+        beginRecognition()
     }
 
     /// The user kept talking before the reply started: take back their turn and keep listening.
@@ -362,12 +387,19 @@ final class VoiceSession: Identifiable {
         replyTask?.cancel()
         replyTask = nil
         if let reply {
-            ReplyOutcome.keepStopped(reply, text: speaker?.spokenText ?? "", in: conversation)
+            keepSpokenPart(of: reply)
         }
         reply = nil
         speaker?.stop()
         assistantCaption = ""
         activity = nil
+    }
+
+    /// Records what the user actually heard of a reply that was cut short. A refused or failed
+    /// reply keeps its status: only the spoken apology was cut off.
+    private func keepSpokenPart(of reply: ChatMessage) {
+        guard reply.status == .streaming || reply.status == .complete else { return }
+        ReplyOutcome.keepStopped(reply, text: speaker?.spokenText ?? "", in: conversation)
     }
 
     private func speechEngine(for settings: AssistantSettings) -> Speaker.Engine {

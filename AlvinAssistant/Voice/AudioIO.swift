@@ -27,8 +27,12 @@ final class AudioIO: @unchecked Sendable {
     var onOutputLevel: (@Sendable (Float) -> Void)?
 
     private var voiceProcessing = true
-    private var playerAttached = false
     private var started = false
+
+    init() {
+        // Attached up front so stopping playback is safe even if the engine never started.
+        engine.attach(player)
+    }
 
     func start(echoCancellation: Bool) throws {
         let session = AVAudioSession.sharedInstance()
@@ -78,10 +82,6 @@ final class AudioIO: @unchecked Sendable {
                 // Some routes and the Simulator can't do voice processing; plain audio still works.
                 voiceProcessing = input.isVoiceProcessingEnabled
             }
-        }
-        if !playerAttached {
-            engine.attach(player)
-            playerAttached = true
         }
         engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
 

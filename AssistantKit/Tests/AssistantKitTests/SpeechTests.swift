@@ -90,6 +90,33 @@ final class BargeInDetectorTests: XCTestCase {
         XCTAssertFalse(detector.isInterruption(heard: "嗯", assistantSpeech: spoken))
     }
 
+    func testVerdicts() {
+        let spoken = "The weather in Singapore is sunny today."
+        XCTAssertEqual(detector.evaluate(heard: "um", assistantSpeech: spoken), .tooShort)
+        XCTAssertEqual(detector.evaluate(heard: "Singapore is sunny", assistantSpeech: spoken), .echo)
+        XCTAssertEqual(detector.evaluate(heard: "hold on a second", assistantSpeech: spoken), .interruption)
+    }
+
+    func testMonitorJudgesNewWordsAfterEcho() {
+        var monitor = InterruptionMonitor()
+        let spoken = "The weather in Singapore is sunny with a high of thirty two degrees and light winds in the afternoon."
+        XCTAssertNil(monitor.interruption(in: "weather in Singapore is sunny with a high", assistantSpeech: spoken))
+        // Judged on the whole transcript this would count as echo (8 of 12 words match).
+        XCTAssertEqual(
+            monitor.interruption(in: "weather in Singapore is sunny with a high wait what about tomorrow", assistantSpeech: spoken),
+            "wait what about tomorrow"
+        )
+    }
+
+    func testMonitorHearsAStopCommandAfterEcho() {
+        var monitor = InterruptionMonitor()
+        let spoken = "Here are three ideas for dinner tonight."
+        XCTAssertNil(monitor.interruption(in: "three ideas for dinner", assistantSpeech: spoken))
+        XCTAssertEqual(monitor.interruption(in: "three ideas for dinner stop", assistantSpeech: spoken), "stop")
+        monitor.reset()
+        XCTAssertEqual(monitor.userWords(in: "three ideas for dinner stop"), "three ideas for dinner stop")
+    }
+
     func testTokenizer() {
         XCTAssertEqual(SpeechTokenizer.tokens("What's up, Tan 你好!"), ["what's", "up", "tan", "你", "好"])
         XCTAssertEqual(SpeechTokenizer.matchingUnits("hi 你好吗"), ["hi", "你好", "好吗"])

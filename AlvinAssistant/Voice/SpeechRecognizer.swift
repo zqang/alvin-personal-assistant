@@ -108,16 +108,20 @@ final class SpeechRecognizer {
 
     private func handle(text: String?, isFinal: Bool, error: Error?, generation: Int) {
         guard generation == self.generation else { return }
+        let finished = isFinal || error != nil
+        if finished {
+            // Retire this request before reporting, because the handler may start the next one.
+            self.generation += 1
+            feeder.setRequest(nil)
+            request = nil
+            task = nil
+        }
+        let current = self.generation
         if let text {
             onEvent?(.transcript(text, isFinal: isFinal))
         }
-        guard isFinal || error != nil else { return }
-        // This request is finished; ignore anything else it reports.
-        self.generation += 1
-        feeder.setRequest(nil)
-        request = nil
-        task = nil
-        if !isFinal || text == nil {
+        // Unless handling the transcript already started a new request, say this one ended.
+        if finished, current == self.generation {
             onEvent?(.ended(error))
         }
     }

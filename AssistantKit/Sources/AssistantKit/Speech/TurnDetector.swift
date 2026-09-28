@@ -87,6 +87,14 @@ public struct TurnDetector: Sendable {
 
 /// Tells a real interruption apart from the assistant's own voice leaking back into the microphone.
 public struct BargeInDetector: Sendable {
+    public enum Verdict: Equatable, Sendable {
+        /// Too few words to judge yet.
+        case tooShort
+        /// Mostly the assistant's own words.
+        case echo
+        case interruption
+    }
+
     public var minimumWords = 2
     public var minimumCJKCharacters = 3
     /// Largest share of the heard phrase that may also occur in the assistant's recent speech
@@ -96,8 +104,12 @@ public struct BargeInDetector: Sendable {
     public init() {}
 
     public func isInterruption(heard: String, assistantSpeech: String) -> Bool {
+        evaluate(heard: heard, assistantSpeech: assistantSpeech) == .interruption
+    }
+
+    public func evaluate(heard: String, assistantSpeech: String) -> Verdict {
         let tokens = SpeechTokenizer.tokens(heard)
-        guard !tokens.isEmpty else { return false }
+        guard !tokens.isEmpty else { return .tooShort }
         let cjkCount = tokens.filter(SpeechTokenizer.isCJKToken).count
         let wordCount = tokens.count - cjkCount
         let isCommand = Self.stopCommands.contains(tokens.joined(separator: " "))
@@ -106,17 +118,55 @@ public struct BargeInDetector: Sendable {
             || wordCount >= minimumWords
             || cjkCount >= minimumCJKCharacters
             || (wordCount >= 1 && cjkCount >= 2)
-        else { return false }
+        else { return .tooShort }
 
         let heardUnits = SpeechTokenizer.matchingUnits(heard)
         let spokenUnits = Set(SpeechTokenizer.matchingUnits(assistantSpeech))
-        guard !heardUnits.isEmpty, !spokenUnits.isEmpty else { return true }
+        guard !heardUnits.isEmpty, !spokenUnits.isEmpty else { return .interruption }
         let echoed = heardUnits.filter { spokenUnits.contains($0) }.count
-        return Double(echoed) / Double(heardUnits.count) < maximumEchoOverlap
+        return Double(echoed) / Double(heardUnits.count) < maximumEchoOverlap ? .interruption : .echo
     }
 
     private static let stopCommands: Set<String> = [
         "stop", "wait", "pause", "hold on", "hang on", "okay stop", "ok stop", "shh",
         "停", "停下", "等等", "等一下", "暂停", "别说了",
     ]
+}
+
+/// Watches one recognition request's growing transcript while the assistant talks. Words judged to
+/// be echo are set aside, so a real interruption later in the reply is judged on its own words.
+public struct InterruptionMonitor: Sendable {
+    public var detector = BargeInDetector()
+    private var echoTokenCount = 0
+    private var echoText = ""
+
+    public init() {}
+
+    /// Call whenever a new recognition request starts.
+    public mutating func reset() {
+        echoTokenCount = 0
+        echoText = ""
+    }
+
+    /// The user's words if `transcript` now contains an interruption, else nil.
+    public mutating func interruption(in transcript: String, assistantSpeech: String) -> String? {
+        let tokens = SpeechTokenizer.tokens(transcript)
+        let fresh = tokens.dropFirst(min(echoTokenCount, tokens.count)).joined(separator: " ")
+        switch detector.evaluate(heard: fresh, assistantSpeech: assistantSpeech) {
+        case .interruption:
+            return userWords(in: transcript)
+        case .echo:
+            echoTokenCount = tokens.count
+            echoText = transcript
+            return nil
+        case .tooShort:
+            return nil
+        }
+    }
+
+    /// The transcript without the leading words that were judged to be echo.
+    public func userWords(in transcript: String) -> String {
+        guard !echoText.isEmpty, transcript.hasPrefix(echoText) else { return transcript }
+        return String(transcript.dropFirst(echoText.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
