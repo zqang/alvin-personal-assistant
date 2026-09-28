@@ -98,10 +98,10 @@ final class VoiceSession: Identifiable {
         let feeder = recognizer.feeder
         audio.onInput = { buffer in feeder.append(buffer) }
         audio.onInputLevel = { [weak self] level in
-            Task { @MainActor in self?.inputLevel(level) }
+            Task { @MainActor [weak self] in self?.inputLevel(level) }
         }
         audio.onOutputLevel = { [weak self] level in
-            Task { @MainActor in self?.outputLevel(level) }
+            Task { @MainActor [weak self] in self?.outputLevel(level) }
         }
         do {
             try audio.start(echoCancellation: settings.echoCancellation)
@@ -435,14 +435,14 @@ final class VoiceSession: Identifiable {
         ) { [weak self] notification in
             let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
             guard type == AVAudioSession.InterruptionType.began.rawValue else { return }
-            Task { @MainActor in self?.audioInterrupted() }
+            Task { @MainActor [weak self] in self?.audioInterrupted() }
         })
         observers.append(center.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: audio.engine,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.audioRouteChanged() }
+            Task { @MainActor [weak self] in self?.audioRouteChanged() }
         })
     }
 

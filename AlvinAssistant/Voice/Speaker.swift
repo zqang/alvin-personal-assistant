@@ -184,7 +184,7 @@ final class Speaker {
         playback[playback.count - 1].produced += 1
         playback[playback.count - 1].outstanding += 1
         audio.schedule(buffer) { [weak self] in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.bufferPlayed(generation: generation)
             }
         }

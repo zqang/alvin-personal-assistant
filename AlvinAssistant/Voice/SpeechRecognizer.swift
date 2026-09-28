@@ -100,7 +100,7 @@ final class SpeechRecognizer {
         { [weak recognizer] result, error in
             let text = result?.bestTranscription.formattedString
             let isFinal = result?.isFinal ?? false
-            Task { @MainActor in
+            Task { @MainActor [weak recognizer] in
                 recognizer?.handle(text: text, isFinal: isFinal, error: error, generation: generation)
             }
         }
