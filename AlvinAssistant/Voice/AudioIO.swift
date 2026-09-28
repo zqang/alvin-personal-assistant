@@ -72,7 +72,12 @@ final class AudioIO: @unchecked Sendable {
     private func configureEngine() throws {
         let input = engine.inputNode
         if input.isVoiceProcessingEnabled != voiceProcessing {
-            try input.setVoiceProcessingEnabled(voiceProcessing)
+            do {
+                try input.setVoiceProcessingEnabled(voiceProcessing)
+            } catch {
+                // Some routes and the Simulator can't do voice processing; plain audio still works.
+                voiceProcessing = input.isVoiceProcessingEnabled
+            }
         }
         if !playerAttached {
             engine.attach(player)
