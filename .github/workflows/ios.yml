@@ -1,0 +1,40 @@
+name: iOS
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test AssistantKit and build the app
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select the newest stable Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode_[0-9]*.app | grep -viE 'beta|rc' | sort -V | tail -1 || true)
+          if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
+          xcodebuild -version
+          swift --version
+
+      - name: Unit tests (AssistantKit)
+        run: swift test --package-path AssistantKit
+
+      - name: Build the iOS app
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -quiet \
+            -project AlvinAssistant.xcodeproj \
+            -scheme AlvinAssistant \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO
