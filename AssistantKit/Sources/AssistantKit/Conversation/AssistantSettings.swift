@@ -44,14 +44,21 @@ public struct AssistantSettings: Codable, Equatable, Sendable {
     public var endOfTurnDelay = 0.9
     public var voiceInterruptions = true
     public var echoCancellation = true
+    /// Re-transcribes each finished voice turn on-device with Qwen3-ASR before it is sent.
+    public var qwenListening = false
 
     public init() {}
+
+    /// Qwen3-ASR listening is on and covers the recognition language.
+    public var usesQwenListening: Bool {
+        qwenListening && FinalTranscript.qwenLanguage(forLocale: speechLocale) != nil
+    }
 
     private enum CodingKeys: String, CodingKey {
         case provider, claudeModel, effort, webSearchEnabled, compatibleBaseURL, compatibleModel
         case userName, customInstructions
         case speechLocale, voiceEngine, appleVoiceIdentifier, speechRate, openAIVoice, openAISpeechModel
-        case endOfTurnDelay, voiceInterruptions, echoCancellation
+        case endOfTurnDelay, voiceInterruptions, echoCancellation, qwenListening
     }
 
     /// Missing or unreadable keys keep their defaults, so settings saved by older builds still load.
@@ -78,5 +85,6 @@ public struct AssistantSettings: Codable, Equatable, Sendable {
         endOfTurnDelay = value(.endOfTurnDelay, defaults.endOfTurnDelay)
         voiceInterruptions = value(.voiceInterruptions, defaults.voiceInterruptions)
         echoCancellation = value(.echoCancellation, defaults.echoCancellation)
+        qwenListening = value(.qwenListening, defaults.qwenListening)
     }
 }

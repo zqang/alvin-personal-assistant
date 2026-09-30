@@ -187,3 +187,78 @@ final class TurnDetectorTests: XCTestCase {
         XCTAssertFalse(vad.isVoice(level: -70))
     }
 }
+
+final class FinalTranscriptTests: XCTestCase {
+    func testKeepsRefinedTextUnlessItLooksBroken() {
+        XCTAssertEqual(FinalTranscript.pick(live: "我想去新加波", refined: "我想去新加坡。"), "我想去新加坡。")
+        XCTAssertEqual(FinalTranscript.pick(live: "what's the whether", refined: "What's the weather?"), "What's the weather?")
+        XCTAssertEqual(FinalTranscript.pick(live: "what's the whether", refined: nil), "what's the whether")
+        XCTAssertEqual(FinalTranscript.pick(live: "hi there", refined: "  "), "hi there")
+        XCTAssertEqual(FinalTranscript.pick(live: "hi there", refined: String(repeating: "thank you ", count: 10)), "hi there")
+        XCTAssertEqual(FinalTranscript.pick(live: "turn on the kitchen lights please right now", refined: "now"), "turn on the kitchen lights please right now")
+    }
+
+    func testChecksOnlyTheRefinedSegmentOfAResumedTurn() {
+        let live = "remind me to call mom at five pm"
+        XCTAssertEqual(FinalTranscript.pick(live: live, carried: "remind me to call mom", refined: "at 5 p.m."), "remind me to call mom at 5 p.m.")
+        // An empty or broken second pass mustn't swallow the new words.
+        XCTAssertEqual(FinalTranscript.pick(live: live, carried: "remind me to call mom", refined: ""), live)
+        XCTAssertEqual(FinalTranscript.pick(live: live, carried: "remind me to call mom", refined: String(repeating: "hmm ", count: 20)), live)
+    }
+
+    func testClipKeepsALeadInButNeverCutsSpeech() {
+        let second = 16_000
+        func start(_ speechStart: Double, _ end: Double) -> Int {
+            FinalTranscript.clipStart(speechStart: Int(speechStart * 16_000), end: Int(end * 16_000), maxLength: 30 * second, leadIn: 5 * second, minLeadIn: 3 * second / 2)
+        }
+        // Five seconds before the first words when it fits.
+        XCTAssertEqual(start(10, 15), 5 * second)
+        // Less lead-in to stay within the limit.
+        XCTAssertEqual(start(10, 38), 8 * second)
+        // Speech too long for the limit (counting the words' lag): the clip runs over and is rejected.
+        XCTAssertEqual(start(10, 39.5), 8 * second + second / 2)
+        XCTAssertGreaterThan(Int(39.5 * 16_000) - start(10, 39.5), 30 * second)
+        XCTAssertEqual(start(1, 5), 0)
+    }
+
+    func testVoicedRangeTrimsSilence() throws {
+        let second = 16_000
+        let tone = (0..<second).map { Float(sin(Double($0) * 0.2)) * 0.1 }
+        let clip = [Float](repeating: 0, count: 2 * second) + tone + [Float](repeating: 0, count: second)
+        let range = try XCTUnwrap(FinalTranscript.voicedRange(of: clip, margin: 4_800))
+        // To within one 30 ms frame.
+        XCTAssertLessThanOrEqual(abs(range.lowerBound - (2 * second - 4_800)), 480)
+        XCTAssertLessThanOrEqual(abs(range.upperBound - (3 * second + 4_800)), 480)
+        XCTAssertNil(FinalTranscript.voicedRange(of: [Float](repeating: 0, count: second)))
+    }
+
+    func testSampleWindowKeepsTheLatestAudioAtStablePositions() {
+        var window = SampleWindow(capacity: 10)
+        func append(_ values: ClosedRange<Int>) {
+            let floats = values.map(Float.init)
+            floats.withUnsafeBufferPointer { window.append($0) }
+        }
+        append(0...5)
+        append(6...11)   // full: the older half (0...2) is discarded
+        XCTAssertEqual(window.count, 12)
+        XCTAssertEqual(window.samples(from: 3), (3...11).map(Float.init))
+        XCTAssertEqual(window.samples(from: 9), [9, 10, 11])
+        XCTAssertEqual(window.samples(from: 2), [], "discarded")
+        XCTAssertEqual(window.samples(from: 12), [], "past the end")
+        window.reset()
+        XCTAssertEqual(window.count, 0)
+    }
+
+    func testOnlyEnglishAndMainlandChineseUseQwen() {
+        XCTAssertEqual(FinalTranscript.qwenLanguage(forLocale: "zh-CN"), "Chinese")
+        XCTAssertEqual(FinalTranscript.qwenLanguage(forLocale: "en-SG"), "English")
+        XCTAssertNil(FinalTranscript.qwenLanguage(forLocale: "zh-TW"))
+        XCTAssertNil(FinalTranscript.qwenLanguage(forLocale: "ms-MY"))
+        var settings = AssistantSettings()
+        settings.qwenListening = true
+        settings.speechLocale = "zh-TW"
+        XCTAssertFalse(settings.usesQwenListening)
+        settings.speechLocale = "en-SG"
+        XCTAssertTrue(settings.usesQwenListening)
+    }
+}

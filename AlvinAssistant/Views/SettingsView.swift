@@ -43,6 +43,9 @@ struct SettingsView: View {
         .onChange(of: anthropicKey) { store.setSecret(anthropicKey, for: .anthropic) }
         .onChange(of: compatibleKey) { store.setSecret(compatibleKey, for: .compatible) }
         .onChange(of: openAIKey) { store.setSecret(openAIKey, for: .openAI) }
+        .onChange(of: store.settings.usesQwenListening) {
+            if store.settings.usesQwenListening { QwenListener.shared.load() } else { QwenListener.shared.unload(stopDownload: true) }
+        }
     }
 
     // MARK: - Sections
@@ -133,6 +136,13 @@ struct SettingsView: View {
             }
             .pickerStyle(.navigationLink)
 
+            Toggle("Qwen3-ASR listening", isOn: $store.settings.qwenListening)
+            if store.settings.qwenListening {
+                Text(qwenStatus)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
             Picker("Voice engine", selection: $store.settings.voiceEngine) {
                 Text("Built-in").tag(AssistantSettings.VoiceEngine.apple)
                 Text("OpenAI").tag(AssistantSettings.VoiceEngine.openAI)
@@ -205,6 +215,22 @@ struct SettingsView: View {
     }
 
     // MARK: - Helpers
+
+    private var qwenStatus: String {
+        guard store.settings.usesQwenListening else {
+            return "Qwen3-ASR is used for English and Chinese (China mainland) only."
+        }
+        switch QwenListener.shared.status {
+        case .off:
+            return "Transcribes each finished turn again on this iPhone for better accuracy, while the app is open. Loads when you start voice mode."
+        case .loading(let progress):
+            return progress < 1 ? "Downloading about 1 GB over Wi-Fi… \(Int(progress * 100))%. Keep the app open." : "Loading…"
+        case .ready:
+            return "Ready."
+        case .failed(let message):
+            return message
+        }
+    }
 
     private var compatibleModelHint: String {
         CompatibleServices.presets.first { $0.baseURL == store.settings.compatibleBaseURL }?.modelHint ?? "Model ID"

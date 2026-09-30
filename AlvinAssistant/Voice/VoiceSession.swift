@@ -46,6 +46,8 @@ final class VoiceSession: Identifiable {
     @ObservationIgnored private var replyStreamDone = false
     /// Earlier words of the current turn, when the user resumed talking after a pause.
     @ObservationIgnored private var carriedText = ""
+    /// Where this recognition request's speech starts in its recorded samples, once words arrive.
+    @ObservationIgnored private var speechStart: Int?
     @ObservationIgnored private var ticker: Task<Void, Never>?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var recognitionRestarts: [TimeInterval] = []
@@ -83,12 +85,17 @@ final class VoiceSession: Identifiable {
         guard phase == .starting else { return }
 
         let settings = store.settings
-        let recognizer = SpeechRecognizer(localeIdentifier: settings.speechLocale)
+        // Keep twice the longest clip Qwen3-ASR reads, so a full one always fits.
+        let recognizer = SpeechRecognizer(localeIdentifier: settings.speechLocale, recordingCapacity: settings.usesQwenListening ? 2 * QwenListener.maxSamples : nil)
         guard recognizer.isAvailable else {
             return fail("Speech recognition for \(settings.speechLocale) isn't available right now. Check your connection or pick another language in Settings.")
         }
         recognizer.onEvent = { [weak self] event in self?.handle(event) }
         self.recognizer = recognizer
+        if settings.usesQwenListening {
+            QwenListener.shared.isWanted = true
+            QwenListener.shared.load()
+        }
 
         let speaker = Speaker(audio: audio, engine: speechEngine(for: settings), languageHint: settings.speechLocale)
         speaker.onChunkStarted = { [weak self] text in self?.assistantStartedSpeaking(text) }
@@ -134,6 +141,8 @@ final class VoiceSession: Identifiable {
         reply = nil
         speaker?.stop()
         recognizer?.stopTurn()
+        QwenListener.shared.isWanted = false
+        QwenListener.shared.unload()
         audio.stop()
         for observer in observers {
             NotificationCenter.default.removeObserver(observer)
@@ -190,6 +199,9 @@ final class VoiceSession: Identifiable {
         switch event {
         case .transcript(let text, let isFinal):
             unavailableEndings = 0
+            if speechStart == nil, !text.trimmed.isEmpty {
+                speechStart = recognizer?.feeder.sampleCount
+            }
             heard(text, isFinal: isFinal)
         case .ended(let error):
             if error is SpeechRecognitionUnavailable {
@@ -231,6 +243,8 @@ final class VoiceSession: Identifiable {
             guard store.settings.voiceInterruptions, let speaker else { return }
             if let words = interruptions.interruption(in: text, assistantSpeech: speaker.recentSpeech) {
                 cancelReply()
+                // This request's audio also holds the assistant's voice, so keep the live text.
+                recognizer?.feeder.dropSamples()
                 // The running request already holds the interruption, so keep it.
                 phase = .listening
                 carriedText = ""
@@ -263,6 +277,7 @@ final class VoiceSession: Identifiable {
         recognitionRetry?.cancel()
         recognitionRetry = nil
         interruptions.reset()
+        speechStart = nil
         recognizer?.startTurn()
     }
 
@@ -279,8 +294,13 @@ final class VoiceSession: Identifiable {
         let message = ChatMessage(role: .user, text: text, isVoice: true)
         conversation.append(message)
         lastUserMessage = message
+        // Take the turn's audio before the next request clears it.
+        var samples: [Float] = []
+        if let speechStart, let feeder = recognizer?.feeder {
+            samples = feeder.turnClip(speechStart: speechStart, maxLength: QwenListener.maxSamples)
+        }
+        startReply(refining: message, carried: carriedText, samples: samples)
         carriedText = ""
-        startReply()
         // Keep listening while the assistant thinks and talks, so the user can cut in.
         beginRecognition()
     }
@@ -300,7 +320,9 @@ final class VoiceSession: Identifiable {
 
     // MARK: - Replying
 
-    private func startReply() {
+    /// Replies to `user`, first swapping in Qwen3-ASR's reading of the turn's audio when it's on.
+    /// `carried` is earlier text of the turn that `samples` don't cover.
+    private func startReply(refining user: ChatMessage, carried: String, samples: [Float]) {
         phase = .thinking
         activity = nil
         notice = nil
@@ -309,12 +331,26 @@ final class VoiceSession: Identifiable {
         replyStreamDone = false
         speaker?.beginReply()
 
-        let stream = ReplyService.stream(for: conversation, store: store)
         let reply = ChatMessage(role: .assistant, text: "", isVoice: true, status: .streaming)
         conversation.append(reply)
         self.reply = reply
+        let locale = store.settings.speechLocale
         replyTask = Task { [weak self] in
-            await self?.consume(stream, into: reply)
+            let live = user.text
+            if !samples.isEmpty, let heard = await QwenListener.shared.transcribe(samples, locale: locale), !Task.isCancelled {
+                user.text = FinalTranscript.pick(live: live, carried: carried, refined: heard)
+                // ponytail: comparison line; delete after checking the results on the iPhone.
+                print("[ASR] apple=\(live) qwen=\(user.text)")
+            }
+            guard let self, !Task.isCancelled, reply === self.reply else { return }
+            if user.text != live {
+                if self.conversation.title == Conversation.makeTitle(from: live) {
+                    self.conversation.title = Conversation.makeTitle(from: user.text)
+                }
+                if self.phase == .thinking { self.userCaption = user.text }
+            }
+            // Built only now: it reads the conversation, including the refined text, right away.
+            await self.consume(ReplyService.stream(for: self.conversation, store: self.store), into: reply)
         }
     }
 
