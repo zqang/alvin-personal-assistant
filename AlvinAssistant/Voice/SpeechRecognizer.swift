@@ -1,15 +1,31 @@
+import AssistantKit
 import AVFoundation
 import Speech
 
-/// Hands microphone buffers from the audio thread to the current recognition request.
+/// Hands microphone buffers from the audio thread to the current recognition request, and, when a
+/// second pass may read it, keeps the request's latest 16 kHz samples.
 final class RecognitionFeeder: @unchecked Sendable {
     private let lock = NSLock()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var muted = false
+    private var window: SampleWindow?
+    /// False once this request's audio holds the assistant's own voice.
+    private var recording = false
 
+    /// `recordingCapacity`: how many samples to keep, or nil to keep none.
+    init(recordingCapacity: Int?) {
+        window = recordingCapacity.map(SampleWindow.init(capacity:))
+    }
+
+    /// A new request starts a new recording; clearing it keeps the samples, because a retired
+    /// request's final result still commits the turn.
     func setRequest(_ request: SFSpeechAudioBufferRecognitionRequest?) {
         lock.lock()
         self.request = request
+        if request != nil {
+            window?.reset()
+            recording = true
+        }
         lock.unlock()
     }
 
@@ -22,8 +38,37 @@ final class RecognitionFeeder: @unchecked Sendable {
     func append(_ buffer: AVAudioPCMBuffer) {
         lock.lock()
         let target = muted ? nil : request
+        // Copy now: the converter may hand back the tap's own buffer.
+        if target != nil, recording, let channel = buffer.floatChannelData?[0] {
+            window?.append(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+        }
         lock.unlock()
         target?.append(buffer)
+    }
+
+    /// Stops keeping this request's audio, e.g. when it holds the assistant's own voice.
+    func dropSamples() {
+        lock.lock()
+        recording = false
+        lock.unlock()
+    }
+
+    /// How many samples this request has recorded so far, including discarded ones.
+    var sampleCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return window?.count ?? 0
+    }
+
+    /// This request's audio for a second pass over the turn whose first words arrived at sample
+    /// `speechStart` (counted like `sampleCount`), up to now; see `FinalTranscript.clipStart`.
+    /// Nothing if the audio isn't kept, was dropped, or has already been discarded.
+    func turnClip(speechStart: Int, maxLength: Int) -> [Float] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard recording, let end = window?.count else { return [] }
+        let start = FinalTranscript.clipStart(speechStart: speechStart, end: end, maxLength: maxLength, leadIn: 5 * 16_000, minLeadIn: 24_000)
+        return window?.samples(from: start) ?? []
     }
 }
 
@@ -41,7 +86,7 @@ final class SpeechRecognizer {
         case ended(Error?)
     }
 
-    let feeder = RecognitionFeeder()
+    let feeder: RecognitionFeeder
     var onEvent: ((Event) -> Void)?
 
     private let recognizer: SFSpeechRecognizer?
@@ -49,8 +94,10 @@ final class SpeechRecognizer {
     private var task: SFSpeechRecognitionTask?
     private var generation = 0
 
-    init(localeIdentifier: String) {
+    /// `recordingCapacity`: samples of each request to keep for a second pass, or nil for none.
+    init(localeIdentifier: String, recordingCapacity: Int? = nil) {
         recognizer = SFSpeechRecognizer(locale: Locale(identifier: localeIdentifier))
+        feeder = RecognitionFeeder(recordingCapacity: recordingCapacity)
     }
 
     var isAvailable: Bool { recognizer?.isAvailable ?? false }

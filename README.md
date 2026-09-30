@@ -29,6 +29,9 @@ service, such as **Doubao on Volcengine Ark**, DeepSeek, or OpenAI.
   when a sentence is in another language), or OpenAI voices for a more natural sound.
 - **Chinese and English.** Choose the recognition language in Settings; the assistant replies in the language
   you speak.
+- **Sharper listening (optional).** Turn on **Qwen3-ASR listening** and each finished turn is transcribed again
+  on the iPhone by [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) before it's sent, for English and
+  Chinese (China mainland). Apple's recognizer still drives the live captions and turn-taking.
 - **Web search.** "What's the weather tomorrow?" and "Any news on…?" work, because Claude searches the web
   server-side.
 - **Private by default.** Speech is transcribed on the iPhone. API keys live in the iOS Keychain. There's no
@@ -36,7 +39,8 @@ service, such as **Doubao on Volcengine Ark**, DeepSeek, or OpenAI.
 
 ## Requirements
 
-- A Mac with **Xcode 16 or later** (Xcode 26 recommended)
+- A Mac with **Xcode 26.4 or later** and the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`),
+  which the on-device Qwen3-ASR model (MLX) needs to build
 - An iPhone on **iOS 17 or later**. A free Apple ID is enough to run it on your own phone.
 - An **Anthropic API key** from [console.anthropic.com](https://console.anthropic.com), or a key for an
   OpenAI-compatible service
@@ -48,7 +52,8 @@ service, such as **Doubao on Volcengine Ark**, DeepSeek, or OpenAI.
    says the bundle identifier is taken, change `com.alvinang.personalassistant` to something unique.
 3. Plug in your iPhone (or pair it over Wi-Fi), select it as the run destination, and press **Run** (⌘R). The
    first time, trust the developer profile on the phone under **Settings › General › VPN & Device
-   Management**.
+   Management**. If the first build stops at "Plugin 'CudaBuild' … must be enabled" (from mlx-swift) or a
+   macro prompt, click the error in Xcode, choose **Trust & Enable**, and build again.
 4. In the app, tap **⚙︎** and paste your Anthropic API key. Optionally add your name and a few words about
    yourself.
 5. Tap the **waveform** button and start talking.
@@ -61,6 +66,9 @@ Tips:
 - **Voice engine › OpenAI** gives the most natural speech. It needs an OpenAI API key and costs a little per
   minute of audio. If it fails, the app falls back to the built-in voice.
 - The simulator can run the app, but voice mode needs a real iPhone for the microphone and echo cancellation.
+- **Qwen3-ASR listening** downloads about 1 GB the first time (use Wi-Fi), needs a recent iPhone (iPhone 15 Pro
+  or newer is best), and works only while the app is open; with the screen locked, turns use Apple's text.
+  Build with the **Release** configuration for realistic speed.
 
 ## Use Doubao, DeepSeek, or OpenAI instead of Claude
 

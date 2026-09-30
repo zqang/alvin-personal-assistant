@@ -8,6 +8,10 @@
 
 /* Begin PBXBuildFile section */
 		A10000000000000000000012 /* AssistantKit in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000011 /* AssistantKit */; };
+		A10000000000000000000027 /* MLXAudioSTT in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000023 /* MLXAudioSTT */; };
+		A10000000000000000000028 /* MLXAudioCore in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000024 /* MLXAudioCore */; };
+		A10000000000000000000029 /* MLX in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000025 /* MLX */; };
+		A1000000000000000000002A /* HuggingFace in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000026 /* HuggingFace */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,6 +33,10 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000012 /* AssistantKit in Frameworks */,
+				A10000000000000000000027 /* MLXAudioSTT in Frameworks */,
+				A10000000000000000000028 /* MLXAudioCore in Frameworks */,
+				A10000000000000000000029 /* MLX in Frameworks */,
+				A1000000000000000000002A /* HuggingFace in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -81,6 +89,10 @@
 			name = AlvinAssistant;
 			packageProductDependencies = (
 				A10000000000000000000011 /* AssistantKit */,
+				A10000000000000000000023 /* MLXAudioSTT */,
+				A10000000000000000000024 /* MLXAudioCore */,
+				A10000000000000000000025 /* MLX */,
+				A10000000000000000000026 /* HuggingFace */,
 			);
 			productName = AlvinAssistant;
 			productReference = A10000000000000000000004 /* AlvinAssistant.app */;
@@ -112,6 +124,9 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				A10000000000000000000010 /* XCLocalSwiftPackageReference "AssistantKit" */,
+				A10000000000000000000020 /* XCRemoteSwiftPackageReference "mlx-audio-swift" */,
+				A10000000000000000000021 /* XCRemoteSwiftPackageReference "mlx-swift" */,
+				A10000000000000000000022 /* XCRemoteSwiftPackageReference "swift-huggingface" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000003 /* Products */;
@@ -359,10 +374,57 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		A10000000000000000000020 /* XCRemoteSwiftPackageReference "mlx-audio-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Blaizzy/mlx-audio-swift.git";
+			requirement = {
+				kind = revision;
+				revision = b7c7971d94c4f73de910797593851d00858daf19;
+			};
+		};
+		A10000000000000000000021 /* XCRemoteSwiftPackageReference "mlx-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.31.4;
+			};
+		};
+		A10000000000000000000022 /* XCRemoteSwiftPackageReference "swift-huggingface" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/huggingface/swift-huggingface";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.11.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		A10000000000000000000011 /* AssistantKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = AssistantKit;
+		};
+		A10000000000000000000023 /* MLXAudioSTT */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000020 /* XCRemoteSwiftPackageReference "mlx-audio-swift" */;
+			productName = MLXAudioSTT;
+		};
+		A10000000000000000000024 /* MLXAudioCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000020 /* XCRemoteSwiftPackageReference "mlx-audio-swift" */;
+			productName = MLXAudioCore;
+		};
+		A10000000000000000000025 /* MLX */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000021 /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLX;
+		};
+		A10000000000000000000026 /* HuggingFace */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000022 /* XCRemoteSwiftPackageReference "swift-huggingface" */;
+			productName = HuggingFace;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
