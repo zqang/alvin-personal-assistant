@@ -1,0 +1,56 @@
+name: Model facts
+
+# Checkpoint layout, mtp.* presence, conv1d layout, EOS ids, quantization and chat-template behaviour
+# of the lab models, read from the Hub without downloading weights. Results are printed into the log.
+on:
+  push:
+    paths:
+      - "scripts/model_facts.py"
+      - "scripts/lab_models.txt"
+      - "scripts/lab_prompts.json"
+      - ".github/workflows/model-facts.yml"
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  facts:
+    name: Model facts from the Hub
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      TRANSFORMERS_VERBOSITY: error
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install "huggingface_hub>=0.25" "transformers>=4.56" jinja2 tokenizers
+          pip list | grep -iE '^(huggingface|transformers|tokenizers|jinja2)' || true
+
+      - name: Gather facts
+        env:
+          HF_TOKEN_SECRET: ${{ secrets.HF_TOKEN }}
+        run: |
+          # An unset secret arrives as an empty string; the Hub client must then run without a token.
+          if [ -n "$HF_TOKEN_SECRET" ]; then export HF_TOKEN="$HF_TOKEN_SECRET"; fi
+          python -I scripts/model_facts.py --models scripts/lab_models.txt --out facts.json
+
+      - name: Print facts
+        if: always()
+        run: |
+          echo "=== BEGIN MODEL FACTS ==="; cat facts.json 2>/dev/null || echo "(none)"; echo "=== END MODEL FACTS ==="
+          echo "=== BEGIN MODEL FACTS SUMMARY ==="; cat facts.md 2>/dev/null || echo "(none)"; echo "=== END MODEL FACTS SUMMARY ==="

@@ -1,0 +1,115 @@
+name: Drafter lab
+
+# Greedy outputs, drafting acceptance simulation and tool-call accuracy for Woof with mlx-lm on the
+# runner's Metal GPU, plus an optional DFlash measurement. Results are printed into the log.
+#
+# The lab runs when its script, prompts, model list or this file change, when the head commit message
+# contains [ci lab], or when started by hand. A path filter on `push` would make the [ci lab] tag
+# impossible, so every push starts the small gate job and only the gate decides whether the macOS job runs.
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Decide whether the lab runs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+          BEFORE: ${{ github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          run=false
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            run=true
+          elif printf '%s' "$MESSAGE" | grep -qF '[ci lab]'; then
+            run=true
+          else
+            base=""
+            if [ -n "$BEFORE" ] && ! printf '%s' "$BEFORE" | grep -qE '^0+$' && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+              base="$BEFORE"
+            else
+              # A new branch or a force push: compare with where it left the default branch.
+              base=$(git merge-base HEAD "origin/$DEFAULT_BRANCH" 2>/dev/null || true)
+            fi
+            if [ -z "$base" ]; then
+              run=true
+            elif git diff --name-only "$base" HEAD \
+              | grep -qxE 'scripts/(drafter_lab\.py|lab_prompts\.json|lab_models\.txt)|\.github/workflows/drafter-lab\.yml'; then
+              run=true
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "Drafter lab runs: $run"
+
+  lab:
+    name: Drafter lab on the Metal GPU
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: macos-26
+    timeout-minutes: 90
+    # Queue rather than cancel: a later push to the same branch must not kill a lab run in progress.
+    concurrency:
+      group: drafter-lab-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      TRANSFORMERS_VERBOSITY: error
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: GPU
+        run: system_profiler SPDisplaysDataType SPHardwareDataType | grep -E "Chip|Chipset|Metal|Memory|Model" || true
+
+      - name: Install
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install mlx mlx-lm "huggingface_hub[hf_xet]"
+          .venv/bin/pip list | grep -iE '^(mlx|transformers|huggingface)' || true
+
+      - name: Lab
+        env:
+          HF_TOKEN_SECRET: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -n "$HF_TOKEN_SECRET" ]; then export HF_TOKEN="$HF_TOKEN_SECRET"; fi
+          .venv/bin/python -I scripts/drafter_lab.py --prompts scripts/lab_prompts.json --out lab.json
+
+      - name: Print lab
+        if: always()
+        run: |
+          echo "=== BEGIN DRAFTER LAB ==="; cat lab.json 2>/dev/null || echo "(none)"; echo "=== END ==="
+          echo "=== BEGIN DRAFTER LAB SUMMARY ==="; cat lab.md 2>/dev/null || echo "(none)"; echo "=== END ==="
+
+      - name: DFlash (optional)
+        continue-on-error: true
+        env:
+          HF_TOKEN_SECRET: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -n "$HF_TOKEN_SECRET" ]; then export HF_TOKEN="$HF_TOKEN_SECRET"; fi
+          .venv/bin/pip install dflash-mlx
+          .venv/bin/pip list | grep -iE '^(dflash|mlx)' || true
+          .venv/bin/python -I scripts/drafter_lab.py --dflash --prompts scripts/lab_prompts.json --out dflash.json --baseline lab.json
+
+      - name: Print DFlash
+        if: always()
+        run: |
+          echo "=== BEGIN DFLASH ==="; cat dflash.json 2>/dev/null || echo "(none)"; echo "=== END ==="
+          echo "=== BEGIN DFLASH SUMMARY ==="; cat dflash.md 2>/dev/null || echo "(none)"; echo "=== END ==="
