@@ -1,0 +1,5 @@
+# Models the integration tests use. One Hugging Face repo per line, optionally pinned as repo@sha.
+mlx-community/Qwen3-0.6B-4bit
+mlx-community/Qwen3-1.7B-4bit
+mlx-community/Qwen3.5-0.8B-MLX-4bit
+mlx-community/Qwen3.5-2B-4bit
