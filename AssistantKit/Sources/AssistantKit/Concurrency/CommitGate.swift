@@ -28,6 +28,11 @@ public final class CommitGate: @unchecked Sendable {
         locked { state == .cancelled }
     }
 
+    /// How many tasks are suspended in `wait()`. Lets tests wait for a waiter to register.
+    var waiterCount: Int {
+        locked { waiters.count }
+    }
+
     /// Lets every current and future waiter through. Does nothing once the gate is open or cancelled.
     public func open() {
         settle(.open)

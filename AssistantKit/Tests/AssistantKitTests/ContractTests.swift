@@ -4,6 +4,24 @@ import FoundationNetworking
 #endif
 @testable import AssistantKit
 
+/// Values appended from another task, read under a lock so tests can wait on them.
+private final class Recorder<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [Value] = []
+
+    var values: [Value] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    func append(_ value: Value) {
+        lock.lock()
+        recorded.append(value)
+        lock.unlock()
+    }
+}
+
 final class ContractEventTests: XCTestCase {
     private let hello = [ChatTurn(role: .user, text: "Hi")]
     private let mixed: [AssistantEvent] = [
@@ -92,7 +110,8 @@ final class ContractEventTests: XCTestCase {
     func testCancellingTheLegacyAdapterCancelsTheRequest() async throws {
         let transport = HangingTransport()
         let adapter = LegacyProviderAdapter(ClaudeProvider(configuration: ClaudeConfiguration(apiKey: "k"), transport: transport))
-        let consumer = Task { try await collectEvents(adapter.streamEvents(system: "S", turns: hello)) }
+        let turns = hello
+        let consumer = Task { try await collectEvents(adapter.streamEvents(system: "S", turns: turns)) }
         let requested = await waitUntil { transport.requests.count == 1 }
         XCTAssertTrue(requested)
         XCTAssertEqual(transport.terminationCount, 0)
@@ -103,29 +122,37 @@ final class ContractEventTests: XCTestCase {
     }
 
     func testCancellingConvertedStreamsCancelsTheProvider() async throws {
+        // Each half waits until an event has come all the way through, so the cancel always lands
+        // while the provider is hanging, with every relay running.
         let first = ScriptedProvider([.cue(.working), .reply(.text("Hi"))], hangs: true)
         let replies = AssistantEvents.replies(first.streamEvents(system: "S", turns: hello))
-        let consumer = Task { () -> [ReplyEvent] in
-            var received: [ReplyEvent] = []
+        let received = Recorder<ReplyEvent>()
+        let consumer = Task {
             for try await reply in replies { received.append(reply) }
-            return received
         }
-        try await Task.sleep(nanoseconds: 50_000_000)
+        let delivered = await waitUntil { received.values.count == 1 }
+        XCTAssertTrue(delivered)
         XCTAssertEqual(first.terminationCount, 0)
         consumer.cancel()
         let ended = await waitUntil { first.terminationCount == 1 }
         XCTAssertTrue(ended)
-        let received = try await consumer.value
-        XCTAssertEqual(received, [.text("Hi")])
+        await assertEndsAfterCancel(consumer)
+        XCTAssertEqual(received.values, [.text("Hi")])
 
-        let second = ScriptedProvider([], hangs: true)
+        let second = ScriptedProvider([.cue(.working), .reply(.text("Hi"))], hangs: true)
         let wrapped = AssistantEvents.wrap(second.streamReply(system: "S", turns: hello))
-        let wrapper = Task { try await collectEvents(wrapped) }
-        try await Task.sleep(nanoseconds: 20_000_000)
+        let relayed = Recorder<AssistantEvent>()
+        let wrapper = Task {
+            for try await event in wrapped { relayed.append(event) }
+        }
+        let wrappedDelivered = await waitUntil { relayed.values.count == 1 }
+        XCTAssertTrue(wrappedDelivered)
+        XCTAssertEqual(second.terminationCount, 0)
         wrapper.cancel()
         let wrappedEnded = await waitUntil { second.terminationCount == 1 }
         XCTAssertTrue(wrappedEnded, "cancellation reaches the provider through two relays")
-        _ = try? await wrapper.value
+        await assertEndsAfterCancel(wrapper)
+        XCTAssertEqual(relayed.values, [.reply(.text("Hi"))])
     }
 
     func testReplyHandoffCarriesItsReason() {
@@ -133,6 +160,17 @@ final class ContractEventTests: XCTestCase {
         XCTAssertEqual(handoff, ReplyHandoff(reason: "needs the news"))
         XCTAssertNotEqual(handoff, ReplyHandoff(reason: "other"))
         XCTAssertNotNil(handoff.errorDescription)
+    }
+
+    /// A cancelled stream ends either cleanly or with `CancellationError`: `cancel()` runs the
+    /// termination handler before finishing, so a provider's own `finish(throwing:)` can relay
+    /// through first. Any other error is a failure.
+    private func assertEndsAfterCancel(_ task: Task<Void, Error>, file: StaticString = #filePath, line: UInt = #line) async {
+        do {
+            try await task.value
+        } catch {
+            XCTAssertTrue(error is CancellationError, "got \(error)", file: file, line: line)
+        }
     }
 }
 
@@ -253,20 +291,24 @@ final class ContractCommitGateTests: XCTestCase {
                 released.increment()
             }
         }
-        try await Task.sleep(nanoseconds: 50_000_000)
+        let registered = await waitUntil { gate.waiterCount == 3 }
+        XCTAssertTrue(registered, "all three must be suspended in wait() before the gate opens")
         XCTAssertEqual(released.value, 0, "nobody passes before open")
         gate.open()
         for waiter in waiters { try await waiter.value }
         XCTAssertEqual(released.value, 3)
+        XCTAssertEqual(gate.waiterCount, 0)
     }
 
     func testCancelThrowsForCurrentAndLaterWaiters() async throws {
         let gate = CommitGate()
         let waiter = Task { try await gate.wait() }
-        try await Task.sleep(nanoseconds: 20_000_000)
+        let registered = await waitUntil { gate.waiterCount == 1 }
+        XCTAssertTrue(registered)
         gate.cancel()
         await assertCancelled(waiter)
         XCTAssertTrue(gate.isCancelled)
+        XCTAssertEqual(gate.waiterCount, 0)
         do {
             try await gate.wait()
             XCTFail("Expected CancellationError")
@@ -298,11 +340,13 @@ final class ContractCommitGateTests: XCTestCase {
     func testCancellingTheWaitingTaskLeavesTheGatePending() async throws {
         let gate = CommitGate()
         let waiter = Task { try await gate.wait() }
-        try await Task.sleep(nanoseconds: 20_000_000)
+        let registered = await waitUntil { gate.waiterCount == 1 }
+        XCTAssertTrue(registered, "the task must be suspended in wait() when it is cancelled")
         waiter.cancel()
         await assertCancelled(waiter)
         XCTAssertFalse(gate.isOpen)
         XCTAssertFalse(gate.isCancelled)
+        XCTAssertEqual(gate.waiterCount, 0, "a cancelled waiter is removed")
 
         let alreadyCancelled = Task {
             withUnsafeCurrentTask { $0?.cancel() }
@@ -417,23 +461,6 @@ final class ContractSameTurnTests: XCTestCase {
 
 /// Checks the shared test doubles behave as other test files rely on.
 final class ContractTestSupportTests: XCTestCase {
-    private final class Recorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var recorded: [String] = []
-
-        var values: [String] {
-            lock.lock()
-            defer { lock.unlock() }
-            return recorded
-        }
-
-        func append(_ value: String) {
-            lock.lock()
-            recorded.append(value)
-            lock.unlock()
-        }
-    }
-
     func testToolUseEventsStreamTheInputInTwoParts() throws {
         let json = #"{"title":"Call \"mum\"","due":"2026-10-07T17:00"}"#
         let events = try MockTransport.toolUse(index: 2, id: "toolu_9", name: "create_reminder", json: json).map { try JSONValue.parse($0) }
@@ -463,17 +490,18 @@ final class ContractTestSupportTests: XCTestCase {
         XCTAssertEqual(transport.cancellationCount, 0)
 
         let hanging = try await transport.lines(for: request("hang"))
-        let reader = Task { () -> [String] in
-            var received: [String] = []
+        let received = Recorder<String>()
+        let reader = Task {
             for try await line in hanging { received.append(line) }
-            return received
         }
-        try await Task.sleep(nanoseconds: 20_000_000)
+        let read = await waitUntil { received.values.count == 1 }
+        XCTAssertTrue(read)
+        XCTAssertEqual(transport.cancellationCount, 0)
         reader.cancel()
         let cancelled = await waitUntil { transport.cancellationCount == 1 }
         XCTAssertTrue(cancelled)
-        let received = try await reader.value
-        XCTAssertEqual(received, ["data: first"])
+        try await reader.value
+        XCTAssertEqual(received.values, ["data: first"])
     }
 
     func testScriptedProviderDelaysAndFails() async throws {
@@ -531,7 +559,7 @@ final class ContractTestSupportTests: XCTestCase {
 
     func testManualClockWakesSleepersInOrder() async throws {
         let clock = ManualClock(now: 10)
-        let order = Recorder()
+        let order = Recorder<String>()
         let early = Task { try await clock.sleep(until: 10.5); order.append("early") }
         let late = Task { try await clock.sleep(for: 2); order.append("late") }
         let doomed = Task { try await clock.sleep(until: 100) }
