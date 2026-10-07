@@ -43,6 +43,8 @@ struct SettingsView: View {
         .onChange(of: anthropicKey) { store.setSecret(anthropicKey, for: .anthropic) }
         .onChange(of: compatibleKey) { store.setSecret(compatibleKey, for: .compatible) }
         .onChange(of: openAIKey) { store.setSecret(openAIKey, for: .openAI) }
+        .onChange(of: store.settings.localModelID) { LocalModelHost.shared.unload(stopDownload: true) }
+        .onChange(of: store.settings.localSpeculativeDecoding) { LocalModelHost.shared.unload(stopDownload: true) }
         .onChange(of: store.settings.usesQwenListening) {
             if store.settings.usesQwenListening { QwenListener.shared.load() } else { QwenListener.shared.unload(stopDownload: true) }
         }
@@ -68,8 +70,8 @@ struct SettingsView: View {
             Picker("Provider", selection: $store.settings.provider) {
                 Text("Claude").tag(AssistantSettings.Provider.anthropic)
                 Text("OpenAI-compatible").tag(AssistantSettings.Provider.openAICompatible)
+                Text("On this iPhone").tag(AssistantSettings.Provider.onDevice)
             }
-            .pickerStyle(.segmented)
 
             switch store.settings.provider {
             case .anthropic:
@@ -114,6 +116,8 @@ struct SettingsView: View {
                 SecureField("API key", text: $compatibleKey)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+            case .onDevice:
+                onDeviceRows
             }
         } header: {
             Text("Model")
@@ -123,7 +127,35 @@ struct SettingsView: View {
                 Text("Get a key at console.anthropic.com. Low effort answers fastest, which suits voice. Keys are stored in the iOS Keychain on this device.")
             case .openAICompatible:
                 Text("Works with any service that offers an OpenAI-style chat completions API, such as Doubao on Volcengine Ark, DeepSeek, or OpenAI. Web search is available with Claude only.")
+            case .onDevice:
+                Text("Replies are generated on this iPhone and work offline once the model is downloaded (Wi-Fi only). There's no web search, and answers are simpler than Claude's. Best on iPhone 15 Pro or newer.")
             }
+        }
+    }
+
+    @ViewBuilder
+    private var onDeviceRows: some View {
+        let option = LocalModelCatalog.option(for: store.settings.localModelID)
+        Picker("Model", selection: $store.settings.localModelID) {
+            ForEach(LocalModelCatalog.options) { option in
+                Text(option.displayName).tag(option.id)
+            }
+        }
+        if let option {
+            Text(option.note)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        Toggle("Speculative decoding", isOn: $store.settings.localSpeculativeDecoding)
+            .disabled(option?.supportsSpeculativeDecoding != true)
+        Text(localStatus)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        if LocalModelHost.shared.status == .off || isLocalFailure {
+            Button("Download and load now") { LocalModelHost.shared.prepare(store.settings) }
+        }
+        NavigationLink("Benchmark") {
+            LocalBenchmarkView(store: store)
         }
     }
 
@@ -227,6 +259,27 @@ struct SettingsView: View {
             return progress < 1 ? "Downloading about 1 GB over Wi-Fi… \(Int(progress * 100))%. Keep the app open." : "Loading…"
         case .ready:
             return "Ready."
+        case .failed(let message):
+            return message
+        }
+    }
+
+    private var isLocalFailure: Bool {
+        if case .failed = LocalModelHost.shared.status { return true }
+        return false
+    }
+
+    private var localStatus: String {
+        let host = LocalModelHost.shared
+        let speculation = LocalModelCatalog.option(for: store.settings.localModelID)?.supportsSpeculativeDecoding == true
+            ? "" : " Speculative decoding needs a model with a draft model; this one's hybrid attention can't roll back rejected drafts."
+        switch host.status {
+        case .off:
+            return "Downloads and loads the first time you use it." + speculation
+        case .loading(let progress):
+            return progress < 1 ? "Downloading over Wi-Fi… \(Int(progress * 100))%. Keep the app open." : "Loading…"
+        case .ready:
+            return "Ready. Speculative decoding: \(host.speculation)."
         case .failed(let message):
             return message
         }

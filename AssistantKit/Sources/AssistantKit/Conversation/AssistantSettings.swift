@@ -5,6 +5,8 @@ public struct AssistantSettings: Codable, Equatable, Sendable {
     public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
         case anthropic
         case openAICompatible
+        /// A model running on the iPhone through MLX.
+        case onDevice
 
         public var id: String { rawValue }
     }
@@ -25,6 +27,9 @@ public struct AssistantSettings: Codable, Equatable, Sendable {
     public var webSearchEnabled = true
     public var compatibleBaseURL = CompatibleServices.presets[0].baseURL
     public var compatibleModel = ""
+    public var localModelID = LocalModelCatalog.defaultModelID
+    /// Speeds up models that have a draft model by checking several drafted tokens per step.
+    public var localSpeculativeDecoding = true
 
     // Personalization
     public var userName = ""
@@ -56,6 +61,7 @@ public struct AssistantSettings: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case provider, claudeModel, effort, webSearchEnabled, compatibleBaseURL, compatibleModel
+        case localModelID, localSpeculativeDecoding
         case userName, customInstructions
         case speechLocale, voiceEngine, appleVoiceIdentifier, speechRate, openAIVoice, openAISpeechModel
         case endOfTurnDelay, voiceInterruptions, echoCancellation, qwenListening
@@ -74,6 +80,8 @@ public struct AssistantSettings: Codable, Equatable, Sendable {
         webSearchEnabled = value(.webSearchEnabled, defaults.webSearchEnabled)
         compatibleBaseURL = value(.compatibleBaseURL, defaults.compatibleBaseURL)
         compatibleModel = value(.compatibleModel, defaults.compatibleModel)
+        localModelID = value(.localModelID, defaults.localModelID)
+        localSpeculativeDecoding = value(.localSpeculativeDecoding, defaults.localSpeculativeDecoding)
         userName = value(.userName, defaults.userName)
         customInstructions = value(.customInstructions, defaults.customInstructions)
         speechLocale = value(.speechLocale, defaults.speechLocale)

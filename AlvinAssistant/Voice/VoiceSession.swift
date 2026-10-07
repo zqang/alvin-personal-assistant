@@ -64,6 +64,7 @@ final class VoiceSession: Identifiable {
         switch store.settings.provider {
         case .anthropic: return ClaudeModelCatalog.displayName(for: store.settings.claudeModel)
         case .openAICompatible: return store.settings.compatibleModel
+        case .onDevice: return LocalModelCatalog.option(for: store.settings.localModelID)?.displayName ?? "On-device model"
         }
     }
 
@@ -92,9 +93,20 @@ final class VoiceSession: Identifiable {
         }
         recognizer.onEvent = { [weak self] event in self?.handle(event) }
         self.recognizer = recognizer
+        if settings.provider == .onDevice {
+            LocalModelHost.shared.prepare(settings)
+        }
         if settings.usesQwenListening {
             QwenListener.shared.isWanted = true
-            QwenListener.shared.load()
+            if settings.provider == .onDevice {
+                // One model loads at a time, and the reply model gets the memory first.
+                Task {
+                    await LocalModelHost.shared.settle()
+                    if QwenListener.shared.isWanted { QwenListener.shared.load() }
+                }
+            } else {
+                QwenListener.shared.load()
+            }
         }
 
         let speaker = Speaker(audio: audio, engine: speechEngine(for: settings), languageHint: settings.speechLocale)

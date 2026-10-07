@@ -32,6 +32,14 @@ service, such as **Doubao on Volcengine Ark**, DeepSeek, or OpenAI.
 - **Sharper listening (optional).** Turn on **Qwen3-ASR listening** and each finished turn is transcribed again
   on the iPhone by [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) before it's sent, for English and
   Chinese (China mainland). Apple's recognizer still drives the live captions and turn-taking.
+- **On-device replies (optional).** Choose **Provider › On this iPhone** and replies come from a model running
+  on the phone with MLX, offline once downloaded:
+  - [Underdog Woof 4B](https://huggingface.co/ConwayResearch/Underdog-Woof-4B-1.1)
+  - Qwen3.5 2B
+  - Qwen3 4B with a 0.6B draft model for speculative decoding
+
+  The model keeps its cache between turns, so each reply only reads the new message. **Settings › Benchmark**
+  measures it on your phone.
 - **Web search.** "What's the weather tomorrow?" and "Any news on…?" work, because Claude searches the web
   server-side.
 - **Private by default.** Speech is transcribed on the iPhone. API keys live in the iOS Keychain. There's no
@@ -66,6 +74,9 @@ Tips:
 - **Voice engine › OpenAI** gives the most natural speech. It needs an OpenAI API key and costs a little per
   minute of audio. If it fails, the app falls back to the built-in voice.
 - The simulator can run the app, but voice mode needs a real iPhone for the microphone and echo cancellation.
+- **On-device replies** download 2–2.7 GB the first time (Wi-Fi only) and run only while the app is open. Run
+  the benchmark from a **Release** build and copy the results. Qwen3-ASR listening loads after the reply model
+  and gives way to it if memory is short.
 - **Qwen3-ASR listening** downloads about 1 GB the first time (use Wi-Fi), needs a recent iPhone (iPhone 15 Pro
   or newer is best), and works only while the app is open; with the screen locked, turns use Apple's text.
   Build with the **Release** configuration for realistic speed.

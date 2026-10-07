@@ -28,6 +28,8 @@ enum ReplyService {
             if store.secret(.compatible).isEmpty { return "Add an API key for your model service in Settings." }
             if settings.compatibleModel.trimmed.isEmpty { return "Enter a model ID in Settings." }
             return nil
+        case .onDevice:
+            return LocalModelCatalog.option(for: settings.localModelID) == nil ? "Choose an on-device model in Settings." : nil
         }
     }
 
@@ -54,6 +56,8 @@ enum ReplyService {
                 model: settings.compatibleModel.trimmed
             )
             return OpenAICompatibleProvider(configuration: configuration, transport: transport)
+        case .onDevice:
+            return LocalProvider(settings: settings)
         }
     }
 }

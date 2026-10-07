@@ -1,6 +1,6 @@
 # Plan: on-device replies and multi-agent orchestration
 
-Status: proposal. Nothing here is built yet.
+Status: Phases 0 and 1 are built (on-device provider and benchmark; see `AlvinAssistant/OnDevice/`). The rest is a proposal.
 
 This plan borrows two ideas:
 
@@ -90,9 +90,12 @@ output such as `{"route":"local|tools|cloud|deep"}`.
   resolve (3.31.4) provides the following:
   - `ChatSession` keeps the KV cache between turns and can `saveCache(to:)`. Our history is append-only, so
     each turn only prefills the new turn.
-  - `SpeculativeDecodingConfig` runs a draft model with a memory policy (`.recommendedWorkingSet`). Use a small
-    model with the same tokenizer as the draft, for example Qwen3.5 0.8B or Woof 0.8B for Woof 4B. This is the
-    same verify-a-block-per-step idea as Husky.
+  - `SpeculativeDecodingConfig` runs a draft model with a memory policy (`.recommendedWorkingSet`). This is the
+    same verify-a-block-per-step idea as Husky. **It does not work for Woof or Qwen3.5.** They are hybrid
+    models (Gated DeltaNet layers), and their recurrent state can't be rolled back after a rejected draft. The
+    library refuses with "Speculative decoding requires trimmable KV caches." Making it work means snapshotting
+    and replaying that state, which is Husky-level engine work. The app therefore offers speculative decoding
+    on Qwen3 4B, which uses plain attention, with Qwen3 0.6B as the draft.
   - `ChatSession.tools` / `toolDispatch` handle local tool calls.
 
   The library does not have **prompt-lookup drafting** (proposing tokens copied from the prompt), which is
@@ -142,8 +145,8 @@ This is required before any local or cloud tool use beyond `web_search`:
 
 | Phase | Deliverable | Exit criteria |
 |---|---|---|
-| 0. Spike | Load Woof 2B/4B and a Qwen3.5 instruct model with MLXLLM on an iPhone 15 Pro and 17 Pro; script about 30 voice-style prompts in English and Chinese | Time to first token, tokens/s, peak memory with ASR loaded, and a quality rating recorded in this doc |
-| 1. Local provider | `Provider.onDevice`, `LocalLLMProvider`, `OnDeviceModels` coordinator, Settings UI and download flow | Offline voice turns work end to end; unit tests for the new settings decoding |
+| 0. Spike (built: Settings › Benchmark) | Load Woof 4B and a Qwen3.5 instruct model with MLXLLM on an iPhone 15 Pro and 17 Pro; script about 30 voice-style prompts in English and Chinese | Time to first token, tokens/s, peak memory with ASR loaded, and a quality rating recorded in this doc |
+| 1. Local provider (built) | `Provider.onDevice`, `LocalProvider` + `LocalModelHost`, GPU and memory hand-off with Qwen3-ASR, Settings UI and download flow | Offline voice turns work end to end; unit tests for the new settings decoding |
 | 2. Orchestrator | `Orchestrator` + heuristic `RouteDecider` in AssistantKit, with tests; offline fallback to local | Routing table tested; no regression in Claude latency |
 | 3. Tools | `ChatTurn`/`ReplyEvent` tool support, `AgentLoop`, Claude client tools, EventKit reminders/calendar | "Remind me at 5 to call mum" works by voice, through both Claude and local |
 | 4. Deep mode | `Deliberation` with parallel workers and a merger | Better answers on a hand-picked hard set, with the first audio within about 1.5 s |
