@@ -2,7 +2,9 @@ name: iOS
 
 on:
   push:
+    paths-ignore: ["docs/**", "scripts/**", "README.md", ".github/workflows/model-facts.yml", ".github/workflows/drafter-lab.yml"]
   pull_request:
+    paths-ignore: ["docs/**", "scripts/**", "README.md", ".github/workflows/model-facts.yml", ".github/workflows/drafter-lab.yml"]
   workflow_dispatch:
 
 concurrency:
@@ -46,3 +48,13 @@ jobs:
             -skipPackagePluginValidation \
             -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO
+
+  linux:
+    name: AssistantKit on Linux (informational)
+    runs-on: ubuntu-24.04
+    container: swift:6.2-noble
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test --package-path AssistantKit
