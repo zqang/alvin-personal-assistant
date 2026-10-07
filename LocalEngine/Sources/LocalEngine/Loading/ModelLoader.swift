@@ -20,6 +20,7 @@ public struct LoadedModel: @unchecked Sendable {
     public let tokenizer: any MLXLMCommon.Tokenizer
     public let renderer: any ChatTemplateRendering
     /// EOS ids from config.json / generation_config.json, and the inferred tool-call format.
+    /// `ModelLoader` leaves `stopStrings` and `extraEOSTokens` empty.
     public let configuration: ModelConfiguration
     /// The same model, for the `ChatSession` fallback (no second load).
     public let container: ModelContainer
@@ -49,8 +50,7 @@ public enum ModelLoader {
     /// When `typeRegistry` can create the checkpoint's `model_type`, it is used through a private
     /// `LLMModelFactory`, so the global `LLMTypeRegistry.shared` is never changed. If that model
     /// code throws `EngineModelError.unsupported`, the stock factory loads the model instead.
-    /// No stop strings or extra EOS tokens are configured: a text-level stop filter would leave
-    /// tokens in the cache that the reply never shows.
+    /// The loaded model has no stop strings and no extra EOS tokens (see `makeLoadedModel`).
     public static func load(directory: URL, id: String, typeRegistry: ModelTypeRegistry<LanguageModel>? = nil) async throws -> LoadedModel {
         let configurationData = try Data(contentsOf: directory.appending(component: "config.json"))
         let base = try JSONDecoder.json5().decode(BaseConfiguration.self, from: configurationData)
@@ -77,10 +77,20 @@ public enum ModelLoader {
     /// Wraps an already loaded `ModelContext`. The tokenizer must also be a
     /// `ChatTemplateRendering` (the `TokenizerBridge` from `TransformersTokenizerLoader`, or a
     /// test tokenizer).
+    ///
+    /// The factory copies any `stop_strings` / `stop` list from generation_config.json into
+    /// `configuration.stopStrings`. Those and `extraEOSTokens` are cleared here, for both
+    /// `LoadedModel.configuration` and the context inside `container`, so neither the engine nor
+    /// the `ChatSession` fallback runs a text-level stop filter: it would leave tokens in the
+    /// cache that the reply never shows. The engine stops on `stopTokenIDs`, and `ChatSession`
+    /// on `eosTokenIds` and the tokenizer's EOS token.
     public static func makeLoadedModel(context: ModelContext, id: String, directory: URL, modelType: String) throws -> LoadedModel {
         guard let renderer = context.tokenizer as? any ChatTemplateRendering else {
             throw EngineModelError.unsupported("a tokenizer without chat template rendering")
         }
+        var context = context
+        context.configuration.stopStrings = []
+        context.configuration.extraEOSTokens = []
         let model = context.model
         let tokenizer = context.tokenizer
         let configuration = context.configuration

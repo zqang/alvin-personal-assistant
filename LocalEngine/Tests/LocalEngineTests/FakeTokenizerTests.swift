@@ -204,4 +204,28 @@ final class FakeTokenizerTests: XCTestCase {
         XCTAssertEqual(loaded.modelType, "qwen3")
         XCTAssertEqual(loaded.id, "test/tiny-qwen3")
     }
+
+    /// A `stop` list in generation_config.json reaches `configuration.stopStrings`; the loader
+    /// drops it (and `extraEOSTokens`) for the engine and for the `ChatSession` fallback.
+    func testLoadedModelDropsStopStringsForEngineAndFallback() async throws {
+        try MetalAvailability.require()
+        let model = try TinyModels.makeStockQwen3(seed: 1)
+        let configuration = ModelConfiguration(
+            id: "test/tiny-qwen3", extraEOSTokens: ["<think>"], stopStrings: ["Observation:"],
+            eosTokenIds: [FakeChatMLTokenizer.endOfText], toolCallFormat: .json)
+        let context = ModelContext(
+            configuration: configuration, model: model, processor: StandInUserInputProcessor(),
+            tokenizer: FakeChatMLTokenizer())
+        let loaded = try ModelLoader.makeLoadedModel(
+            context: context, id: "test/tiny-qwen3", directory: FileManager.default.temporaryDirectory, modelType: "qwen3")
+        let fallback = await loaded.container.configuration
+        for kept in [loaded.configuration, fallback] {
+            XCTAssertEqual(kept.stopStrings, [])
+            XCTAssertEqual(kept.effectiveStopStrings, [])
+            XCTAssertEqual(kept.extraEOSTokens, [])
+            XCTAssertEqual(kept.eosTokenIds, [FakeChatMLTokenizer.endOfText])
+            XCTAssertEqual(kept.toolCallFormat, .json)
+        }
+        XCTAssertEqual(loaded.stopTokenIDs, [FakeChatMLTokenizer.imEnd, FakeChatMLTokenizer.endOfText])
+    }
 }
