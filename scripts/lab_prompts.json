@@ -255,7 +255,8 @@
     "A value of the form YYYY-MM-DDTHH:MM matches that local date, hour and minute; seconds and any offset are ignored.",
     "An integer matches the same number, also when given as a string.",
     "Any other string matches when each of its space-separated words appears in the value, ignoring case and punctuation.",
-    "A list matches when any of its items matches."
+    "A list matches when any of its items matches.",
+    "tools_local offers only local_tools. A prompt whose expected tool is outside it expects handoff_to_cloud instead, with any reason."
   ],
   "local_tools": [
     "create_event",

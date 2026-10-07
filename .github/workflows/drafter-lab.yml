@@ -6,6 +6,15 @@ name: Drafter lab
 # The lab runs when its script, prompts, model list or this file change, when the head commit message
 # contains [ci lab], or when started by hand. A path filter on `push` would make the [ci lab] tag
 # impossible, so every push starts the small gate job and only the gate decides whether the macOS job runs.
+#
+# Which files a push changed:
+# - an ordinary push (the old tip is an ancestor of the new one): the diff between the two tips, as a
+#   `paths:` filter would see it;
+# - a new branch, or a force push after a rebase (the old tip is zero, unfetched or not an ancestor):
+#   the files of the commits this push introduced, from the event payload. Only commits marked `distinct`
+#   (never pushed before) count, so commits the branch merely carries from the integration branch, or picks
+#   up by rebasing onto it, do not start the lab. There is deliberately no fallback to the default branch:
+#   it is behind the integration branch, so every new branch would look as if it changed the lab files.
 on:
   push:
   workflow_dispatch:
@@ -30,30 +39,34 @@ jobs:
           EVENT: ${{ github.event_name }}
           MESSAGE: ${{ github.event.head_commit.message }}
           BEFORE: ${{ github.event.before }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
+          lab_files='scripts/(drafter_lab\.py|lab_prompts\.json|lab_models\.txt)|\.github/workflows/drafter-lab\.yml'
           run=false
           if [ "$EVENT" = "workflow_dispatch" ]; then
-            run=true
-          elif printf '%s' "$MESSAGE" | grep -qF '[ci lab]'; then
-            run=true
+            run=true; why="started by hand"
+          elif [[ "$MESSAGE" == *"[ci lab]"* ]]; then
+            run=true; why="[ci lab] in the head commit message"
           else
-            base=""
-            if [ -n "$BEFORE" ] && ! printf '%s' "$BEFORE" | grep -qE '^0+$' && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-              base="$BEFORE"
+            if [ -n "$BEFORE" ] && ! [[ "$BEFORE" =~ ^0+$ ]] \
+              && git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
+              && git merge-base --is-ancestor "$BEFORE" HEAD; then
+              how="changed since $BEFORE"
+              changed=$(git diff --name-only "$BEFORE" HEAD)
             else
-              # A new branch or a force push: compare with where it left the default branch.
-              base=$(git merge-base HEAD "origin/$DEFAULT_BRANCH" 2>/dev/null || true)
+              how="changed by the commits this push introduced"
+              changed=$(jq -r '[.commits[]? | select(.distinct == true)
+                                | ((.added // []) + (.modified // []) + (.removed // []))[]] | unique | .[]' \
+                        "$GITHUB_EVENT_PATH")
             fi
-            if [ -z "$base" ]; then
-              run=true
-            elif git diff --name-only "$base" HEAD \
-              | grep -qxE 'scripts/(drafter_lab\.py|lab_prompts\.json|lab_models\.txt)|\.github/workflows/drafter-lab\.yml'; then
-              run=true
+            hits=$(printf '%s\n' "$changed" | grep -xE "$lab_files" || true)
+            if [ -n "$hits" ]; then
+              run=true; why="lab files $how: $(printf '%s' "$hits" | tr '\n' ' ')"
+            else
+              why="no lab file $how"
             fi
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
-          echo "Drafter lab runs: $run"
+          echo "Drafter lab runs: $run ($why)"
 
   lab:
     name: Drafter lab on the Metal GPU

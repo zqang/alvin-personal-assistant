@@ -15,12 +15,15 @@ Default mode, for Woof 4B (or Qwen3.5-2B if mlx-lm can't load Woof) and Qwen3.5-
    accepts the drafts that match it; at T=0.7 a round is credited with its expected accepted count,
    the running product of the drafted tokens' probabilities. Drafts past the first one that leaves
    the greedy path have no recorded distribution and count as rejected, so T=0.7 is a lower bound.
-   The projected speedup uses the default cost curve of plan section 4.7.
-4. Tool-call accuracy: name and key-argument matches against each prompt's `expect`.
+   The projected speedup uses the default cost curve of plan section 4.7. The pooled "all" figures
+   cover chat, copy and tools, each prompt once (tools_local replays the tool prompts).
+4. Tool-call accuracy: name and key-argument matches against each prompt's `expect`. In tools_local, a
+   prompt whose tool is outside the on-device subset expects handoff_to_cloud instead.
 5. As-generated versus canonical tokens around a past reply (what the template re-renders).
 
 --dflash mode runs `dflash generate` (dflash-mlx) with z-lab/Qwen3.5-4B-DFlash against the Woof
-snapshot on 6 prompts, greedy, and records tokens per round and acceptance.
+snapshot on 6 prompts, greedy, and records tokens per round, accepted draft tokens per round and
+acceptance, with both readings of the Swift port threshold.
 
 lab.json holds everything; a Markdown summary of the key tables is written next to it.
 """
@@ -53,6 +56,8 @@ FALLBACK = "mlx-community/Qwen3.5-2B-4bit"
 COMPARE = "mlx-community/Qwen3.5-0.8B-MLX-4bit"
 DFLASH_DRAFT = "z-lab/Qwen3.5-4B-DFlash"
 DFLASH_PROMPTS = ["chat-01", "chat-05", "copy-01", "copy-03", "copy-06", "tool-01"]
+# Go/no-go for the deferred Swift DFlash port (plan section 3 and WP01 item 8; see run_dflash).
+PORT_THRESHOLD = 2.5
 
 KS = [1, 2, 3, 4, 6, 8]
 MAX_DRAFT = max(KS)
@@ -64,6 +69,9 @@ TOP_P = 0.8
 TOP_K = 20
 
 SETS = ["chat", "copy", "tools", "tools_local"]
+# The sets pooled into the "all" drafting aggregate: every prompt once. tools_local replays the tools
+# prompts with fewer schemas, so pooling it too would count each tool prompt twice.
+ALL_SETS = ["chat", "copy", "tools"]
 DRAFTERS = [
     "prompt_lookup",
     "prompt_lookup_n2",
@@ -518,14 +526,15 @@ def match_value(expected, actual):
 
 
 def score_tool_call(expect, text):
+    """expect["name"] None means no tool call is expected."""
     calls = parse_tool_calls(text)
     first = calls[0] if calls else None
-    name_ok = bool(first) and first["name"] == expect["name"]
+    name_ok = first is None if expect["name"] is None else bool(first) and first["name"] == expect["name"]
     arg_results = {}
     if first:
         for key, value in (expect.get("args") or {}).items():
             arg_results[key] = match_value(value, (first.get("arguments") or {}).get(key))
-    args_ok = name_ok and all(arg_results.values())
+    args_ok = name_ok and (first is None or all(arg_results.values()))
     return {
         "calls": calls,
         "parsed": bool(calls),
@@ -553,13 +562,30 @@ def template_tools(schemas):
     ]
 
 
+def local_expect(prompts, expect):
+    """The expected call when only the on-device subset is offered (tools_local).
+
+    A prompt whose tool is outside the subset cannot be served on the device, so it expects
+    handoff_to_cloud (any reason), or no call when the subset has no handoff tool.
+    """
+    local = set(prompts["local_tools"])
+    if expect["name"] in local:
+        return expect
+    return {"name": "handoff_to_cloud" if "handoff_to_cloud" in local else None, "args": {}}
+
+
 def lab_items(prompts, limit=0):
     """Every prompt run, in order: chat, copy, tools (every schema), tools_local (on-device subset)."""
     items = []
     for set_name in SETS:
         source = prompts["tools" if set_name.startswith("tools") else set_name]
         for item in source[: limit or None]:
-            items.append({"set": set_name, **item})
+            entry = {"set": set_name, **item}
+            if set_name == "tools_local" and "expect" in item:
+                entry["expect"] = local_expect(prompts, item["expect"])
+                if entry["expect"] is not item["expect"]:
+                    entry["expect_original"] = item["expect"]
+            items.append(entry)
     return items
 
 
@@ -759,13 +785,14 @@ def drafting_for_model(records, prompts, tokenizer, tool_format, excluded, singl
     out = {}
     with_t07 = all(r.get("dists") is not None for r in records if r.get("trajectory"))
     sets = list(sums)
+    pooled = [s for s in sets if s in ALL_SETS]
     for set_name in sets + ["all"]:
         out[set_name] = {}
         for drafter in DRAFTERS:
             if set_name == "all":
                 merged = {}
                 positions = [0, 0]
-                for s in sets:
+                for s in pooled:
                     if drafter not in sums[s]:
                         continue
                     for k, v in sums[s][drafter].items():
@@ -878,8 +905,9 @@ def run_model(repo, prompts, args):
     records = []
     for item in lab_items(prompts, args.limit):
         record = {"set": item["set"], "id": item["id"], "input": item.get("input", "spoken"), "text": item["text"]}
-        if "expect" in item:
-            record["expect"] = item["expect"]
+        for key in ("expect", "expect_original"):
+            if key in item:
+                record[key] = item[key]
         try:
             prompt_text = render(tokenizer, messages_for(prompts, item), schemas_for(prompts, item["set"]))
             prompt_ids = encode(tokenizer, prompt_text)
@@ -964,15 +992,16 @@ def tool_accuracy(records):
             continue
         per_prompt = []
         for r in rows:
+            entry = {"id": r["id"], "text": r["text"], "expected": r["expect"]}
+            if "expect_original" in r:
+                entry["expected_in_tools"] = r["expect_original"]
             if r.get("error"):
-                per_prompt.append({"id": r["id"], "error": r["error"], "name_ok": False, "args_ok": False, "parsed": False})
+                per_prompt.append({**entry, "error": r["error"], "name_ok": False, "args_ok": False, "parsed": False})
                 continue
             score = score_tool_call(r["expect"], r["output"])
             first = score["calls"][0] if score["calls"] else None
             per_prompt.append({
-                "id": r["id"],
-                "text": r["text"],
-                "expected": r["expect"],
+                **entry,
                 "got": {"name": first["name"], "arguments": first["arguments"]} if first else None,
                 "calls": len(score["calls"]),
                 "parsed": score["parsed"],
@@ -986,6 +1015,8 @@ def tool_accuracy(records):
         n = len(per_prompt)
         out[set_name] = {
             "prompts": n,
+            # Prompts whose tool is outside the on-device subset; they expect handoff_to_cloud (see local_expect).
+            "expect_handoff": sum(1 for r in rows if "expect_original" in r),
             "parsed": sum(p["parsed"] for p in per_prompt),
             "name_accuracy": ratio(sum(p["name_ok"] for p in per_prompt), n),
             "args_accuracy": ratio(sum(p["args_ok"] for p in per_prompt), n),
@@ -1138,9 +1169,16 @@ def run_dflash(prompts, args):
         result["mean_tokens_per_round"] = round(sum(r["tokens_per_round"] for r in ok) / len(ok), 3)
         result["mean_accepted_per_round"] = round(sum(r["mean_accepted_per_round"] for r in ok) / len(ok), 3)
         result["mean_acceptance"] = round(sum(r.get("acceptance") or 0 for r in ok) / len(ok), 3)
-        # Plan section 3: a Swift DFlash port is scheduled only at >= 2.5 accepted tokens per round.
-        result["port_threshold_accepted_per_round"] = 2.5
-        result["meets_port_threshold"] = result["mean_accepted_per_round"] >= 2.5
+        # The Swift DFlash port's go/no-go. Plan section 3 says ">= 2.5 accepted tokens per round"; WP01 item 8
+        # says "DFlash tokens per round". Tokens per round include the target's own token each round, accepted
+        # draft tokens do not, so the two readings differ by one. Both are reported; the orchestrator decides.
+        result["port_threshold"] = {
+            "value": PORT_THRESHOLD,
+            "accepted_draft_tokens_per_round": {"mean": result["mean_accepted_per_round"],
+                                                "met": result["mean_accepted_per_round"] >= PORT_THRESHOLD},
+            "tokens_per_round": {"mean": result["mean_tokens_per_round"],
+                                 "met": result["mean_tokens_per_round"] >= PORT_THRESHOLD},
+        }
     return result
 
 
@@ -1185,7 +1223,8 @@ def lab_markdown(result):
                            "Prefill tok/s", "Teacher-forced argmax ≠ greedy"], rows)
         drafting = m.get("drafting") or {}
         for set_name in [s for s in SETS if s in drafting] + (["all"] if "all" in drafting else []):
-            lines += ["", f"### Drafting: {set_name}", ""]
+            title = f"all ({', '.join(ALL_SETS)}; each prompt once)" if set_name == "all" else set_name
+            lines += ["", f"### Drafting: {title}", ""]
             rows = []
             for drafter, d in drafting[set_name].items():
                 k4 = d["by_k"].get("4", {})
@@ -1203,20 +1242,25 @@ def lab_markdown(result):
                                "Acceptance by depth K=4, T=0", "Acceptance by depth K=4, T=0.7"], rows)
         pl = ((drafting.get("all") or {}).get("prompt_lookup") or {}).get("by_k", {}).get("4", {}).get("by_match_length")
         if pl:
-            lines += ["", "### Prompt lookup by match length (all sets, K=4)", ""]
+            lines += ["", f"### Prompt lookup by match length ({', '.join(ALL_SETS)}; K=4)", ""]
             lines += md_table(["Match length", "Rounds", "Mean accepted T=0", "First draft accepted T=0", "Mean accepted T=0.7",
                                "First draft accepted T=0.7"],
                               [[b, v["rounds"], fmt(v["mean_accepted_t0"]), fmt(v["first_draft_accepted_t0"]),
                                 fmt(v.get("mean_accepted_t07")), fmt(v.get("first_draft_accepted_t07"))] for b, v in pl.items()])
         tools = m.get("tool_accuracy") or {}
         for set_name, t in tools.items():
+            handoff = (f" {t['expect_handoff']} prompt(s) ask for a tool outside the on-device subset and expect "
+                       f"handoff_to_cloud instead." if t.get("expect_handoff") else "")
             lines += ["", f"### Tool calls: {set_name}", "",
                       f"Name accuracy {fmt(t['name_accuracy'])}, arguments {fmt(t['args_accuracy'])} "
-                      f"({fmt(t['args_accuracy_given_name'])} when the name was right), parsed {t['parsed']}/{t['prompts']}.", ""]
+                      f"({fmt(t['args_accuracy_given_name'])} when the name was right), parsed {t['parsed']}/{t['prompts']}.{handoff}", ""]
             rows = []
             for p in t["per_prompt"]:
                 got = p.get("got")
-                rows.append([p["id"], p.get("text", ""), (p.get("expected") or {}).get("name", ""),
+                expected = (p.get("expected") or {}).get("name", "") or "no call"
+                if p.get("expected_in_tools"):
+                    expected += f" (not {p['expected_in_tools']['name']})"
+                rows.append([p["id"], p.get("text", ""), expected,
                              got["name"] if got else "–", "yes" if p["name_ok"] else "no", "yes" if p["args_ok"] else "no",
                              json.dumps(got["arguments"], ensure_ascii=False)[:120] if got else (p.get("error") or "no call"),
                              p.get("output_tokens", "–")])
@@ -1255,9 +1299,18 @@ def dflash_markdown(result):
     lines += md_table(["Prompt", "Tokens", "Rounds", "Tokens per round", "Accepted per round", "Acceptance",
                        "Copy-spec rounds / tokens", "tok/s", "vs mlx-lm greedy", "Same text", "Error"], rows)
     if "mean_tokens_per_round" in result:
-        lines += ["", f"Mean accepted tokens per round {result['mean_accepted_per_round']} (port threshold 2.5: "
-                      f"{'met' if result['meets_port_threshold'] else 'not met'}); mean tokens per round "
-                      f"{result['mean_tokens_per_round']}; mean acceptance {result['mean_acceptance']}."]
+        gate = result["port_threshold"]
+
+        def verdict(reading):
+            return "met" if gate[reading]["met"] else "not met"
+
+        lines += ["", f"Mean tokens per round {result['mean_tokens_per_round']} (each round's accepted draft tokens plus "
+                      f"the target's own token); mean accepted draft tokens per round {result['mean_accepted_per_round']}; "
+                      f"mean acceptance {result['mean_acceptance']}.", "",
+                  f"Swift port threshold {gate['value']}, two readings: tokens per round ≥ {gate['value']}: "
+                  f"{verdict('tokens_per_round')}; accepted draft tokens per round ≥ {gate['value']}: "
+                  f"{verdict('accepted_draft_tokens_per_round')}. Plan section 3 says \"accepted tokens per round\" "
+                  f"and WP01 item 8 says \"tokens per round\"; when the readings disagree, the orchestrator decides."]
     if result.get("error"):
         lines += ["", f"Error: {result['error']}"]
     return "\n".join(lines) + "\n"
@@ -1312,6 +1365,12 @@ def self_test():
     assert match_value("2026-10-08", "2026-10-08T00:00:00") and not match_value("2026-10-08T08:00", "2026-10-08")
     assert match_value("快递", "去取快递") and match_value("call mum", "Call Mum!") and not match_value("buy milk", "milk")
     assert match_value(1200, "1200") and match_value(["a b", "c"], "c d")
+    assert score_tool_call({"name": None, "args": {}}, "Sorry, I can't do that here.")["args_ok"]
+    assert not score_tool_call({"name": None, "args": {}}, js)["name_ok"]
+    subset = {"local_tools": ["handoff_to_cloud", "set_timer"]}
+    assert local_expect(subset, {"name": "set_timer", "args": {"seconds": 600}})["name"] == "set_timer"
+    assert local_expect(subset, {"name": "list_timers", "args": {}}) == {"name": "handoff_to_cloud", "args": {}}
+    assert local_expect({"local_tools": ["set_timer"]}, {"name": "list_timers", "args": {}})["name"] is None
 
 
 def main(argv=None):
