@@ -47,8 +47,9 @@ public struct LocalSessionPlan: Equatable, Sendable {
     }
 
     /// Generated replies are compared without surrounding whitespace, which storage trims.
+    /// Tool rounds must match exactly: they are part of what the model saw.
     static func sameTurn(_ a: ChatTurn, _ b: ChatTurn) -> Bool {
-        a.role == b.role && a.context == b.context && a.text.trimmed == b.text.trimmed
+        a.role == b.role && a.context == b.context && a.text.trimmed == b.text.trimmed && a.toolRounds == b.toolRounds
     }
 
     /// The text a turn is sent to the model as: its context tag, then what was said.
