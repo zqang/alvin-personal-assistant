@@ -56,6 +56,8 @@ final class ChatMessage {
     var isVoice: Bool
     var statusRaw: String
     var errorText: String?
+    /// JSON for `toolRounds`; nil when the reply ran no tools.
+    var toolRoundsData: Data? = nil
     var conversation: Conversation?
 
     init(role: ChatRole, text: String, isVoice: Bool, status: StoredMessage.Status = .complete) {
@@ -75,7 +77,24 @@ final class ChatMessage {
         set { statusRaw = newValue.rawValue }
     }
 
+    /// Client tool rounds the reply ran, in order.
+    var toolRounds: [ToolRound] {
+        get {
+            guard let toolRoundsData, let rounds = try? JSONDecoder().decode([ToolRound].self, from: toolRoundsData) else { return [] }
+            return rounds
+        }
+        set {
+            guard !newValue.isEmpty else {
+                toolRoundsData = nil
+                return
+            }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            toolRoundsData = try? encoder.encode(newValue)
+        }
+    }
+
     var stored: StoredMessage {
-        StoredMessage(role: role, text: text, createdAt: createdAt, isVoice: isVoice, status: status)
+        StoredMessage(role: role, text: text, createdAt: createdAt, isVoice: isVoice, status: status, toolRounds: toolRounds)
     }
 }

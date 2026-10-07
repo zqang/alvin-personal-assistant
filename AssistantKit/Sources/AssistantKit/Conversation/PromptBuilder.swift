@@ -16,18 +16,33 @@ public struct StoredMessage: Equatable, Sendable {
     public var createdAt: Date
     public var isVoice: Bool
     public var status: Status
+    /// Client tool rounds an assistant reply ran, in order. They are kept even when the reply's
+    /// text is not, because their actions happened.
+    public var toolRounds: [ToolRound]
 
-    public init(role: ChatRole, text: String, createdAt: Date, isVoice: Bool, status: Status = .complete) {
+    public init(
+        role: ChatRole,
+        text: String,
+        createdAt: Date,
+        isVoice: Bool,
+        status: Status = .complete,
+        toolRounds: [ToolRound] = []
+    ) {
         self.role = role
         self.text = text
         self.createdAt = createdAt
         self.isVoice = isVoice
         self.status = status
+        self.toolRounds = toolRounds
     }
 }
 
 public enum PromptBuilder {
     /// Converts stored messages into alternating turns that start and end with the user.
+    ///
+    /// An assistant reply counts if it completed or was interrupted, or if it ran tool rounds
+    /// (their actions happened even when the reply then failed); its text counts only in the first
+    /// case. Consecutive assistant replies merge into one turn.
     ///
     /// The result is a pure function of the stored messages, so each request's history is a
     /// byte-identical prefix of the next one. That keeps the prompt cache warm.
@@ -39,9 +54,9 @@ public enum PromptBuilder {
 
         for message in messages {
             let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { continue }
             switch message.role {
             case .user:
+                guard !text.isEmpty else { continue }
                 if let last = turns.last, last.role == .user {
                     // A reply failed in between: fold this message into the pending user turn.
                     let context = contextTag(for: message, formatter: formatter, timeZone: timeZone, afterInterruption: mergedTurnFollowsInterruption)
@@ -53,12 +68,16 @@ public enum PromptBuilder {
                 }
                 lastReplyInterrupted = false
             case .assistant:
-                guard message.status == .complete || message.status == .interrupted else { continue }
-                lastReplyInterrupted = message.status == .interrupted
+                let delivered = message.status == .complete || message.status == .interrupted
+                let replyText = delivered ? text : ""
+                guard !replyText.isEmpty || !message.toolRounds.isEmpty else { continue }
+                if delivered { lastReplyInterrupted = message.status == .interrupted }
                 if let last = turns.last, last.role == .assistant {
-                    turns[turns.count - 1].text = last.text + "\n\n" + text
+                    let texts = [last.text, replyText].filter { !$0.isEmpty }
+                    turns[turns.count - 1].text = texts.joined(separator: "\n\n")
+                    turns[turns.count - 1].toolRounds = last.toolRounds + message.toolRounds
                 } else {
-                    turns.append(ChatTurn(role: .assistant, text: text))
+                    turns.append(ChatTurn(role: .assistant, text: replyText, toolRounds: message.toolRounds))
                 }
             }
         }
@@ -106,11 +125,21 @@ public enum PromptBuilder {
 
         Reply in the language the user is using. When you search the web, answer in your own words; don't read out links or source names unless asked.
 
-        Keep responses focused, brief, and concise to avoid overwhelming the person. Latency-sensitive; begin your visible answer immediately.
+        Keep responses focused, brief, and concise to avoid overwhelming the person. Latency-sensitive: begin your visible answer immediately, unless you need a tool first; then call it before saying anything. Don't narrate tool use; the app plays a short cue. After an action, confirm the outcome in one short sentence.
         """
         let instructions = customInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
         if !instructions.isEmpty {
             prompt += "\n\n<user_instructions>\n\(instructions)\n</user_instructions>"
+        }
+        return prompt
+    }
+
+    /// The system prompt for the on-device model: `base` plus what it needs to know about running
+    /// on the phone, and about handing requests to the cloud assistant when that is possible.
+    public static func localSystemPrompt(base: String, handoffAvailable: Bool) -> String {
+        var prompt = base + "\n\nYou run on the user's iPhone. Use your tools for reminders, calendar, timers and the current time."
+        if handoffAvailable {
+            prompt += " If a request needs the internet (news, weather, prices, scores) or deep expertise, call handoff_to_cloud before saying anything."
         }
         return prompt
     }

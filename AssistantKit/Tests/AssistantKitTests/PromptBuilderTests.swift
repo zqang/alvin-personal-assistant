@@ -51,6 +51,92 @@ final class PromptBuilderTests: XCTestCase {
         XCTAssertTrue(plain.contains("personal assistant, running"))
     }
 
+    private func round(_ id: String, summary: String? = nil) -> ToolRound {
+        ToolRound(calls: [ToolCallRecord(id: id, name: "create_reminder", input: ["title": "x"], result: #"{"id":"r"}"#, summary: summary)])
+    }
+
+    func testFailedReplyWithRoundsIsKeptWithoutItsText() {
+        let start = Date(timeIntervalSince1970: 0)
+        let actions = round("toolu_1", summary: "Reminder: x")
+        let messages = [
+            StoredMessage(role: .user, text: "Remind me", createdAt: start, isVoice: false),
+            StoredMessage(role: .assistant, text: "I've added", createdAt: start, isVoice: false, status: .failed, toolRounds: [actions]),
+            StoredMessage(role: .user, text: "Did it work?", createdAt: start, isVoice: false),
+        ]
+        let turns = PromptBuilder.turns(from: messages, timeZone: TimeZone(identifier: "UTC")!)
+        XCTAssertEqual(turns.map(\.role), [.user, .assistant, .user])
+        XCTAssertEqual(turns[1].text, "", "a failed reply's text is never sent back")
+        XCTAssertEqual(turns[1].toolRounds, [actions], "its actions happened, so the model must see them")
+        XCTAssertEqual(turns[0].text, "Remind me", "the user turns are no longer merged")
+        XCTAssertEqual(turns[2].text, "Did it work?")
+
+        let refused = [
+            StoredMessage(role: .user, text: "Q", createdAt: start, isVoice: false),
+            StoredMessage(role: .assistant, text: "Partial", createdAt: start, isVoice: false, status: .refused, toolRounds: [actions]),
+            StoredMessage(role: .assistant, text: "Streaming", createdAt: start, isVoice: false, status: .streaming),
+            StoredMessage(role: .user, text: "Q2", createdAt: start, isVoice: false),
+        ]
+        let refusedTurns = PromptBuilder.turns(from: refused, timeZone: TimeZone(identifier: "UTC")!)
+        XCTAssertEqual(refusedTurns.map(\.role), [.user, .assistant, .user])
+        XCTAssertEqual(refusedTurns[1], ChatTurn(role: .assistant, text: "", toolRounds: [actions]))
+    }
+
+    func testAssistantMergeRules() {
+        let start = Date(timeIntervalSince1970: 0)
+        let first = round("toolu_1")
+        let second = round("toolu_2")
+        let messages = [
+            StoredMessage(role: .user, text: "Do things", createdAt: start, isVoice: true),
+            StoredMessage(role: .assistant, text: "  ", createdAt: start, isVoice: true),
+            StoredMessage(role: .assistant, text: "Working.", createdAt: start, isVoice: true),
+            StoredMessage(role: .assistant, text: "lost", createdAt: start, isVoice: true, status: .failed, toolRounds: [first]),
+            StoredMessage(role: .assistant, text: "", createdAt: start, isVoice: true, status: .failed),
+            StoredMessage(role: .assistant, text: "All done", createdAt: start, isVoice: true, status: .interrupted, toolRounds: [second]),
+            StoredMessage(role: .user, text: "Thanks", createdAt: start.addingTimeInterval(60), isVoice: true),
+        ]
+        let turns = PromptBuilder.turns(from: messages, timeZone: TimeZone(identifier: "Asia/Tokyo")!)
+        XCTAssertEqual(turns.count, 3)
+        XCTAssertEqual(turns[1].role, .assistant)
+        XCTAssertEqual(turns[1].text, "Working.\n\nAll done", "non-empty texts join with a blank line")
+        XCTAssertEqual(turns[1].toolRounds, [first, second], "rounds concatenate in order")
+        XCTAssertNil(turns[1].context)
+        XCTAssertEqual(turns[2].context, "<context>time: Thursday 1 January 1970, 09:01 Asia/Tokyo; input: spoken; note: the user interrupted your previous reply</context>")
+
+        let roundsOnly = [
+            StoredMessage(role: .user, text: "A", createdAt: start, isVoice: false),
+            StoredMessage(role: .assistant, text: "", createdAt: start, isVoice: false, toolRounds: [first]),
+            StoredMessage(role: .assistant, text: "", createdAt: start, isVoice: false, status: .failed, toolRounds: [second]),
+            StoredMessage(role: .user, text: "B", createdAt: start, isVoice: false),
+        ]
+        let merged = PromptBuilder.turns(from: roundsOnly, timeZone: TimeZone(identifier: "UTC")!)
+        XCTAssertEqual(merged.map(\.text), ["A", "", "B"])
+        XCTAssertEqual(merged[1].toolRounds, [first, second])
+
+        let trailing = Array(roundsOnly.prefix(2))
+        XCTAssertEqual(PromptBuilder.turns(from: trailing, timeZone: TimeZone(identifier: "UTC")!).map(\.role), [.user], "a trailing reply is still trimmed")
+    }
+
+    func testSystemPromptAsksForToolsBeforeSpeaking() {
+        let prompt = PromptBuilder.systemPrompt(userName: "", customInstructions: "")
+        XCTAssertTrue(prompt.hasSuffix(
+            "Keep responses focused, brief, and concise to avoid overwhelming the person. Latency-sensitive: begin your visible answer immediately, unless you need a tool first; then call it before saying anything. Don't narrate tool use; the app plays a short cue. After an action, confirm the outcome in one short sentence."
+        ))
+        XCTAssertFalse(prompt.contains("Latency-sensitive; begin your visible answer immediately."))
+        XCTAssertEqual(PromptBuilder.systemPrompt(userName: "", customInstructions: ""), prompt, "the prompt is static, so it caches")
+    }
+
+    func testLocalSystemPrompt() {
+        let base = PromptBuilder.systemPrompt(userName: "Alvin", customInstructions: "")
+        XCTAssertEqual(
+            PromptBuilder.localSystemPrompt(base: base, handoffAvailable: false),
+            base + "\n\nYou run on the user's iPhone. Use your tools for reminders, calendar, timers and the current time."
+        )
+        XCTAssertEqual(
+            PromptBuilder.localSystemPrompt(base: "BASE", handoffAvailable: true),
+            "BASE\n\nYou run on the user's iPhone. Use your tools for reminders, calendar, timers and the current time. If a request needs the internet (news, weather, prices, scores) or deep expertise, call handoff_to_cloud before saying anything."
+        )
+    }
+
     func testSettingsDecodeWithMissingAndUnknownValues() throws {
         let json = #"{"provider":"somethingNew","claudeModel":"claude-sonnet-5","speechRate":1.2}"#
         let settings = try JSONDecoder().decode(AssistantSettings.self, from: Data(json.utf8))
