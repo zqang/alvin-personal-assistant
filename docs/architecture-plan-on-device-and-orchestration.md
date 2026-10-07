@@ -86,10 +86,25 @@ output such as `{"route":"local|tools|cloud|deep"}`.
   - Wi-Fi only
   - an `os_proc_available_memory()` gate
   - unload when a memory warning arrives or the app goes to the background
-- **Husky's speed techniques, applied with what we have:** use mlx-swift-lm's speculative decoding, if the
-  pinned version supports it, with a small draft model from the same family (for example Woof 2B drafting for
-  Woof 4B). Keep the prompt KV cache between turns. Our history is append-only, so each turn only needs to
-  prefill the new turn.
+- **Husky's speed techniques, applied with what we have ("Husky-lite").** The mlx-swift-lm version we already
+  resolve (3.31.4) provides the following:
+  - `ChatSession` keeps the KV cache between turns and can `saveCache(to:)`. Our history is append-only, so
+    each turn only prefills the new turn.
+  - `SpeculativeDecodingConfig` runs a draft model with a memory policy (`.recommendedWorkingSet`). Use a small
+    model with the same tokenizer as the draft, for example Qwen3.5 0.8B or Woof 0.8B for Woof 4B. This is the
+    same verify-a-block-per-step idea as Husky.
+  - `ChatSession.tools` / `toolDispatch` handle local tool calls.
+
+  The library does not have **prompt-lookup drafting** (proposing tokens copied from the prompt), which is
+  where Husky reports its biggest gains. We can add it on top of the same verification step; it pays off for
+  tool-call JSON, not for casual chat.
+
+  Skip the rest of Husky:
+  - **Model-specific Metal kernels:** specialist work, with gains measured only on Mac.
+  - **Training our own "Flash" drafter:** needs GPU training plus a new drafter model type.
+
+  Note that a voice reply is limited by time to first token, not tokens/s, because speech consumes only a few
+  tokens per second. Measure both in Phase 0.
 
 ### 2.3 One GPU and memory owner (`OnDeviceModels`)
 
