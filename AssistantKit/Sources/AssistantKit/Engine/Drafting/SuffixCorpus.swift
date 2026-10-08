@@ -35,9 +35,9 @@ public struct SuffixCorpus: Sendable {
         while matcher.tokenCount > capacityTokens { matcher.evictOldest() }
     }
 
-    /// The continuation of the longest context match of at least 2 tokens. Continuations stop
-    /// before any token in `excluded` (such tokens are never counted as candidates), at the end
-    /// of the matching documents, or after `maxTokens` tokens.
+    /// The continuation of the longest context match of at least 2 tokens, at most `maxTokens`
+    /// long. Tokens in `excluded` are never drafted: they do not count as candidate next tokens,
+    /// so the continuation ends where only excluded tokens or document ends follow.
     public func propose(context: ArraySlice<Int>, maxTokens: Int, excluded: Set<Int> = []) -> DraftProposal? {
         matcher.propose(context: context, maxTokens: maxTokens, minMatch: 2, anchors: [], excluded: excluded)
             .map { DraftProposal(tokens: $0.tokens, source: .corpus, matchLength: $0.matchLength) }
