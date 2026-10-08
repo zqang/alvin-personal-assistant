@@ -29,6 +29,14 @@ struct VoiceModeView: View {
                     .font(.footnote)
                     .foregroundStyle(.white.opacity(0.45))
                     .padding(.top, 20)
+                #if DEBUG
+                if let readout = session.latencyReadout {
+                    Text(readout)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.35))
+                        .padding(.top, 6)
+                }
+                #endif
                 Spacer(minLength: 24)
                 captions
                     .frame(maxWidth: .infinity, minHeight: 150, alignment: .top)
@@ -121,6 +129,26 @@ struct VoiceModeView: View {
             .accessibilityLabel(session.isMuted ? "Unmute microphone" : "Mute microphone")
 
             Spacer()
+
+            if session.canGoDeep {
+                Button {
+                    session.requestDeepNextTurn(!session.deepNextTurn)
+                } label: {
+                    Label("Think deeper", systemImage: "brain.head.profile")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .padding(.horizontal, 16)
+                        .frame(height: 44)
+                        .background(Capsule().fill(session.deepNextTurn ? Color.white : Color.white.opacity(0.14)))
+                        .foregroundStyle(session.deepNextTurn ? Color.black : Color.white)
+                }
+                .accessibilityLabel("Think deeper")
+                .accessibilityValue(session.deepNextTurn ? "On for the next answer" : "Off")
+                .accessibilityHint("Takes more time to answer your next question carefully")
+
+                Spacer()
+            }
 
             Button {
                 dismiss()

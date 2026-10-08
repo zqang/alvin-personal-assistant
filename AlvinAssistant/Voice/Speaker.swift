@@ -50,6 +50,10 @@ struct SpeechSynthesisError: LocalizedError {
 
 /// Speaks reply chunks in order. Synthesis of the next chunk overlaps playback of the current
 /// one, and all audio goes through `AudioIO`'s player so echo cancellation can hear it.
+///
+/// Spoken cues ("Let me check.") share the queue but aren't part of the answer: they never count
+/// as what the user heard of the reply (`spokenText`), only as speech that may echo back
+/// (`recentSpeech`).
 @MainActor
 final class Speaker {
     enum Engine {
@@ -57,23 +61,51 @@ final class Speaker {
         case openAI(OpenAISpeechConfiguration)
     }
 
-    /// A chunk started playing (the first one means the assistant started talking).
+    /// A chunk of the answer started playing (the first one means the assistant started talking).
     var onChunkStarted: ((String) -> Void)?
+    /// A cue started playing.
+    var onCueStarted: ((String) -> Void)?
     /// Everything queued since `beginReply()` has played and `finishInput()` was called.
     var onDrained: (() -> Void)?
     /// The cloud voice failed and speech switched to the on-device voice.
     var onFallback: ((String) -> Void)?
 
-    /// Chunks that have started playing since `beginReply()`: what the user actually heard.
+    /// Chunks of the answer that have started playing since `beginReply()`: what the user
+    /// actually heard of it. Cues are left out.
     private(set) var spokenText = ""
 
-    /// Speech that may be coming out of the speaker right now, for telling echo from interruptions.
+    /// Speech that may be coming out of the speaker right now, cues included, for telling echo
+    /// from interruptions.
     var recentSpeech: String {
-        ([spokenText] + playback.map(\.text)).joined(separator: " ")
+        ([cueText, spokenText] + playback.map(\.text)).joined(separator: " ")
+    }
+
+    /// A cue started playing since `beginReply()`, so its echo may still reach the microphone.
+    var hasPlayedCue: Bool {
+        !cueText.isEmpty
+    }
+
+    /// Identifies the voice speech is rendered in, so audio rendered ahead of time can be reused
+    /// while it stays the same.
+    var voiceSignature: String {
+        switch engine {
+        case .apple(let voiceIdentifier, let rate):
+            return "apple|\(voiceIdentifier)|\(rate)|\(languageHint)"
+        case .openAI(let configuration):
+            return "openai|\(configuration.baseURL.absoluteString)|\(configuration.model)|\(configuration.voice)|\(languageHint)"
+        }
+    }
+
+    private struct QueueItem {
+        let text: String
+        let isCue: Bool
+        /// Audio rendered ahead of time; nil means synthesize `text` now.
+        let buffers: [AVAudioPCMBuffer]?
     }
 
     private struct PlaybackItem {
         let text: String
+        let isCue: Bool
         var produced = 0
         var outstanding = 0
         var synthesized = false
@@ -84,8 +116,12 @@ final class Speaker {
     private var engine: Engine
     private let languageHint: String
     private let synthesizer = AVSpeechSynthesizer()
-    private var queue: [String] = []
+    /// Renders cues ahead of time, apart from the reply's synthesis.
+    private let prerenderSynthesizer = AVSpeechSynthesizer()
+    private var queue: [QueueItem] = []
     private var playback: [PlaybackItem] = []
+    /// Cues that have started playing since `beginReply()`.
+    private var cueText = ""
     private var worker: Task<Void, Never>?
     private var generation = 0
     private var inputFinished = false
@@ -102,10 +138,18 @@ final class Speaker {
         inputFinished = false
         drainReported = false
         spokenText = ""
+        cueText = ""
     }
 
-    func enqueue(_ text: String) {
-        queue.append(text)
+    /// Speaks `text` after everything queued before it. A cue (`isCue`) isn't part of the answer.
+    func enqueue(_ text: String, isCue: Bool = false) {
+        queue.append(QueueItem(text: text, isCue: isCue, buffers: nil))
+        startWorkerIfNeeded()
+    }
+
+    /// Plays a cue rendered ahead of time by `prerender(_:)`; `text` is what it says.
+    func enqueueCue(buffers: [AVAudioPCMBuffer], text: String) {
+        queue.append(QueueItem(text: text, isCue: true, buffers: buffers))
         startWorkerIfNeeded()
     }
 
@@ -133,15 +177,29 @@ final class Speaker {
         guard worker == nil else { return }
         let current = generation
         worker = Task { [weak self] in
-            while let self, current == self.generation, let text = self.nextChunk() {
-                await self.synthesize(text, generation: current)
+            while let self, current == self.generation, let item = self.nextItem() {
+                await self.produce(item, generation: current)
             }
             self?.workerFinished(generation: current)
         }
     }
 
-    private func nextChunk() -> String? {
+    private func nextItem() -> QueueItem? {
         queue.isEmpty ? nil : queue.removeFirst()
+    }
+
+    private func produce(_ item: QueueItem, generation: Int) async {
+        guard let buffers = item.buffers else {
+            await synthesize(item.text, isCue: item.isCue, generation: generation)
+            return
+        }
+        playback.append(PlaybackItem(text: item.text, isCue: item.isCue))
+        for buffer in buffers {
+            schedule(buffer, generation: generation)
+        }
+        guard generation == self.generation, !playback.isEmpty else { return }
+        playback[playback.count - 1].synthesized = true
+        advancePlayback()
     }
 
     private func workerFinished(generation: Int) {
@@ -154,8 +212,8 @@ final class Speaker {
         }
     }
 
-    private func synthesize(_ text: String, generation: Int) async {
-        playback.append(PlaybackItem(text: text))
+    private func synthesize(_ text: String, isCue: Bool, generation: Int) async {
+        playback.append(PlaybackItem(text: text, isCue: isCue))
         switch engine {
         case .apple(let voiceIdentifier, let rate):
             await synthesizeWithApple(text, voiceIdentifier: voiceIdentifier, rate: rate, generation: generation)
@@ -203,8 +261,13 @@ final class Speaker {
         }
         if let first = playback.first, first.produced > 0, !first.announced {
             playback[0].announced = true
-            spokenText = Self.join(spokenText, first.text)
-            onChunkStarted?(first.text)
+            if first.isCue {
+                cueText = Self.join(cueText, first.text)
+                onCueStarted?(first.text)
+            } else {
+                spokenText = Self.join(spokenText, first.text)
+                onChunkStarted?(first.text)
+            }
         }
         checkDrained()
     }
@@ -236,6 +299,54 @@ final class Speaker {
                 schedule(converted, generation: generation)
             }
         }
+    }
+
+    // MARK: - Rendering ahead
+
+    /// Renders `text` in the current voice without playing it, as playback-format buffers for
+    /// `enqueueCue(buffers:text:)`. Nil when that fails; the caller then speaks it live.
+    func prerender(_ text: String) async -> [AVAudioPCMBuffer]? {
+        var buffers: [AVAudioPCMBuffer] = []
+        switch engine {
+        case .apple(let voiceIdentifier, let rate):
+            let utterance = AVSpeechUtterance(string: text)
+            utterance.voice = voice(for: text, preferredIdentifier: voiceIdentifier)
+            utterance.rate = rate
+            let converter = PCMConverter(to: audio.playbackFormat)
+            for await buffer in Self.renderedBuffers(of: utterance, with: prerenderSynthesizer) {
+                guard let converted = converter.convert(buffer) else { continue }
+                // The converter hands back its input when no conversion is needed; keep a copy
+                // then, in case the synthesizer reuses that buffer.
+                if converted === buffer {
+                    if let copy = Self.copy(converted) { buffers.append(copy) }
+                } else {
+                    buffers.append(converted)
+                }
+            }
+        case .openAI(let configuration):
+            do {
+                let request = try OpenAISpeech.request(for: text, configuration: configuration)
+                for try await samples in Self.pcmChunks(for: request) {
+                    if let buffer = makeBuffer(samples) { buffers.append(buffer) }
+                }
+            } catch {
+                return nil
+            }
+        }
+        return buffers.isEmpty ? nil : buffers
+    }
+
+    /// A copy of a non-interleaved float buffer.
+    private static func copy(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard !buffer.format.isInterleaved,
+              let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: max(buffer.frameLength, 1)),
+              let source = buffer.floatChannelData,
+              let target = copy.floatChannelData else { return nil }
+        copy.frameLength = buffer.frameLength
+        for channel in 0..<Int(buffer.format.channelCount) {
+            target[channel].update(from: source[channel], count: Int(buffer.frameLength))
+        }
+        return copy
     }
 
     /// Renders an utterance to PCM instead of playing it, so it can go through the engine.
@@ -309,16 +420,22 @@ final class Speaker {
     }
 
     private func scheduleSamples(_ samples: [Float], generation: Int) {
+        guard let buffer = makeBuffer(samples) else { return }
+        schedule(buffer, generation: generation)
+    }
+
+    /// A playback-format buffer holding `samples`, or nil when there are none.
+    private func makeBuffer(_ samples: [Float]) -> AVAudioPCMBuffer? {
         guard !samples.isEmpty,
               let buffer = AVAudioPCMBuffer(pcmFormat: audio.playbackFormat, frameCapacity: AVAudioFrameCount(samples.count)),
-              let channel = buffer.floatChannelData?[0] else { return }
+              let channel = buffer.floatChannelData?[0] else { return nil }
         buffer.frameLength = AVAudioFrameCount(samples.count)
         samples.withUnsafeBufferPointer { source in
             if let base = source.baseAddress {
                 channel.update(from: base, count: samples.count)
             }
         }
-        schedule(buffer, generation: generation)
+        return buffer
     }
 
     /// Downloads speech as ~200 ms chunks of 24 kHz samples, off the main actor.
