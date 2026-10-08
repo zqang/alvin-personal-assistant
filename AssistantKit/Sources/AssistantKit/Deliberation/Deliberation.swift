@@ -42,8 +42,10 @@ public struct DeliberationConfiguration: Equatable, Sendable {
     /// prefix; another model doesn't.
     public var workerModel: String? = nil
     /// When `.parallel` stops waiting for workers; workers still running are cut off and keep what
-    /// they wrote. `.cue(.stillThinking)` plays at half of it if no text has arrived. Zero or less
-    /// means no deadline and no cue.
+    /// they wrote. It is also how long a call the user waits on (the `.single` call, the merger or
+    /// the plain answer) may go without a word from the server before the reply gives up.
+    /// `.cue(.stillThinking)` plays at half of it if no text has arrived. Zero or less means no
+    /// deadline, no time limit and no cue.
     public var deadline: Duration
     /// Output cap of each worker; thinking counts toward it.
     public var workerMaxTokens = 12_000
@@ -99,10 +101,17 @@ public struct DeliberationConfiguration: Equatable, Sendable {
 ///     except a forwarding worker's activity lines.
 ///   - With notes from at least one worker, the merger answers with the full tools, the notes as an
 ///     `<analyst_notes>` block at the end of the user's last message, and `mergerInstruction`; its
-///     events pass through. Without notes, a plain call answers instead. When the deadline passed
-///     without any worker reaching the server, the network is presumed down (even if it looks up)
-///     and the reply throws `URLError(.timedOut)`, so the orchestrator can fall back before
-///     anything was said.
+///     events pass through. Without notes, a plain call answers instead, unless the deadline passed
+///     without any worker reaching the server: then the reply throws `URLError(.timedOut)` at
+///     once rather than send another request into a network that has stayed silent.
+///
+/// The cue counts as the reply's first event, so the orchestrator's first-event watchdog never
+/// fires for deep mode, and deep mode keeps its own: if the call the user waits on (the `.single`
+/// call, the merger or the plain answer) has heard nothing from the server by the deadline, not
+/// even the start of a response, the network is presumed down (even if it looks up). The call is
+/// cancelled and the reply throws `URLError(.timedOut)`, so the orchestrator can fall back to the
+/// on-device model before the answer began, rather than after URLSession's own timeout and
+/// retries.
 ///
 /// Ending or cancelling the returned stream cancels every request in flight.
 public struct Deliberation: AssistantProvider {
@@ -227,9 +236,57 @@ public struct Deliberation: AssistantProvider {
         )
     }
 
+    private enum AnswerSignal: Sendable {
+        case ended
+        case deadline
+        case timerStopped
+    }
+
+    /// Streams an answer the user sees. If the call has produced no event by the deadline, it is
+    /// cancelled and this throws `URLError(.timedOut)`; after its first event it may take as long
+    /// as it needs.
     private func relay(_ provider: ClaudeProvider, system: String, turns: [ChatTurn], output: Output) async throws {
-        for try await event in provider.streamEvents(system: system, turns: turns) {
-            output.pass(event)
+        let deadline = configuration.deadline
+        guard deadline > .zero else {
+            for try await event in provider.streamEvents(system: system, turns: turns) {
+                output.pass(event)
+            }
+            return
+        }
+        let contact = ServerContact()
+        let sleep = hooks.sleep
+        try await withThrowingTaskGroup(of: AnswerSignal.self) { group in
+            group.addTask {
+                for try await event in provider.streamEvents(system: system, turns: turns) {
+                    // Nothing more is passed on once the deadline has given up on the call.
+                    guard contact.hear() else { break }
+                    output.pass(event)
+                }
+                return .ended
+            }
+            group.addTask {
+                do {
+                    try await sleep(deadline)
+                } catch {
+                    return .timerStopped
+                }
+                return .deadline
+            }
+            while let signal = try await group.next() {
+                switch signal {
+                case .ended:
+                    // Stops the timer.
+                    group.cancelAll()
+                    return
+                case .deadline:
+                    // The server spoke in time; let the call run.
+                    guard contact.expireIfSilent() else { continue }
+                    // Leaving the group cancels the call and waits for it to end.
+                    throw URLError(.timedOut)
+                case .timerStopped:
+                    continue
+                }
+            }
         }
     }
 
@@ -484,6 +541,32 @@ public struct Deliberation: AssistantProvider {
             continuation.yield(.reply(.activity(activity)))
             activityShown = activity != nil
             workerLine = nil
+        }
+    }
+
+    /// Whether an answer call has heard from the server. The call's events and the deadline settle
+    /// under one lock, so an event is either passed on or dropped for good.
+    private final class ServerContact: @unchecked Sendable {
+        private let lock = NSLock()
+        private var heard = false
+        private var expired = false
+
+        /// Records an event of the call. Returns false once the deadline has given up on it.
+        func hear() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !expired else { return false }
+            heard = true
+            return true
+        }
+
+        /// Gives up on the call if it hasn't produced an event yet. Returns whether it gave up.
+        func expireIfSilent() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !heard else { return false }
+            expired = true
+            return true
         }
     }
 }

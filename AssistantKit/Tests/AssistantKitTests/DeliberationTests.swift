@@ -151,7 +151,8 @@ final class DeliberationTests: XCTestCase {
         let recorder = DeepEventRecorder()
         let deliberation = makeDeliberation(deepConfiguration(.single, voice: true), transport: transport, clock: clock)
         let consumer = recorder.consume(deliberation.streamEvents(system: "S", turns: question))
-        let waiting = await waitUntil { recorder.events.count == 3 && clock.sleeperCount == 1 }
+        // The halfway cue and the deadline wait.
+        let waiting = await waitUntil { recorder.events.count == 3 && clock.sleeperCount == 2 }
         XCTAssertTrue(waiting)
         XCTAssertEqual(recorder.events, opening + [.progress(.responseStarted)])
 
@@ -164,11 +165,85 @@ final class DeliberationTests: XCTestCase {
         XCTAssertEqual(recorder.events.last, .cue(.stillThinking))
 
         clock.advance(to: 100)
+        let passed = await waitUntil { clock.sleeperCount == 0 }
+        XCTAssertTrue(passed)
         try? await Task.sleep(nanoseconds: 20_000_000)
-        XCTAssertEqual(recorder.events.count, 4, "the cue plays once, and the single call has no deadline")
+        XCTAssertEqual(recorder.events.count, 4, "the cue plays once, and a call the server has answered may run past the deadline")
+        XCTAssertEqual(transport.cancellationCount, 0)
         consumer.cancel()
         _ = await consumer.value
         let cancelled = await waitUntil { transport.cancellationCount == 1 }
+        XCTAssertTrue(cancelled)
+    }
+
+    func testASingleCallThatHearsNothingByTheDeadlineTimesOut() async {
+        // A captive portal, or dead Wi-Fi that still looks online: the request gets no answer.
+        let clock = ManualClock()
+        let transport = HangingTransport()
+        let recorder = DeepEventRecorder()
+        let consumer = recorder.consume(
+            makeDeliberation(deepConfiguration(.single, voice: true), transport: transport, clock: clock).streamEvents(system: "S", turns: question)
+        )
+        let waiting = await waitUntil { transport.requests.count == 1 && clock.sleeperCount == 2 }
+        XCTAssertTrue(waiting)
+
+        clock.advance(to: 12.5)
+        let cued = await waitUntil { recorder.events.count == 3 }
+        XCTAssertTrue(cued)
+        clock.advance(to: 24.9)
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(transport.terminationCount, 0, "the call may stay silent until the deadline")
+        clock.advance(to: 25)
+        let error = await consumer.value
+
+        XCTAssertEqual((error as? URLError)?.code, .timedOut)
+        XCTAssertEqual(error?.isConnectivityFailure, true, "so the orchestrator can fall back to the on-device model")
+        XCTAssertEqual(recorder.events, opening + [.cue(.stillThinking)])
+        let cancelled = await waitUntil { transport.terminationCount == 1 }
+        XCTAssertTrue(cancelled, "the silent request is cancelled")
+        XCTAssertEqual(transport.requests.count, 1)
+    }
+
+    func testTheOrchestratorFallsBackWhenASingleReplyHearsNothing() async {
+        let clock = ManualClock()
+        let transport = HangingTransport()
+        let deep = makeDeliberation(deepConfiguration(.single, voice: true), transport: transport, clock: clock)
+        let local = ScriptedProvider([.reply(.text("Offline answer.")), .reply(.finished(.completed))])
+        let decision = RouteDecision(engine: .cloud, mode: .deep, reason: .deepRequested, fallback: .local)
+        let orchestrator = Orchestrator(
+            decision: decision,
+            engines: Orchestrator.Engines(deep: deep, local: local),
+            firstEventTimeout: .seconds(3)
+        ) { duration in
+            try await clock.sleep(for: duration.deepSeconds)
+        }
+        let recorder = DeepEventRecorder()
+        let consumer = recorder.consume(orchestrator.streamEvents(system: "S", turns: question))
+        // The orchestrator's watchdog, the halfway cue and the deadline wait.
+        let waiting = await waitUntil { transport.requests.count == 1 && clock.sleeperCount == 3 }
+        XCTAssertTrue(waiting)
+
+        // The cue was the reply's first event, so the watchdog lets the reply run.
+        clock.advance(to: 3)
+        let watched = await waitUntil { clock.sleeperCount == 2 }
+        XCTAssertTrue(watched)
+        clock.advance(to: 12.5)
+        let cued = await waitUntil { recorder.events.contains(.cue(.stillThinking)) }
+        XCTAssertTrue(cued)
+        XCTAssertEqual(local.callCount, 0)
+        clock.advance(to: 25)
+        let error = await consumer.value
+
+        XCTAssertNil(error)
+        XCTAssertEqual(recorder.events, [.routed(decision)] + opening + [
+            .cue(.stillThinking),
+            .reply(.activity(nil)),
+            .routed(RouteDecision(engine: .local, reason: .networkFallback)),
+            .reply(.text("Offline answer.")),
+            .reply(.finished(.completed)),
+        ])
+        XCTAssertEqual(local.callCount, 1)
+        let cancelled = await waitUntil { transport.terminationCount == 1 }
         XCTAssertTrue(cancelled)
     }
 
@@ -180,7 +255,7 @@ final class DeliberationTests: XCTestCase {
         let recorder = DeepEventRecorder()
         let deliberation = makeDeliberation(deepConfiguration(.single, voice: true), transport: transport, clock: clock)
         let consumer = recorder.consume(deliberation.streamEvents(system: "S", turns: question))
-        let answering = await waitUntil { recorder.events.contains(.reply(.text("Short answer:"))) && clock.sleeperCount == 1 }
+        let answering = await waitUntil { recorder.events.contains(.reply(.text("Short answer:"))) && clock.sleeperCount == 2 }
         XCTAssertTrue(answering)
 
         clock.advance(to: 30)
@@ -620,6 +695,30 @@ final class DeliberationTests: XCTestCase {
         let cancelled = await waitUntil { transport.terminationCount == 3 }
         XCTAssertTrue(cancelled)
         XCTAssertEqual(transport.requests.count, 3, "no plain call into a dead network")
+    }
+
+    func testAMergerThatHearsNothingByTheDeadlineTimesOut() async {
+        let clock = ManualClock()
+        let transport = deepTransport { call, _ in call == .merger ? .hang([]) : deepText("Notes.") }
+        let recorder = DeepEventRecorder()
+        let consumer = recorder.consume(
+            makeDeliberation(deepConfiguration(.parallel, voice: true), transport: transport, clock: clock).streamEvents(system: "S", turns: question)
+        )
+        // The workers are done; the halfway cue and the merger's deadline wait.
+        let merging = await waitUntil { transport.requests.count == 4 && clock.sleeperCount == 2 }
+        XCTAssertTrue(merging)
+
+        clock.advance(to: 12.5)
+        let cued = await waitUntil { recorder.events.count == 3 }
+        XCTAssertTrue(cued)
+        clock.advance(to: 25)
+        let error = await consumer.value
+
+        XCTAssertEqual((error as? URLError)?.code, .timedOut)
+        XCTAssertEqual(recorder.events, opening + [.cue(.stillThinking)])
+        let cancelled = await waitUntil { transport.cancellationCount == 1 }
+        XCTAssertTrue(cancelled, "the merger's request is cancelled")
+        XCTAssertEqual(transport.requests.count, 4)
     }
 
     func testAWorkerThatReachedTheServerMakesTheDeadlineGiveAPlainAnswer() async throws {
