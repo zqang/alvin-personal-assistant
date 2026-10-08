@@ -84,6 +84,58 @@ final class OpenAICompatibleTests: XCTestCase {
         XCTAssertEqual(contents, ["S", "three"])
     }
 
+    func testAssistantTurnsWithoutTextShowTheirToolSummaries() {
+        func record(_ id: String, _ name: String, summary: String? = nil) -> ToolCallRecord {
+            ToolCallRecord(id: id, name: name, input: [:], result: "{}", summary: summary)
+        }
+        let reminder = ToolRound(calls: [record("a", "create_reminder", summary: "Reminder: Call mum · today 17:00")])
+        let timers = ToolRound(calls: [
+            record("b", "set_timer", summary: "Timer: 10 min"),
+            record("c", "list_events"),
+            record("d", "set_timer", summary: "Timer: 1 h"),
+        ])
+        let silent = ToolRound(calls: [record("e", "list_events")])
+        let turns = [
+            ChatTurn(role: .user, text: "one"),
+            ChatTurn(role: .assistant, text: "", toolRounds: [reminder, silent, timers]),
+            ChatTurn(role: .user, text: "two", context: "<context>c2</context>"),
+            // No text and no summaries: skipped, and the user turns around it become one.
+            ChatTurn(role: .assistant, text: " \n", toolRounds: [silent]),
+            ChatTurn(role: .user, text: "three", context: "<context>c3</context>"),
+            // Text wins over summaries.
+            ChatTurn(role: .assistant, text: "Done.", toolRounds: [reminder]),
+            ChatTurn(role: .user, text: "four"),
+        ]
+
+        let body = OpenAICompatibleProvider.body(model: "m", system: "S", turns: turns, maxHistoryTurns: 60)
+        let messages = body["messages"]?.arrayValue ?? []
+
+        XCTAssertEqual(messages.compactMap { $0["role"]?.stringValue }, ["system", "user", "assistant", "user", "assistant", "user"])
+        XCTAssertEqual(messages.compactMap { $0["content"]?.stringValue }, [
+            "S",
+            "one",
+            "Reminder: Call mum · today 17:00 Timer: 10 min; Timer: 1 h",
+            "<context>c2</context>\n\ntwo\n\n<context>c3</context>\n\nthree",
+            "Done.",
+            "four",
+        ])
+    }
+
+    func testTurnsWithoutToolRoundsAreUnchanged() {
+        let turns = [
+            ChatTurn(role: .user, text: "Hi", context: "<context>c</context>"),
+            ChatTurn(role: .assistant, text: "Hello!"),
+            ChatTurn(role: .user, text: "Bye"),
+        ]
+        let body = OpenAICompatibleProvider.body(model: "m", system: "S", turns: turns, maxHistoryTurns: 60)
+        XCTAssertEqual(body["messages"], [
+            ["role": "system", "content": "S"],
+            ["role": "user", "content": "<context>c</context>\n\nHi"],
+            ["role": "assistant", "content": "Hello!"],
+            ["role": "user", "content": "Bye"],
+        ])
+    }
+
     func testServiceNames() {
         XCTAssertEqual(CompatibleServices.serviceName(forBaseURL: "https://api.deepseek.com/v1"), "DeepSeek")
         XCTAssertEqual(CompatibleServices.serviceName(forBaseURL: "https://llm.example.com/v1"), "llm.example.com")
