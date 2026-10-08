@@ -44,7 +44,7 @@ public enum LocalModelCatalog {
         displayName: "Underdog Woof 2B",
         // TODO: replace with model-facts size
         approximateBytes: 1_400_000_000,
-        note: "The smaller Woof (Qwen3.5-based), tuned for tool calls: faster and lighter. About 1.4 GB.",
+        note: "The smaller Woof (Qwen3.5-based), tuned for tool calls: faster and lighter.",
         isHybrid: true
     )
 

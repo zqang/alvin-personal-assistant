@@ -13,7 +13,7 @@ import Foundation
 /// | 2 | The prefix key changed | as rule 1 | as rule 1 | `prefixChanged` |
 /// | 3 | Every cached turn matches the request, the cache ends on a reply, and more turns follow | keep everything | `[.continuation(newTurns)]` | `append` |
 /// | 4 | Only the last cached reply differs, neither version has tool rounds, and more turns follow | keep to the reply's start | `[.assistantText(text), .continuation(rest)]` | `replaceLastReply` |
-/// | 5 | The turns before the newest cached user turn match, and the request ends with a replacement for that turn (a tentative turn, an edit, or a retry); any reply after it is dropped | keep to the turn's start (must be after the system prefix) | `[.continuation([user])]` | `replaceLastUserTurn` |
+/// | 5 | The turns before the newest cached user turn match, and the request ends with a replacement for that turn (a tentative turn, an edit, or a retry of the same turn); any reply after it is dropped | keep to the turn's start (must be after the system prefix) | `[.continuation([user])]` | `replaceLastUserTurn` |
 /// | 6 | Anything else, including another conversation | keep the system prefix | `[.firstTurns(window)]` | `diverged` |
 /// | 7 | Rules 3–5 would grow the cache past `maxTokens` | as rule 6 | as rule 6 | `overBudget` |
 ///
@@ -85,6 +85,8 @@ public enum SessionPlanner {
         }
 
         // Rule 4: the last cached reply was interrupted, shortened or edited; more turns follow.
+        // `.assistantText` can't express tool rounds, so neither the cached nor the new reply
+        // may have any.
         if cached.count >= 2, request.count > cached.count {
             let replyIndex = cached.count - 1
             let cachedReply = cached[replyIndex]
@@ -106,8 +108,10 @@ public enum SessionPlanner {
         }
 
         // Rule 5: the newest cached user turn was replaced (a tentative turn, an edit, or a retry),
-        // and the request ends with its replacement. The continuation needs a turn end to follow,
-        // so a turn at the very start of the ledger (no system prefix) is rebuilt instead.
+        // and the request ends with its replacement. An unchanged turn (a retry) is fed again
+        // too: the same rewind and delta are correct for it, and cheaper than rebuilding. The
+        // continuation needs a turn end to follow, so a turn at the very start of the ledger (no
+        // system prefix) is rebuilt instead.
         if let userIndex = live.newestUserTurnIndex, request.count == userIndex + 1,
            let start = cached[userIndex].start, start > 0, positions.contains(start),
            cachedPrefixMatches(userIndex)

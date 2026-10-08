@@ -203,6 +203,7 @@ final class LocalBenchmarkScenarioTests: XCTestCase {
         XCTAssertEqual(LocalBenchmark.continued.steps, LocalBenchmark.prompts.map(Scenario.Step.user))
         XCTAssertEqual(LocalBenchmark.continued.context, LocalBenchmark.spokenContext)
         XCTAssertEqual(LocalBenchmark.continued.turnCount, 8)
+        XCTAssertTrue(turns(LocalBenchmark.continued).allSatisfy { $0.context == LocalBenchmark.spokenContext })
     }
 
     func testBargeInCancelsTurnTwo() {
@@ -240,6 +241,22 @@ final class LocalBenchmarkScenarioTests: XCTestCase {
         XCTAssertEqual(scenario.steps.filter { $0 == .newConversation }.count, 5)
         XCTAssertEqual(scenario.context, LocalBenchmark.labTypedContext)
         XCTAssertNotEqual(scenario.steps.first, .newConversation)
+        // The lab's copy-01 and copy-05 are spoken, the others typed.
+        let spoken = "<context>time: Wednesday 7 October 2026, 16:05 Asia/Singapore; input: spoken</context>"
+        let typed = "<context>time: Wednesday 7 October 2026, 16:05 Asia/Singapore; input: typed</context>"
+        XCTAssertEqual(turns(scenario).map(\.context), [spoken, typed, typed, typed, spoken, typed])
+        XCTAssertTrue(turns(scenario)[4].prompt.hasPrefix("把我的购物清单"))
+    }
+
+    func testContextOverridesApplyToTheirTurnOnly() {
+        let scenario = Scenario(
+            id: "x",
+            title: "X",
+            steps: [.user("One"), .newConversation, .user("Two"), .user("Three")],
+            context: "<context>a</context>",
+            contextOverrides: [1: "<context>b</context>"]
+        )
+        XCTAssertEqual(turns(scenario).map(\.context), ["<context>a</context>", "<context>b</context>", "<context>a</context>"])
     }
 
     func testToolPromptsCarryTheLabsExpectations() throws {
@@ -249,6 +266,7 @@ final class LocalBenchmarkScenarioTests: XCTestCase {
         XCTAssertEqual(scenario.steps.filter { $0 == .newConversation }.count, 11)
         XCTAssertEqual(scenario.context, "<context>time: Wednesday 7 October 2026, 16:05 Asia/Singapore; input: spoken</context>")
         XCTAssertTrue(turns.allSatisfy { $0.expectation != nil })
+        XCTAssertTrue(turns.allSatisfy { $0.context == LocalBenchmark.labSpokenContext })
         XCTAssertEqual(turns[0].prompt, "Remind me at 5 to call mum.")
         XCTAssertEqual(turns[0].expectation, ToolExpectation(name: "create_reminder", arguments: ["title": "call mum", "due": "2026-10-07T17:00"]))
         XCTAssertEqual(turns[11].expectation, ToolExpectation(name: "list_timers"))

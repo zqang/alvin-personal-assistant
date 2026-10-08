@@ -224,15 +224,18 @@ extension LocalBenchmark {
             case newConversation
         }
 
-        /// A `.user` step with its modifiers and expectation.
+        /// A `.user` step with its context, modifiers and expectation.
         public struct Turn: Equatable, Sendable {
             public var prompt: String
+            /// The context tag sent before the prompt (`ChatTurn.context`).
+            public var context: String
             public var cancelAfterTokens: Int?
             public var storedWords: Int?
             public var expectation: ToolExpectation?
 
-            public init(prompt: String, cancelAfterTokens: Int? = nil, storedWords: Int? = nil, expectation: ToolExpectation? = nil) {
+            public init(prompt: String, context: String = LocalBenchmark.spokenContext, cancelAfterTokens: Int? = nil, storedWords: Int? = nil, expectation: ToolExpectation? = nil) {
                 self.prompt = prompt
+                self.context = context
                 self.cancelAfterTokens = cancelAfterTokens
                 self.storedWords = storedWords
                 self.expectation = expectation
@@ -248,28 +251,43 @@ extension LocalBenchmark {
         public var id: String
         public var title: String
         public var steps: [Step]
-        /// The context tag sent before every user turn (`ChatTurn.context`).
+        /// The context tag sent before each user turn (`ChatTurn.context`), unless
+        /// `contextOverrides` gives that turn another.
         public var context: String
+        /// Context tags for individual turns, keyed by the zero-based number of the `.user` step.
+        public var contextOverrides: [Int: String]
         /// Expected tool calls, keyed by the zero-based number of the `.user` step they answer.
         public var expectations: [Int: ToolExpectation]
 
-        public init(id: String, title: String, steps: [Step], context: String = LocalBenchmark.spokenContext, expectations: [Int: ToolExpectation] = [:]) {
+        public init(
+            id: String,
+            title: String,
+            steps: [Step],
+            context: String = LocalBenchmark.spokenContext,
+            contextOverrides: [Int: String] = [:],
+            expectations: [Int: ToolExpectation] = [:]
+        ) {
             self.id = id
             self.title = title
             self.steps = steps
             self.context = context
+            self.contextOverrides = contextOverrides
             self.expectations = expectations
         }
 
-        /// The steps, with each `.user` step's modifiers and expectation folded into its turn.
-        /// A modifier that doesn't follow a `.user` step is ignored.
+        /// The steps, with each `.user` step's context, modifiers and expectation folded into its
+        /// turn. A modifier that doesn't follow a `.user` step is ignored.
         public var actions: [Action] {
             var actions: [Action] = []
             var userSteps = 0
             for step in steps {
                 switch step {
                 case .user(let prompt):
-                    actions.append(.turn(Turn(prompt: prompt, expectation: expectations[userSteps])))
+                    actions.append(.turn(Turn(
+                        prompt: prompt,
+                        context: contextOverrides[userSteps] ?? context,
+                        expectation: expectations[userSteps]
+                    )))
                     userSteps += 1
                 case .cancelAfter(let tokens):
                     if case .turn(var turn) = actions.last {
@@ -393,20 +411,24 @@ extension LocalBenchmark {
     )
 
     /// Prompts whose answers repeat much of the prompt, where prompt-lookup drafting helps most,
-    /// each in a new conversation. The drafter lab's `copy-01` to `copy-06`.
+    /// each in a new conversation: the drafter lab's `copy-01` to `copy-06`, each with the lab's
+    /// context tag (`copy-01` and `copy-05` are spoken, the others typed).
     public static let copyHeavy = Scenario(
         id: "copyHeavy",
         title: "Copy-heavy",
-        steps: separateConversations([
-            "Read my shopping list back to me: eggs, two cartons of oat milk, sourdough bread, three avocados, cherry tomatoes, Greek yoghurt, and a five kilo bag of jasmine rice.",
-            "Fix the typos in this and give me only the corrected text: \"Hi Sarah, thanks for you're email. I'll definately send the quarterly report by tomorow morning, and we can dicuss the budget at the meeting on thursday.\"",
-            "Turn this into a JSON array of objects with name, phone and city: Alice Tan 9123 4567 Singapore, Ben Lim 8234 5678 Kuala Lumpur, Chloe Ng 9345 6789 Singapore.",
-            "Rewrite this message to sound more polite, keeping every detail: \"Send me the invoice for order 4471 by Friday. The amount was 1,250 dollars and it has to go to accounts@example.com, not my personal email.\"",
-            "把我的购物清单再读一遍：鸡蛋、两盒燕麦奶、全麦面包、三个牛油果、小番茄、希腊酸奶，还有一袋五公斤的茉莉香米。",
-            "帮我改正这段话里的错别字，只输出改好的内容：“我明天下午三点在公司门口等你，记得带上合同和身分证，不要迟倒，我们要在四点前把资料交给王经里。”",
-        ]),
-        context: labTypedContext
+        steps: separateConversations(copyPrompts.map(\.prompt)),
+        context: labTypedContext,
+        contextOverrides: Dictionary(uniqueKeysWithValues: copyPrompts.enumerated().map { ($0.offset, $0.element.context) })
     )
+
+    static let copyPrompts: [(prompt: String, context: String)] = [
+        ("Read my shopping list back to me: eggs, two cartons of oat milk, sourdough bread, three avocados, cherry tomatoes, Greek yoghurt, and a five kilo bag of jasmine rice.", labSpokenContext),
+        ("Fix the typos in this and give me only the corrected text: \"Hi Sarah, thanks for you're email. I'll definately send the quarterly report by tomorow morning, and we can dicuss the budget at the meeting on thursday.\"", labTypedContext),
+        ("Turn this into a JSON array of objects with name, phone and city: Alice Tan 9123 4567 Singapore, Ben Lim 8234 5678 Kuala Lumpur, Chloe Ng 9345 6789 Singapore.", labTypedContext),
+        ("Rewrite this message to sound more polite, keeping every detail: \"Send me the invoice for order 4471 by Friday. The amount was 1,250 dollars and it has to go to accounts@example.com, not my personal email.\"", labTypedContext),
+        ("把我的购物清单再读一遍：鸡蛋、两盒燕麦奶、全麦面包、三个牛油果、小番茄、希腊酸奶，还有一袋五公斤的茉莉香米。", labSpokenContext),
+        ("帮我改正这段话里的错别字，只输出改好的内容：“我明天下午三点在公司门口等你，记得带上合同和身分证，不要迟倒，我们要在四点前把资料交给王经里。”", labTypedContext),
+    ]
 
     /// Requests for device tools, each in a new conversation, with the expected tool and key
     /// arguments: the drafter lab's `tool-01` to `tool-12`, at the lab's fixed time. Run it with a
