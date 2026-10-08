@@ -60,28 +60,39 @@ final class HybridTargetTests: XCTestCase {
         XCTAssertEqual(batched.logits?.shape, [5, vocabulary])
     }
 
-    /// `.last` (the hidden states sliced before the head) is allClose to the last row of `.all`,
-    /// on an empty cache and on a filled one; the hidden states are the same whatever the rows.
+    /// `.last` is allClose to the last row of `.all`, on an empty cache and on a filled one, in
+    /// both of its branches: without hidden states it slices the layer outputs before the final
+    /// norm (the decode path); with them it slices the normed states. With hidden states, those
+    /// are the same whatever the rows.
     func testLastRowMatchesTheLastRowOfAll() throws {
         let model = try TinyForkModels.makeForkHybrid(seed: 64)
         let all = HybridTarget(model: model)
-        let last = HybridTarget(model: model)
+        let lastWithoutHidden = HybridTarget(model: model)
+        let lastWithHidden = HybridTarget(model: model)
         for (step, count) in [7, 3, 1].enumerated() {
             let tokens = Self.int32(TinyModels.tokens(count, seed: UInt64(65 + step)))
             let full = all.forward(tokens, rows: .all, captureForRollback: false, wantHidden: true)
-            let sliced = last.forward(tokens, rows: .last, captureForRollback: false, wantHidden: true)
             let fullLogits = try XCTUnwrap(full.logits)
-            let lastLogits = try XCTUnwrap(sliced.logits)
-            let expected = fullLogits[(count - 1)..., 0...]
-            eval(expected, lastLogits)
-            XCTAssertTrue(
-                LogitCheck.isClose(lastLogits, expected, rtol: 1e-5, atol: 1e-5),
-                "chunk \(step): max |Δ| = \(LogitCheck.maxAbsDifference(lastLogits, expected))")
-
             let fullHidden = try XCTUnwrap(full.hidden)
-            let lastHidden = try XCTUnwrap(sliced.hidden)
-            eval(fullHidden, lastHidden)
-            XCTAssertTrue(LogitCheck.isExactlyEqual(lastHidden, fullHidden), "chunk \(step) hidden")
+            let expected = fullLogits[(count - 1)..., 0...]
+
+            for (wantHidden, last) in [(false, lastWithoutHidden), (true, lastWithHidden)] {
+                let sliced = last.forward(tokens, rows: .last, captureForRollback: false, wantHidden: wantHidden)
+                let lastLogits = try XCTUnwrap(sliced.logits)
+                eval(expected, lastLogits)
+                XCTAssertEqual(lastLogits.shape, [1, TinyModels.vocabularySize])
+                XCTAssertTrue(
+                    LogitCheck.isClose(lastLogits, expected, rtol: 1e-5, atol: 1e-5),
+                    "chunk \(step), wantHidden \(wantHidden): max |Δ| = \(LogitCheck.maxAbsDifference(lastLogits, expected))")
+
+                if wantHidden {
+                    let lastHidden = try XCTUnwrap(sliced.hidden)
+                    eval(fullHidden, lastHidden)
+                    XCTAssertTrue(LogitCheck.isExactlyEqual(lastHidden, fullHidden), "chunk \(step) hidden")
+                } else {
+                    XCTAssertNil(sliced.hidden, "chunk \(step)")
+                }
+            }
         }
     }
 
