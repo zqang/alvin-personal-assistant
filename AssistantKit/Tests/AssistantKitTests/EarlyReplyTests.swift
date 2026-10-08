@@ -66,6 +66,11 @@ final class EarlyReplyTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(produced.first?.time), 0.25, accuracy: 0.0101)
         XCTAssertEqual(early.wait(for: "我想知道时间。"), 0.25, accuracy: 1e-9)
         XCTAssertEqual(early.wait(for: "what time is it"), 0.35, accuracy: 1e-9)
+
+        // A sentence end never waits longer than the delay.
+        var policy = EarlyReplyPolicy()
+        policy.afterSentenceEnd = 0.5
+        XCTAssertEqual(EarlyReplyCoordinator(policy: policy, enabled: true).wait(for: "Is it far?"), 0.35, accuracy: 1e-9)
     }
 
     func testWaitsForEnoughWords() {
@@ -247,12 +252,12 @@ final class EarlyReplyTests: XCTestCase {
         // It waits for five settled replies, then steps up to the bound and stays there.
         XCTAssertEqual(delays, [0.35, 0.35, 0.35, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.6, 0.6, 0.6])
 
-        // The tuned delay is the one used, and the sentence-end wait moves with it.
+        // The tuned delay is the one used; the sentence-end wait stays put.
         _ = early.transcriptChanged("is it far", at: clock.now)
         let start = clock.now
         let produced = ticks(&early, clock, until: start + 1)
         XCTAssertEqual((produced.first?.time ?? 0) - start, 0.6, accuracy: 0.0101)
-        XCTAssertEqual(early.wait(for: "Is it far?"), 0.5, accuracy: 1e-9)
+        XCTAssertEqual(early.wait(for: "Is it far?"), 0.25, accuracy: 1e-9)
     }
 
     func testTunerLowersTheDelayWhenTentativeRepliesAreAlmostAlwaysAdopted() {
@@ -264,7 +269,8 @@ final class EarlyReplyTests: XCTestCase {
             delays.append(early.currentDelay)
         }
         XCTAssertEqual(delays, [0.35, 0.35, 0.35, 0.35, 0.3, 0.25, 0.25, 0.25])
-        XCTAssertEqual(early.wait(for: "Is it far?"), 0.15, accuracy: 1e-9)
+        // Never below the tuner's lower bound: the sentence-end wait stays at 0.25 s.
+        XCTAssertEqual(early.wait(for: "Is it far?"), 0.25, accuracy: 1e-9)
     }
 
     func testTunerHoldsTheDelayInsideTheBand() {

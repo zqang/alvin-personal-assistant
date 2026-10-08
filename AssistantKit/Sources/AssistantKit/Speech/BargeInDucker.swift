@@ -6,9 +6,11 @@ import Foundation
 /// Feed it the echo-cancelled microphone level. While the assistant is speaking:
 /// - `minimumVoice` of unbroken voice at least `marginDB` over the noise floor (and above the
 ///   VAD's absolute threshold) gives `.duck`;
-/// - once ducked, `restoreAfter` without voice gives `.restore`, unless an interruption was
-///   confirmed. Restoring on quiet rather than on a timer keeps playback down while the user is
-///   still talking, instead of pumping up and down.
+/// - `restoreAfter` after the duck gives `.restore`, unless an interruption was confirmed by
+///   then: voice the recognizer doesn't confirm in time was not an interruption.
+/// The run of voice that ducked can't duck again once restored; only a fresh run, after a frame
+/// below the threshold, can. So a television or a long backchannel lowers playback once instead
+/// of pumping it up and down.
 /// When the assistant stops speaking while ducked, it gives `.restore` straight away.
 /// After `interruptionConfirmed()` it gives nothing until `reset()`; the reply is being stopped,
 /// and the caller restores full volume for the next one.
@@ -25,13 +27,15 @@ public struct BargeInDucker: Sendable {
     public var marginDB: Float = 18
     /// Seconds of unbroken voice before ducking.
     public var minimumVoice: TimeInterval = 0.15
-    /// Seconds without voice after which ducked playback is restored.
+    /// Seconds after ducking at which playback is restored, unless an interruption was confirmed.
     public var restoreAfter: TimeInterval = 0.6
 
     private var vad = EnergyVAD()
+    /// Start of the current unbroken run of voice.
     private var voiceSince: TimeInterval?
-    private var lastVoice: TimeInterval?
-    private var ducked = false
+    /// The current run of voice already ducked and was restored, so it can't duck again.
+    private var runSpent = false
+    private var duckedAt: TimeInterval?
     private var confirmed = false
 
     /// Absorbs rounding in caller-supplied times.
@@ -40,7 +44,7 @@ public struct BargeInDucker: Sendable {
     public init() {}
 
     /// Whether playback is currently ducked.
-    public var isDucked: Bool { ducked }
+    public var isDucked: Bool { duckedAt != nil }
 
     /// The current noise floor estimate, in dBFS.
     public var noiseFloor: Float { vad.noiseFloor }
@@ -51,24 +55,28 @@ public struct BargeInDucker: Sendable {
         guard !confirmed else { return .none }
         guard speaking else {
             voiceSince = nil
-            lastVoice = nil
-            guard ducked else { return .none }
-            ducked = false
+            runSpent = false
+            guard duckedAt != nil else { return .none }
+            duckedAt = nil
             return .restore
         }
-        if dB >= max(vad.noiseFloor + marginDB, vad.absoluteThreshold) {
-            lastVoice = time
-            let since = voiceSince ?? time
-            voiceSince = since
-            guard !ducked, time - since + Self.tolerance >= minimumVoice else { return .none }
-            ducked = true
-            return .duck
+        let isVoice = dB >= max(vad.noiseFloor + marginDB, vad.absoluteThreshold)
+        if !isVoice {
+            voiceSince = nil
+            runSpent = false
         }
-        voiceSince = nil
-        guard ducked, let lastVoice, time - lastVoice + Self.tolerance >= restoreAfter else { return .none }
-        ducked = false
-        self.lastVoice = nil
-        return .restore
+        if let duckedAt {
+            guard time - duckedAt + Self.tolerance >= restoreAfter else { return .none }
+            self.duckedAt = nil
+            runSpent = isVoice
+            return .restore
+        }
+        guard isVoice, !runSpent else { return .none }
+        let since = voiceSince ?? time
+        voiceSince = since
+        guard time - since + Self.tolerance >= minimumVoice else { return .none }
+        duckedAt = time
+        return .duck
     }
 
     /// The recognizer confirmed a real interruption: keep playback ducked; the reply is stopping.
@@ -79,8 +87,8 @@ public struct BargeInDucker: Sendable {
     /// Starts afresh for the next reply. Keeps the noise floor, which belongs to the room.
     public mutating func reset() {
         voiceSince = nil
-        lastVoice = nil
-        ducked = false
+        runSpent = false
+        duckedAt = nil
         confirmed = false
     }
 }

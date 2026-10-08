@@ -66,13 +66,13 @@ final class BargeInDuckerTests: XCTestCase {
         var ducker = settledDucker(on: -50)
         XCTAssertEqual(ducker.noiseFloor, -50, accuracy: 0.5)
         XCTAssertTrue(feed(&ducker, -38, from: 0, to: 1).isEmpty)
-        XCTAssertEqual(feed(&ducker, -28, from: 1, to: 2).map(\.output), [.duck])
+        XCTAssertEqual(feed(&ducker, -28, from: 1, to: 1.5).map(\.output), [.duck])
     }
 
     func testMarginIsConfigurable() {
         var ducker = settledDucker(on: -50)
         ducker.marginDB = 10
-        XCTAssertEqual(feed(&ducker, -38, from: 0, to: 1).map(\.output), [.duck])
+        XCTAssertEqual(feed(&ducker, -38, from: 0, to: 0.5).map(\.output), [.duck])
     }
 
     func testIgnoresLevelsBelowTheVoiceThreshold() {
@@ -87,20 +87,37 @@ final class BargeInDuckerTests: XCTestCase {
         XCTAssertFalse(ducker.isDucked)
     }
 
-    func testRestoresOnlyAfterQuiet() throws {
+    func testRestoresAfterTheDelayWithoutAConfirmedInterruption() throws {
         var ducker = settledDucker()
-        XCTAssertEqual(feed(&ducker, voice, from: 0, to: 0.3).map(\.output), [.duck])
-        // Still talking long after the duck, with a short pause: playback stays down.
-        XCTAssertTrue(feed(&ducker, voice, from: 0.3, to: 1.2).isEmpty)
-        XCTAssertTrue(feed(&ducker, quiet, from: 1.2, to: 1.6).isEmpty)
-        XCTAssertTrue(feed(&ducker, voice, from: 1.6, to: 2.0).isEmpty, "already ducked")
-        let lastVoice = 2.0 - frame
-        let outputs = feed(&ducker, quiet, from: 2.0, to: 3.0)
+        let ducked = feed(&ducker, voice, from: 0, to: 0.3)
+        XCTAssertEqual(ducked.map(\.output), [.duck])
+        let duckTime = try XCTUnwrap(ducked.first?.time)
+        // A pause and more voice while ducked don't move the restore.
+        XCTAssertTrue(feed(&ducker, quiet, from: 0.3, to: 0.4).isEmpty)
+        XCTAssertTrue(feed(&ducker, voice, from: 0.4, to: 0.6).isEmpty, "already ducked")
+        let outputs = feed(&ducker, quiet, from: 0.6, to: 2)
         XCTAssertEqual(outputs.map(\.output), [.restore])
         let restored = try XCTUnwrap(outputs.first?.time)
-        XCTAssertGreaterThanOrEqual(restored - lastVoice, 0.6 - 1e-9)
-        XCTAssertLessThan(restored - lastVoice, 0.6 + frame)
+        XCTAssertGreaterThanOrEqual(restored - duckTime, 0.6 - 1e-9)
+        XCTAssertLessThan(restored - duckTime, 0.6 + frame)
         XCTAssertFalse(ducker.isDucked)
+    }
+
+    func testSustainedUnconfirmedVoiceRestoresOnTimeWithoutPumping() throws {
+        // A television, or a long backchannel the recognizer never confirms as an interruption.
+        var ducker = settledDucker()
+        let outputs = feed(&ducker, voice, from: 0, to: 5)
+        XCTAssertEqual(outputs.map(\.output), [.duck, .restore], "ducks once, then stays at full volume")
+        let duckTime = try XCTUnwrap(outputs.first?.time)
+        let restored = try XCTUnwrap(outputs.last?.time)
+        XCTAssertGreaterThanOrEqual(restored - duckTime, 0.6 - 1e-9)
+        XCTAssertLessThan(restored - duckTime, 0.6 + frame)
+        XCTAssertFalse(ducker.isDucked)
+        // A pause ends that run of voice; a fresh run ducks again.
+        XCTAssertTrue(feed(&ducker, quiet, from: 5, to: 5.1).isEmpty)
+        let again = feed(&ducker, voice, from: 5.1, to: 5.5)
+        XCTAssertEqual(again.map(\.output), [.duck])
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(again.first?.time) - 5.1, 0.15 - 1e-9)
     }
 
     func testDucksAgainOnlyAfterAFreshRunOfVoice() throws {
@@ -139,10 +156,10 @@ final class BargeInDuckerTests: XCTestCase {
         ducker.restoreAfter = 1.0
         let ducked = feed(&ducker, voice, from: 0, to: 1)
         XCTAssertEqual(ducked.map(\.output), [.duck])
-        XCTAssertEqual(ducked.first?.time ?? 0, 0.3, accuracy: frame)
-        let lastVoice = 1 - frame
+        let duckTime = ducked.first?.time ?? 0
+        XCTAssertEqual(duckTime, 0.3, accuracy: frame)
         let restored = feed(&ducker, quiet, from: 1, to: 3)
         XCTAssertEqual(restored.map(\.output), [.restore])
-        XCTAssertEqual((restored.first?.time ?? 0) - lastVoice, 1.0, accuracy: frame)
+        XCTAssertEqual((restored.first?.time ?? 0) - duckTime, 1.0, accuracy: frame)
     }
 }

@@ -5,6 +5,7 @@ public struct EarlyReplyPolicy: Equatable, Sendable {
     /// Seconds the transcript must stay unchanged before a tentative reply starts.
     public var delay: TimeInterval = 0.35
     /// The same wait when the transcript ends a sentence ("?", "。"), which rarely continues.
+    /// The tuner doesn't move it, but it is never longer than the tuned delay.
     public var afterSentenceEnd: TimeInterval = 0.25
     /// A tentative reply needs at least this many words...
     public var minimumWords = 2
@@ -51,6 +52,7 @@ public enum TurnText {
 /// A tuner moves the delay by 0.05 s after each tentative reply is settled: up when more than
 /// 30% of the last 20 were discarded, down when fewer than 10% were, within the policy's bounds.
 /// It waits for 5 settled replies before its first move. Replies dropped by `reset()` don't count.
+/// The sentence-end wait stays at `policy.afterSentenceEnd`.
 public struct EarlyReplyCoordinator: Sendable {
     public enum Action: Equatable, Sendable {
         /// Start a reply to `text` now. Nothing of it may be shown or spoken until `adopt`.
@@ -140,11 +142,11 @@ public struct EarlyReplyCoordinator: Sendable {
         started = []
     }
 
-    /// How long `text` must be stable. The tuner moves the sentence-end wait by as much as it
-    /// moved the delay.
+    /// How long `text` must be stable: the tuned delay, or after a sentence end the fixed
+    /// sentence-end wait, never longer than the tuned delay.
     func wait(for text: String) -> TimeInterval {
         guard let last = text.last, Self.sentenceEnds.contains(last) else { return currentDelay }
-        return min(max(policy.afterSentenceEnd + currentDelay - policy.delay, 0), currentDelay)
+        return min(policy.afterSentenceEnd, currentDelay)
     }
 
     private func isLongEnough(_ text: String) -> Bool {
