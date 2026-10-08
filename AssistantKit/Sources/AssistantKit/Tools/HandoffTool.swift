@@ -5,14 +5,16 @@ import Foundation
 ///
 /// The local tool loop intercepts the call before it would run (it throws `ReplyHandoff`, or
 /// answers it itself when offline), so the tool's own `run` only reports that it was meant to be
-/// intercepted. Its definition matches `handoff_to_cloud` in `scripts/lab_prompts.json`, which the
-/// lab measures models against.
+/// intercepted. Its input schema matches `handoff_to_cloud` in `scripts/lab_prompts.json`, which
+/// the lab measures models against. The description is more explicit than the lab's first one:
+/// with that, asked how long a timer had left while it could only start timers, the on-device
+/// model started a one-second timer instead of handing off.
 public enum HandoffTool {
     public static let name = "handoff_to_cloud"
 
     public static let definition = ToolDefinition(
         name: name,
-        description: "Hand this request to the more capable cloud assistant, which sees the whole conversation. Call this when the request needs current information from the web, long or careful reasoning, or anything you cannot do well yourself.",
+        description: "Hand this request to the more capable cloud assistant, which sees the whole conversation. Call this first, instead of answering or calling another tool, when the request needs the internet (news, weather, prices, scores, opening hours), asks about something none of your other tools can read or do (for example how long a timer has left, when your tools can only start timers), or needs long, careful reasoning. Never call another tool as a stand-in for a request it doesn't fit.",
         inputSchema: [
             "type": "object",
             "properties": [

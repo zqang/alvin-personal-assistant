@@ -11,6 +11,10 @@ import Foundation
 ///   not run and gets `cancelledMessage`;
 /// - each run is limited to `timeout`. A tool that doesn't finish in time gets an error record; its
 ///   task is cancelled, but the runner doesn't wait for it to stop;
+/// - a side-effect tool that timed out may still be acting, so no later side-effect tool starts
+///   until it has ended: not later in the round, nor in a later round run by this runner or a copy
+///   of it. That wait is also limited to `timeout`; past it, the later call isn't run and gets
+///   `earlierActionRunningMessage`;
 /// - a result is the output's `content` as JSON with sorted keys, cut to `maxResultCharacters`
 ///   characters plus `"…(truncated)"` when longer.
 ///
@@ -19,11 +23,16 @@ public struct ToolRunner: ToolExecutor {
     public static let unknownToolMessage = "Unknown tool"
     public static let cancelledMessage = "The request was cancelled before the action ran."
     public static let truncationMarker = "…(truncated)"
+    static let timeoutMessage = "The tool didn't finish in time."
+    static let sideEffectTimeoutMessage = "The tool didn't finish in time; the action may or may not have happened. Don't repeat it; tell the user it may not have gone through."
+    static let earlierActionRunningMessage = "An earlier action is still in progress, so this one wasn't started."
 
     public let registry: ToolRegistry
     public let timeout: Duration
     public let maxResultCharacters: Int
     public let lenientInput: Bool
+    /// Side-effect runs that timed out but may still be acting. Copies of the runner share it.
+    private let abandoned = AbandonedSideEffects()
 
     /// - Parameters:
     ///   - timeout: the longest one tool may run; zero or less means no limit.
@@ -130,14 +139,19 @@ public struct ToolRunner: ToolExecutor {
         }
         // An open gate lets a cancelled task through; the round was abandoned, so don't act.
         guard !Task.isCancelled else { return .error(Self.cancelledMessage) }
+        // Never act while an earlier action that timed out may still be acting.
+        let clear = await abandoned.waitUntilEnded(limit: timeout)
+        guard !Task.isCancelled else { return .error(Self.cancelledMessage) }
+        guard clear else { return .error(Self.earlierActionRunningMessage) }
         return await execute(job, context: context)
     }
 
     /// Runs the tool in its own task and returns its output, or a timeout error when `timeout`
     /// passes first. Cancelling the caller cancels the tool's task; its output (often an error)
-    /// is still awaited, within the timeout, so the record says what actually happened.
+    /// is still awaited, within the timeout, so the record says what actually happened. A
+    /// side-effect run that times out is kept in `abandoned` until it ends.
     private func execute(_ job: Job, context: ToolContext) async -> ToolOutput {
-        let outcome = FirstOutput()
+        let outcome = FirstValue<Outcome>()
         let tool = job.tool
         let input = job.input
         let work = Task {
@@ -147,31 +161,40 @@ public struct ToolRunner: ToolExecutor {
             } catch {
                 output = Self.failure(error)
             }
-            outcome.offer(output)
+            outcome.offer(.finished(output))
         }
         var timer: Task<Void, Never>?
         if timeout > .zero {
             let limit = timeout
-            let message = tool.effect == .sideEffect
-                ? "The tool didn't finish in time; the action may or may not have happened."
-                : "The tool didn't finish in time."
             timer = Task {
                 do {
                     try await Task.sleep(for: limit)
                 } catch {
                     return
                 }
-                outcome.offer(.error(message))
+                outcome.offer(.timedOut)
             }
         }
-        let output = await withTaskCancellationHandler {
+        let result = await withTaskCancellationHandler {
             await outcome.value()
         } onCancel: {
             work.cancel()
         }
         work.cancel()
         timer?.cancel()
-        return output
+        switch result {
+        case .finished(let output):
+            return output
+        case .timedOut:
+            guard tool.effect == .sideEffect else { return .error(Self.timeoutMessage) }
+            abandoned.add(work)
+            return .error(Self.sideEffectTimeoutMessage)
+        }
+    }
+
+    private enum Outcome: Sendable {
+        case finished(ToolOutput)
+        case timedOut
     }
 
     private static func failure(_ error: Error) -> ToolOutput {
@@ -197,33 +220,97 @@ public struct ToolRunner: ToolExecutor {
     }
 }
 
-/// Holds the first output offered, and hands it to the one task waiting for it.
-private final class FirstOutput: @unchecked Sendable {
+/// Side-effect runs the runner stopped waiting for after a timeout. A tool may ignore
+/// cancellation (or wait on a permission alert), so such a run can still act; later side effects
+/// wait for it to end, which keeps actions from ever running at the same time.
+private final class AbandonedSideEffects: @unchecked Sendable {
     private let lock = NSLock()
-    private var output: ToolOutput?
-    private var waiter: CheckedContinuation<ToolOutput, Never>?
+    private var runs: [Task<Void, Never>] = []
 
-    /// Keeps `candidate` if no output arrived before it; later offers are ignored.
-    func offer(_ candidate: ToolOutput) {
+    func add(_ run: Task<Void, Never>) {
         lock.lock()
-        guard output == nil else {
+        runs.append(run)
+        lock.unlock()
+    }
+
+    /// Waits until every run added so far has ended, for at most `limit` (no limit when it is zero
+    /// or less). Returns false when `limit` passes first or the waiting task is cancelled.
+    func waitUntilEnded(limit: Duration) async -> Bool {
+        let pending = current()
+        guard !pending.isEmpty else { return true }
+
+        let ended = FirstValue<Bool>()
+        let watcher = Task {
+            for run in pending {
+                await run.value
+            }
+            ended.offer(true)
+        }
+        var timer: Task<Void, Never>?
+        if limit > .zero {
+            timer = Task {
+                do {
+                    try await Task.sleep(for: limit)
+                } catch {
+                    return
+                }
+                ended.offer(false)
+            }
+        }
+        let result = await withTaskCancellationHandler {
+            await ended.value()
+        } onCancel: {
+            ended.offer(false)
+        }
+        // A run that hasn't ended keeps `watcher` waiting; its late offer is ignored.
+        watcher.cancel()
+        timer?.cancel()
+        if result {
+            forget(pending)
+        }
+        return result
+    }
+
+    private func current() -> [Task<Void, Never>] {
+        lock.lock()
+        defer { lock.unlock() }
+        return runs
+    }
+
+    private func forget(_ ended: [Task<Void, Never>]) {
+        lock.lock()
+        runs.removeAll { ended.contains($0) }
+        lock.unlock()
+    }
+}
+
+/// Holds the first value offered, and hands it to the one task waiting for it.
+private final class FirstValue<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value?
+    private var waiter: CheckedContinuation<Value, Never>?
+
+    /// Keeps `candidate` if no value arrived before it; later offers are ignored.
+    func offer(_ candidate: Value) {
+        lock.lock()
+        guard stored == nil else {
             lock.unlock()
             return
         }
-        output = candidate
+        stored = candidate
         let waiting = waiter
         waiter = nil
         lock.unlock()
         waiting?.resume(returning: candidate)
     }
 
-    /// Waits for the first output. Call it once.
-    func value() async -> ToolOutput {
-        await withCheckedContinuation { (continuation: CheckedContinuation<ToolOutput, Never>) in
+    /// Waits for the first value. Call it once.
+    func value() async -> Value {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Value, Never>) in
             lock.lock()
-            if let output {
+            if let stored {
                 lock.unlock()
-                continuation.resume(returning: output)
+                continuation.resume(returning: stored)
             } else {
                 waiter = continuation
                 lock.unlock()

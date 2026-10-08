@@ -12,17 +12,24 @@ private func call(_ id: String, _ name: String, _ input: JSONValue? = .object([:
     PendingToolCall(id: id, name: name, input: input, rawInput: raw)
 }
 
+private let sideEffectTimedOut = #"{"error":"The tool didn't finish in time; the action may or may not have happened. Don't repeat it; tell the user it may not have gone through."}"#
+
 /// A tool that ignores cancellation: it finishes only after `seconds`, whatever happens.
 private struct StubbornTool: AssistantTool {
+    var name = "stubborn"
+    var effect: ToolEffect = .readOnly
     let seconds: Double
-    var definition: ToolDefinition { ToolDefinition(name: "stubborn", description: "Ignores cancellation.", inputSchema: FakeTool.emptySchema) }
-    var effect: ToolEffect { .readOnly }
+    /// Records `start(name)` and `end(name)` around each run.
+    var log = ToolActivityLog()
+    var definition: ToolDefinition { ToolDefinition(name: name, description: "Ignores cancellation.", inputSchema: FakeTool.emptySchema) }
     var presentation: ToolPresentation { .generic }
 
     func run(_ input: [String: JSONValue], context: ToolContext) async throws -> ToolOutput {
+        log.record(.start(name))
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { continuation.resume() }
         }
+        log.record(.end(name))
         return .ok(["late": true])
     }
 }
@@ -149,18 +156,99 @@ final class ToolRunnerTests: XCTestCase {
     }
 
     func testTimeoutHoldsEvenWhenTheToolIgnoresCancellation() async {
-        let runner = ToolRunner(registry: ToolRegistry([StubbornTool(seconds: 3)]), timeout: .milliseconds(100))
+        let write = FakeTool(name: "create_reminder", effect: .sideEffect)
+        let runner = ToolRunner(registry: ToolRegistry([StubbornTool(seconds: 3), write]), timeout: .milliseconds(100))
         let started = Date()
         let round = await runner.run([call("c1", "stubborn")], context: ToolContext())
         XCTAssertLessThan(Date().timeIntervalSince(started), 2)
         XCTAssertTrue(round.calls[0].isError)
+        XCTAssertEqual(round.calls[0].result, #"{"error":"The tool didn't finish in time."}"#)
+
+        // A read-only tool that is still running doesn't hold side effects back.
+        let next = await runner.run([call("c2", "create_reminder")], context: ToolContext())
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        XCTAssertFalse(next.calls[0].isError)
+        XCTAssertEqual(write.runCount, 1)
     }
 
     func testSideEffectTimeoutSaysTheActionMayHaveHappened() async {
         let slow = FakeTool(name: "slow_write", effect: .sideEffect, delay: 5)
         let runner = ToolRunner(registry: ToolRegistry([slow]), timeout: .milliseconds(50))
         let round = await runner.run([call("c1", "slow_write")], context: ToolContext())
-        XCTAssertEqual(round.calls[0].result, #"{"error":"The tool didn't finish in time; the action may or may not have happened."}"#)
+        XCTAssertEqual(round.calls[0].result, sideEffectTimedOut)
+    }
+
+    func testATimedOutActionHoldsBackTheNextOneUntilItEnds() async {
+        // The first action outlives its 1 s limit by half a second and ignores cancellation.
+        let log = ToolActivityLog()
+        let stuck = StubbornTool(name: "slow_write", effect: .sideEffect, seconds: 1.5, log: log)
+        let next = FakeTool(name: "create_reminder", effect: .sideEffect, log: log)
+        let runner = ToolRunner(registry: ToolRegistry([stuck, next]), timeout: .seconds(1))
+
+        let round = await runner.run([call("c1", "slow_write"), call("c2", "create_reminder")], context: ToolContext())
+
+        XCTAssertEqual(round.calls[0].result, sideEffectTimedOut)
+        XCTAssertFalse(round.calls[1].isError)
+        XCTAssertEqual(log.entries, [.start("slow_write"), .end("slow_write"), .start("create_reminder"), .end("create_reminder")])
+    }
+
+    func testATimedOutActionHoldsBackLaterRoundsToo() async {
+        let log = ToolActivityLog()
+        let stuck = StubbornTool(name: "slow_write", effect: .sideEffect, seconds: 1.5, log: log)
+        let next = FakeTool(name: "create_reminder", effect: .sideEffect, log: log)
+        let runner = ToolRunner(registry: ToolRegistry([stuck, next]), timeout: .seconds(1))
+
+        let first = await runner.run([call("c1", "slow_write")], context: ToolContext())
+        XCTAssertEqual(first.calls[0].result, sideEffectTimedOut)
+        // A copy of the runner knows about the action that is still going.
+        let copy = runner
+        let second = await copy.run([call("c2", "create_reminder")], context: ToolContext())
+
+        XCTAssertFalse(second.calls[0].isError)
+        XCTAssertEqual(log.entries, [.start("slow_write"), .end("slow_write"), .start("create_reminder"), .end("create_reminder")])
+    }
+
+    func testAnActionStillRunningPastTheLimitStopsTheNextOne() async {
+        let log = ToolActivityLog()
+        let stuck = StubbornTool(name: "slow_write", effect: .sideEffect, seconds: 2, log: log)
+        let next = FakeTool(name: "create_reminder", effect: .sideEffect, log: log)
+        let read = FakeTool(name: "list_reminders", log: log)
+        let runner = ToolRunner(registry: ToolRegistry([stuck, next, read]), timeout: .milliseconds(200))
+
+        let started = Date()
+        let round = await runner.run([call("c1", "slow_write"), call("c2", "create_reminder"), call("c3", "list_reminders")], context: ToolContext())
+
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.5)
+        XCTAssertEqual(round.calls.map(\.result), [
+            sideEffectTimedOut,
+            #"{"error":"An earlier action is still in progress, so this one wasn't started."}"#,
+            #"{"ok":true}"#,
+        ])
+        XCTAssertEqual(next.runCount, 0)
+        XCTAssertEqual(read.runCount, 1, "reads don't wait for actions")
+
+        // Once the stuck action has ended, actions run again.
+        let ended = await waitUntil(timeout: 5) { log.entries.contains(.end("slow_write")) }
+        XCTAssertTrue(ended)
+        let again = await runner.run([call("c4", "create_reminder")], context: ToolContext())
+        XCTAssertFalse(again.calls[0].isError)
+        XCTAssertEqual(next.runCount, 1)
+    }
+
+    func testCancellingTheRoundWhileAnEarlierActionRunsStopsTheNextOne() async throws {
+        let stuck = StubbornTool(name: "slow_write", effect: .sideEffect, seconds: 2)
+        let next = FakeTool(name: "create_reminder", effect: .sideEffect)
+        let runner = ToolRunner(registry: ToolRegistry([stuck, next]), timeout: .milliseconds(500))
+        let first = await runner.run([call("c1", "slow_write")], context: ToolContext())
+        XCTAssertEqual(first.calls[0].result, sideEffectTimedOut)
+
+        let running = Task { await runner.run([call("c2", "create_reminder")], context: ToolContext()) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        running.cancel()
+        let round = await running.value
+
+        XCTAssertEqual(round.calls.map(\.result), [#"{"error":"The request was cancelled before the action ran."}"#])
+        XCTAssertEqual(next.runCount, 0)
     }
 
     func testLongResultsAreCutDeterministically() async throws {
@@ -402,7 +490,9 @@ final class ToolRegistryTests: XCTestCase {
     }
 
     func testHandoffSchemaMatchesTheLabDefinition() throws {
-        // scripts/lab_prompts.json is the schema the lab measures models with; keep them in sync.
+        // scripts/lab_prompts.json holds the schema the lab measures models with; keep the input
+        // schema in sync. The description was made more explicit after the lab ran, so it isn't
+        // compared here.
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("scripts/lab_prompts.json")
@@ -411,7 +501,6 @@ final class ToolRegistryTests: XCTestCase {
         }
         let lab = try JSONValue.parse(data)
         let entry = try XCTUnwrap(lab["tool_schemas"]?.arrayValue?.first { $0["name"] == "handoff_to_cloud" })
-        XCTAssertEqual(entry["description"]?.stringValue, HandoffTool.definition.description)
         XCTAssertEqual(entry["input_schema"], HandoffTool.definition.inputSchema)
     }
 }
