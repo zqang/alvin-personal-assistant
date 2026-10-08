@@ -96,6 +96,38 @@ final class LedgerInvariantTests: XCTestCase {
         }
     }
 
+    /// A prefill interrupted part-way leaves the cached conversation reusable: the retried
+    /// request still appends, after rewinding the partly fed tokens.
+    func testInterruptedPrefillKeepsTheSessionReusable() async throws {
+        for tiny in EngineTestHarness.Tiny.allCases {
+            let gate = CallBudget(calls: 1_000)
+            var configuration = EngineTestHarness.testConfiguration()
+            configuration.hooks = EngineHooks(beginGPU: { true }, endGPU: {}, isAllowed: { gate.take() })
+            let (engine, _) = try EngineTestHarness.makeScriptedEngine(
+                tiny: tiny, scripts: ["First.", "Second."].map(tokenizer.encodeRaw), configuration: configuration)
+            var turns = [ChatTurn(role: .user, text: "One?")]
+            let first = try await EngineTestHarness.collect(engine.reply(EngineRequest(system: system, turns: turns)))
+            turns += [ChatTurn(role: .assistant, text: EngineTestHarness.text(first)), ChatTurn(role: .user, text: "Two?")]
+            let cached = try await engine.withSession { $0.ledger.count }
+
+            // One prefill chunk is allowed, then the GPU is refused.
+            gate.reset(calls: 1)
+            let interrupted = try await EngineTestHarness.collect(engine.reply(EngineRequest(system: system, turns: turns)))
+            XCTAssertEqual(EngineTestHarness.finish(interrupted)?.reason, .cancelled, "\(tiny)")
+            let fed = try await engine.withSession { $0.ledger.count }
+            XCTAssertGreaterThan(fed, cached, "\(tiny): part of the new turn was fed")
+            try await assertConsistent(engine, "\(tiny) interrupted")
+
+            gate.reset(calls: 1_000)
+            let retried = try await EngineTestHarness.collect(engine.reply(EngineRequest(system: system, turns: turns)))
+            let finish = try XCTUnwrap(EngineTestHarness.finish(retried))
+            XCTAssertEqual(finish.stats.planReason, "append", "\(tiny)")
+            XCTAssertEqual(finish.stats.reusedTokens, cached, "\(tiny)")
+            XCTAssertEqual(EngineTestHarness.text(retried), "Second.")
+            try await assertConsistent(engine, "\(tiny) retried")
+        }
+    }
+
     /// A scripted tool call, its results and the final answer.
     func testAfterAToolCallAndItsContinuation() async throws {
         for tiny in EngineTestHarness.Tiny.allCases {

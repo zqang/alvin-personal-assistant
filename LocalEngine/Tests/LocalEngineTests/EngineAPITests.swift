@@ -277,3 +277,88 @@ private struct WithoutTurnMarkers: ChatTemplateRendering {
         token == "<|im_start|>" || token == "<|im_end|>" ? nil : base.tokenID(token)
     }
 }
+
+/// `TextStreamer` on its own: visible text, thinking filtered, tool calls found as they start
+/// and parsed at the end, cut-off calls never shown. No GPU needed.
+final class TextStreamerTests: XCTestCase {
+    private let tokenizer = FakeChatMLTokenizer()
+
+    private struct Streamed {
+        let outputs: [TextStreamer.Output]
+        let text: String
+        let toolCalls: [PendingToolCall]
+        let streamer: TextStreamer
+    }
+
+    private func stream(_ text: String, format: ToolCallFormat = .json, tools: [[String: any Sendable]]? = nil) -> Streamed {
+        let streamer = TextStreamer(tokenizer: tokenizer, renderer: tokenizer, format: format, tools: tools)
+        var outputs: [TextStreamer.Output] = []
+        for token in tokenizer.encodeRaw(text) {
+            outputs += streamer.append([token])
+        }
+        let (tail, calls) = streamer.finish()
+        let shown = outputs.compactMap { output -> String? in
+            if case .text(let text) = output { return text }
+            return nil
+        }.joined() + tail
+        return Streamed(outputs: outputs, text: shown, toolCalls: calls, streamer: streamer)
+    }
+
+    func testThinkingIsFilteredAndTextKept() {
+        let result = stream("<think>\nweighing it\n</think>\n\nHello <b> world, 3 < 4.")
+        XCTAssertEqual(result.text, "Hello <b> world, 3 < 4.")
+        XCTAssertEqual(result.streamer.visibleText, "Hello <b> world, 3 < 4.")
+        XCTAssertTrue(result.toolCalls.isEmpty)
+        XCTAssertTrue(result.streamer.startedCalls.isEmpty)
+    }
+
+    func testJSONToolCallIsReportedAndParsed() {
+        let tools = JSONBridge.templateTools([
+            ToolDefinition(name: "set_timer", description: "Timer.", inputSchema: ["type": "object", "properties": ["seconds": ["type": "integer"]]]),
+        ])
+        let result = stream("Sure. <tool_call>\n{\"name\": \"set_timer\", \"arguments\": {\"seconds\": 5}}\n</tool_call>", tools: tools)
+        XCTAssertEqual(result.text, "Sure. ")
+        let progress = result.outputs.filter { output in
+            if case .toolCallStarted = output { return true }
+            return false
+        }
+        XCTAssertEqual(progress, [.toolCallStarted(nil), .toolCallStarted("set_timer")])
+        XCTAssertEqual(result.toolCalls.map(\.name), ["set_timer"])
+        XCTAssertEqual(result.toolCalls.first?.input, ["seconds": 5])
+        XCTAssertNil(result.toolCalls.first?.rawInput)
+        XCTAssertEqual(result.streamer.startedCalls, ["set_timer"])
+        XCTAssertFalse(result.streamer.insideToolCall)
+    }
+
+    func testXMLFunctionCallNameAndArguments() {
+        let tools = JSONBridge.templateTools([
+            ToolDefinition(
+                name: "create_reminder", description: "Reminder.",
+                inputSchema: ["type": "object", "properties": ["title": ["type": "string"], "minutes": ["type": "integer"]]]),
+        ])
+        let call = "<tool_call>\n<function=create_reminder>\n<parameter=title>\nCall mum\n</parameter>\n"
+            + "<parameter=minutes>\n30\n</parameter>\n</function>\n</tool_call>"
+        let result = stream(call, format: .xmlFunction, tools: tools)
+        XCTAssertEqual(result.text, "")
+        XCTAssertTrue(result.outputs.contains(.toolCallStarted("create_reminder")))
+        XCTAssertEqual(result.toolCalls.first?.name, "create_reminder")
+        XCTAssertEqual(result.toolCalls.first?.input, ["title": "Call mum", "minutes": 30])
+    }
+
+    func testCutOffCallIsNeverShown() {
+        let result = stream("<tool_call>\n{\"name\": \"set_ti")
+        XCTAssertEqual(result.text, "")
+        XCTAssertTrue(result.toolCalls.isEmpty)
+        XCTAssertEqual(result.streamer.startedCalls, [nil], "the start was seen, the name never completed")
+    }
+
+    func testInsideToolCallFollowsTheTags() {
+        let streamer = TextStreamer(tokenizer: tokenizer, renderer: tokenizer, format: .json, tools: nil)
+        _ = streamer.append(tokenizer.encodeRaw("Ok "))
+        XCTAssertFalse(streamer.insideToolCall)
+        _ = streamer.append(tokenizer.encodeRaw("<tool_call>\n{\"name\""))
+        XCTAssertTrue(streamer.insideToolCall)
+        _ = streamer.append(tokenizer.encodeRaw(": \"x\", \"arguments\": {}}\n</tool_call>"))
+        XCTAssertFalse(streamer.insideToolCall)
+    }
+}

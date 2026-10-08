@@ -78,7 +78,11 @@ public final class TextStreamer {
     /// and the reply's tool calls.
     public func finish() -> (text: String, toolCalls: [PendingToolCall]) {
         var outputs: [Output] = []
-        if let rest = processor.processEOS(returnBufferedText: true) {
+        // Text held back as a possible tool call is shown, unless it is the start of a call that
+        // was cut off (by the length limit or a cancellation): markup is never shown.
+        if let rest = processor.processEOS(returnBufferedText: true),
+           !(startTag.map { rest.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix($0) } ?? false)
+        {
             emit(thinking.feed(rest), into: &outputs)
         }
         emit(thinking.finish(), into: &outputs)

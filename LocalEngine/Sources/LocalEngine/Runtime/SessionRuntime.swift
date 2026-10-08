@@ -114,7 +114,9 @@ final class SessionRuntime {
             return now.timeIntervalSince(clock)
         }
 
-        let live = session.snapshot.flatMap { $0.tokenCount == session.ledger.count ? $0 : nil }
+        // A snapshot may describe fewer tokens than the ledger holds (after an interrupted
+        // prefill); every plan then rewinds to a position it describes.
+        let live = session.snapshot.flatMap { $0.tokenCount <= session.ledger.count ? $0 : nil }
         let hasPersistedPrefix = prefixStore?.contains(key: key) ?? false
         guard let plan = SessionPlanner.plan(
             live: live, prefixKey: key, hasPersistedPrefix: hasPersistedPrefix, turns: request.turns, limits: configuration.limits)
@@ -191,7 +193,14 @@ final class SessionRuntime {
             marks.append((.lastUserStart, userStart))
         }
 
-        let logits = try prefill(tokens, marks: marks, isAllowed: isAllowed)
+        let logits: MLXArray
+        do {
+            logits = try prefill(tokens, marks: marks, isAllowed: isAllowed)
+        } catch is PrefillInterrupted {
+            // Keep what the cache still holds reusable: the base, which the next plan rewinds to.
+            session.snapshot = Self.snapshot(of: live, base: base, kept: start, key: key, systemEnd: systemEnd)
+            throw PrefillInterrupted()
+        }
         phases.prefill = lap()
 
         session.snapshot = SessionSnapshot.afterPrefill(
@@ -199,6 +208,34 @@ final class SessionRuntime {
         applyCheckpointPolicy()
         return Prepared(
             firstLogits: logits, reason: plan.reason.rawValue, phases: phases, prefilledTokens: tokens.count, reusedTokens: reused)
+    }
+
+    /// The snapshot describing the first `kept` tokens of the ledger after a plan's base ran:
+    /// the live snapshot cut back to `kept`, or the system prefix alone. Nil if no snapshot
+    /// describes them.
+    static func snapshot(of live: SessionSnapshot?, base: SessionPlan.Base, kept: Int, key: String, systemEnd: Int) -> SessionSnapshot? {
+        switch base {
+        case .keep:
+            guard let live else { return nil }
+            if kept == live.tokenCount { return live }
+            if kept == live.systemEnd && kept > 0 {
+                return SessionSnapshot(prefixKey: key, systemEnd: live.systemEnd, firstTurnIndex: live.firstTurnIndex, turns: [], tokenCount: kept)
+            }
+            guard let index = live.newestUserTurnIndex else { return nil }
+            var cut = live
+            if kept == live.turns[index].replyStart {
+                cut.turns = Array(live.turns[...index])
+            } else if kept == live.turns[index].start {
+                cut.turns = Array(live.turns[..<index])
+            } else {
+                return nil
+            }
+            cut.tokenCount = kept
+            return cut
+        case .persistedPrefix, .empty:
+            guard kept > 0, kept == systemEnd else { return nil }
+            return SessionSnapshot(prefixKey: key, systemEnd: systemEnd, firstTurnIndex: 0, turns: [], tokenCount: kept)
+        }
     }
 
     /// Renders `[system] + window` (+ `extra`, the reply in progress) into an empty cache. The
@@ -301,29 +338,43 @@ final class SessionRuntime {
     /// Records what a generation of the reply produced: its visible text, and the tool calls it
     /// asks for (`calls`, waiting for `continueReply`). `startedCall` tells that a tool call
     /// began, even if it didn't parse.
-    func finishGeneration(text: String, calls: [PendingToolCall], startedCall: Bool, reason: EngineFinish.Reason) {
+    /// `incomplete` tells that some emitted tokens couldn't be fed (the GPU stopped being
+    /// allowed before `flush`).
+    func finishGeneration(text: String, calls: [PendingToolCall], startedCall: Bool, reason: EngineFinish.Reason, incomplete: Bool = false) {
         guard reply != nil else { return }
         reply?.text += text
         reply?.pendingCalls = (!calls.isEmpty && reason != .cancelled) ? calls : nil
-        recordReply(unanswered: startedCall || !calls.isEmpty)
+        recordReply(unanswered: startedCall || !calls.isEmpty, incomplete: incomplete)
     }
+
+    /// Marks a recorded reply whose last emitted tokens aren't in the cache: no stored text
+    /// equals it, so the planner replaces the reply instead of extending it.
+    static let incompleteMarker = "\u{F8FF}"
 
     /// Stores the reply in the snapshot, as an assistant turn after the request's user turn.
     /// A tool call without results is recorded as a round no stored turn can equal, so a later
     /// request never extends a cache that ends in an unanswered call as if it were plain text.
-    private func recordReply(unanswered: Bool) {
+    private func recordReply(unanswered: Bool, incomplete: Bool = false) {
         guard let state = reply, session.snapshot != nil else { return }
         var rounds = state.rounds
         if unanswered {
             rounds.append(ToolRound(calls: [ToolCallRecord(id: "", name: "", input: .null, result: "", isError: true)]))
         }
-        let text = state.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var text = state.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if incomplete {
+            text += Self.incompleteMarker
+        }
         session.snapshot?.recordReply(ChatTurn(role: .assistant, text: text, toolRounds: rounds), tokenCount: session.ledger.count)
     }
 
     /// Forgets the conversation in the cache after a failure (the ledger stays exact).
     func abandon() {
         session.snapshot = nil
+        reply = nil
+    }
+
+    /// After an interrupted prefill: the snapshot already describes what stays reusable.
+    func interrupted() {
         reply = nil
     }
 

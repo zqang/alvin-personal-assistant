@@ -271,7 +271,8 @@ public final class InferenceEngine: @unchecked Sendable {
                     break
                 }
             }
-            if hooks.isAllowed() {
+            let flushed = hooks.isAllowed()
+            if flushed {
                 try withError { try generator.flush() }
             }
             let generateTime = Date().timeIntervalSince(decodeStart)
@@ -282,7 +283,8 @@ public final class InferenceEngine: @unchecked Sendable {
                 continuation.yield(.text(tail))
             }
             runtime.finishGeneration(
-                text: streamer.visibleText, calls: calls, startedCall: !streamer.startedCalls.isEmpty, reason: reason)
+                text: streamer.visibleText, calls: calls, startedCall: !streamer.startedCalls.isEmpty, reason: reason,
+                incomplete: !flushed)
             if !calls.isEmpty && reason != .cancelled {
                 reason = .toolCalls
             }
@@ -316,7 +318,7 @@ public final class InferenceEngine: @unchecked Sendable {
             runtime.persistPrefixIfNeeded(isAllowed: hooks.isAllowed)
             Memory.clearCache()
         } catch is PrefillInterrupted {
-            runtime.abandon()
+            runtime.interrupted()
             Memory.clearCache()
             let stats = LocalGenerationStats(engine: "alvin")
             continuation.yield(.finished(EngineFinish(reason: .cancelled, stats: stats)))
