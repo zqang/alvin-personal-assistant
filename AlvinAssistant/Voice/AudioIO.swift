@@ -28,6 +28,12 @@ final class AudioIO: @unchecked Sendable {
 
     private var voiceProcessing = true
     private var started = false
+    /// Serializes playback gain changes; `gainGeneration` is touched only on it.
+    private let gainQueue = DispatchQueue(label: "AudioIO.playbackGain")
+    private var gainGeneration = 0
+    private static let gainStep: TimeInterval = 0.01
+    /// A short tone in `playbackFormat`, made on first use.
+    private lazy var chime: AVAudioPCMBuffer? = AudioIO.makeChime(format: playbackFormat)
 
     init() {
         // Attached up front so stopping playback is safe even if the engine never started.
@@ -44,6 +50,7 @@ final class AudioIO: @unchecked Sendable {
         try session.setActive(true)
         started = true
         voiceProcessing = echoCancellation
+        setPlaybackGain(1, ramp: 0)
         try configureEngine()
     }
 
@@ -71,6 +78,51 @@ final class AudioIO: @unchecked Sendable {
 
     func stopPlayback() {
         player.stop()
+    }
+
+    /// Moves the volume of all assistant speech to `gain` (0...1) in 10 ms steps over `ramp`
+    /// seconds, so a duck doesn't click. A newer call takes over from a ramp still running.
+    func setPlaybackGain(_ gain: Float, ramp: TimeInterval) {
+        let target = min(max(gain, 0), 1)
+        let steps = max(Int((max(ramp, 0) / Self.gainStep).rounded()), 1)
+        gainQueue.async { [weak self] in
+            guard let self else { return }
+            self.gainGeneration += 1
+            let generation = self.gainGeneration
+            let start = self.player.volume
+            for step in 1...steps {
+                let fraction = Float(step) / Float(steps)
+                self.gainQueue.asyncAfter(deadline: .now() + Self.gainStep * Double(step - 1)) { [weak self] in
+                    guard let self, self.gainGeneration == generation else { return }
+                    self.player.volume = start + (target - start) * fraction
+                }
+            }
+        }
+    }
+
+    /// Plays a short tone through the speech player, e.g. when the user's turn ends.
+    func playChime() {
+        guard engine.isRunning, let chime else { return }
+        player.scheduleBuffer(chime, completionHandler: nil)
+        if !player.isPlaying {
+            player.play()
+        }
+    }
+
+    /// An 80 ms sine tone with 10 ms fades, so it starts and ends without a click.
+    private static func makeChime(format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let frames = Int(format.sampleRate * 0.08)
+        guard frames > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)),
+              let channel = buffer.floatChannelData?[0] else { return nil }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        let fade = max(format.sampleRate * 0.01, 1)
+        let frequency = 880.0
+        for frame in 0..<frames {
+            let envelope = min(1, Double(frame) / fade, Double(frames - 1 - frame) / fade)
+            channel[frame] = Float(0.2 * envelope * sin(2 * Double.pi * frequency * Double(frame) / format.sampleRate))
+        }
+        return buffer
     }
 
     private func configureEngine() throws {
