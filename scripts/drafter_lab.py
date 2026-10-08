@@ -23,7 +23,9 @@ Default mode, for Woof 4B (or Qwen3.5-2B if mlx-lm can't load Woof) and Qwen3.5-
 
 --dflash mode runs `dflash generate` (dflash-mlx) with z-lab/Qwen3.5-4B-DFlash against the Woof
 snapshot on 6 prompts, greedy, and records tokens per round, accepted draft tokens per round and
-acceptance, with both readings of the Swift port threshold.
+acceptance, with both readings of the Swift port threshold. The draft's config.json keeps rope_theta and
+block_size in the transformers-5 layout, which dflash-mlx 0.1.8 cannot read, so the draft is passed as a
+temporary directory with a patched config.json and symlinks to the snapshot's other files.
 
 lab.json holds everything; a Markdown summary of the key tables is written next to it.
 """
@@ -34,8 +36,10 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import unicodedata
@@ -1061,6 +1065,56 @@ g.main(sys.argv[1:], prog="dflash generate")
 
 DFLASH_LINE = re.compile(r"(\d+) tokens \| ([\d.]+) tok/s \| ([\d.]+)% acceptance")
 
+# The files dflash-mlx itself fetches for a draft (runtime/loading.py _resolve_local_model_path, 0.1.8).
+DFLASH_DRAFT_PATTERNS = ["*.json", "*.safetensors", "*.py", "*.txt", "tokenizer*"]
+
+
+def patch_dflash_draft_config(config):
+    """dflash-mlx 0.1.8 builds DFlashDraftModelArgs from the draft's config.json and requires `rope_theta`
+    and `block_size` at the top level (dflash_mlx/model.py). z-lab/Qwen3.5-4B-DFlash stores them in the
+    transformers-5 layout: `rope_parameters.rope_theta` and `dflash_config.block_size`. Returns the config
+    with the missing top-level keys filled in (every other key kept) and a dict of what was changed."""
+    patched = dict(config)
+    changes = {}
+    rope = config.get("rope_parameters") if isinstance(config.get("rope_parameters"), dict) else {}
+    draft = config.get("dflash_config") if isinstance(config.get("dflash_config"), dict) else {}
+    if patched.get("rope_theta") is None and rope.get("rope_theta") is not None:
+        patched["rope_theta"] = rope["rope_theta"]
+        changes["rope_theta"] = "rope_parameters.rope_theta"
+    rope_type = rope.get("rope_type") or rope.get("type") or "default"
+    if patched.get("rope_scaling") is None and rope_type != "default":
+        # mlx-lm's initialize_rope reads the type and its factors from this dict.
+        patched["rope_scaling"] = dict(rope)
+        changes["rope_scaling"] = "rope_parameters"
+    if patched.get("block_size") is None and draft.get("block_size") is not None:
+        patched["block_size"] = draft["block_size"]
+        changes["block_size"] = "dflash_config.block_size"
+    layer_types = list(patched.get("layer_types") or [])
+    window = patched.get("sliding_window")
+    if "sliding_attention" in layer_types and not (isinstance(window, int) and window > 0):
+        # dflash-mlx rejects sliding layers without a positive window; transformers treats a null window as
+        # no window, so those layers attend to everything.
+        patched["layer_types"] = ["full_attention" if t == "sliding_attention" else t for t in layer_types]
+        changes["layer_types"] = f"sliding_window is {window!r}: sliding_attention -> full_attention"
+    return patched, changes
+
+
+def prepare_dflash_draft(snapshot, work_dir):
+    """A directory dflash-mlx can load the draft from: `snapshot` itself when its config.json needs no
+    patch, else `work_dir` holding the patched config.json and symlinks to every other file."""
+    with open(os.path.join(snapshot, "config.json"), encoding="utf-8") as f:
+        config = json.load(f)
+    patched, changes = patch_dflash_draft_config(config)
+    if not changes:
+        return snapshot, changes
+    os.makedirs(work_dir, exist_ok=True)
+    for name in os.listdir(snapshot):
+        if name != "config.json":
+            os.symlink(os.path.realpath(os.path.join(snapshot, name)), os.path.join(work_dir, name))
+    with open(os.path.join(work_dir, "config.json"), "w", encoding="utf-8") as f:
+        json.dump(patched, f, indent=2)
+    return work_dir, changes
+
 
 def parse_dflash(stdout, stderr):
     out = {}
@@ -1097,6 +1151,14 @@ def parse_dflash(stdout, stderr):
 
 
 def run_dflash(prompts, args):
+    work_dir = tempfile.mkdtemp(prefix="dflash-draft-")
+    try:
+        return _run_dflash(prompts, args, os.path.join(work_dir, "draft"))
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _run_dflash(prompts, args, draft_work_dir):
     from huggingface_hub import snapshot_download
 
     result = {"target": args.model, "draft": args.dflash_draft, "max_tokens": args.max_tokens, "runs": []}
@@ -1110,6 +1172,17 @@ def run_dflash(prompts, args):
     patterns = ["*.json", "model*.safetensors", "*.py", "tokenizer.model", "*.tiktoken", "tiktoken.model", "*.txt", "*.jsonl", "*.jinja"]
     snapshot = snapshot_download(args.model, allow_patterns=patterns, token=HF_TOKEN)
     result["snapshot"] = snapshot
+    # The draft goes to dflash as a local directory whose config.json has the keys dflash-mlx 0.1.8 needs.
+    draft = args.dflash_draft
+    try:
+        draft_snapshot = draft if os.path.isdir(draft) else snapshot_download(draft, allow_patterns=DFLASH_DRAFT_PATTERNS, token=HF_TOKEN)
+        draft, changes = prepare_dflash_draft(draft_snapshot, draft_work_dir)
+        result["draft_snapshot"] = draft_snapshot
+        result["draft_config_patch"] = changes
+    except Exception as error:  # noqa: BLE001
+        # Let dflash resolve the draft itself; its error, if any, lands in each run.
+        result["draft_patch_error"] = describe(error)
+        log(f"dflash draft config: {result['draft_patch_error']}")
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(snapshot)
@@ -1126,7 +1199,7 @@ def run_dflash(prompts, args):
         run = {"set": item["set"], "id": item["id"]}
         try:
             text = render(tokenizer, messages_for(prompts, item), schemas_for(prompts, item["set"]))
-            command = [sys.executable, "-I", "-c", DFLASH_WRAPPER, "--model", snapshot, "--draft", args.dflash_draft,
+            command = [sys.executable, "-I", "-c", DFLASH_WRAPPER, "--model", snapshot, "--draft", draft,
                        "--prompt", text, "--no-chat-template", "--max-tokens", str(args.max_tokens)]
             started = time.perf_counter()
             proc = subprocess.run(command, capture_output=True, text=True, timeout=1200)
@@ -1134,7 +1207,7 @@ def run_dflash(prompts, args):
                 # The wrapper depends on dflash internals; fall back to the plain CLI.
                 run["wrapper_error"] = proc.stderr.strip().splitlines()[-1:] if proc.stderr.strip() else proc.returncode
                 command = [sys.executable, "-I", "-m", "dflash_mlx.cli", "generate", "--model", snapshot, "--draft",
-                           args.dflash_draft, "--prompt", text, "--no-chat-template", "--max-tokens", str(args.max_tokens)]
+                           draft, "--prompt", text, "--no-chat-template", "--max-tokens", str(args.max_tokens)]
                 proc = subprocess.run(command, capture_output=True, text=True, timeout=1200)
             run["seconds"] = round(time.perf_counter() - started, 1)
             run["returncode"] = proc.returncode
@@ -1286,6 +1359,11 @@ def lab_markdown(result):
 
 def dflash_markdown(result):
     lines = ["# DFlash summary", "", f"Target {result.get('target')}, draft {result.get('draft')}, dflash-mlx {result.get('dflash_mlx_version')}.", ""]
+    if result.get("draft_config_patch"):
+        lines += ["Draft config.json patched for dflash-mlx (key: source): "
+                  + "; ".join(f"{k}: {v}" for k, v in result["draft_config_patch"].items()) + ".", ""]
+    if result.get("draft_patch_error"):
+        lines += [f"Draft config not patched: {result['draft_patch_error']}", ""]
     rows = []
     for r in result.get("runs", []):
         summary = r.get("summary") or {}
@@ -1371,6 +1449,47 @@ def self_test():
     assert local_expect(subset, {"name": "set_timer", "args": {"seconds": 600}})["name"] == "set_timer"
     assert local_expect(subset, {"name": "list_timers", "args": {}}) == {"name": "handoff_to_cloud", "args": {}}
     assert local_expect({"local_tools": ["set_timer"]}, {"name": "list_timers", "args": {}})["name"] is None
+    dflash_self_test()
+
+
+def dflash_self_test():
+    """The draft config patch, on the z-lab/Qwen3.5-4B-DFlash layout (model-facts run 37705247655)."""
+    zlab = {"model_type": "qwen3", "rope_parameters": {"rope_theta": 10000000, "rope_type": "default"},
+            "dflash_config": {"block_size": 16, "mask_token_id": 248077, "target_layer_ids": [1, 5, 9, 13, 17, 21, 25, 29]},
+            "layer_types": ["sliding_attention"] * 5 + ["full_attention"], "sliding_window": 2048, "num_target_layers": 32}
+    patched, changes = patch_dflash_draft_config(zlab)
+    assert patched["rope_theta"] == 10000000 and patched["block_size"] == 16, patched
+    assert set(changes) == {"rope_theta", "block_size"}, changes
+    assert all(patched[k] == v for k, v in zlab.items()), "other keys must be kept"
+    assert "rope_theta" not in zlab and "block_size" not in zlab, "the input must not be modified"
+    done, again = patch_dflash_draft_config(patched)
+    assert done == patched and not again
+    old = {"rope_theta": 1e6, "block_size": 8, "rope_parameters": {"rope_theta": 5}, "dflash_config": {"block_size": 4}}
+    assert patch_dflash_draft_config(old) == (old, {})
+    nulled, notes = patch_dflash_draft_config(dict(zlab, sliding_window=None))
+    assert nulled["layer_types"] == ["full_attention"] * 6 and "layer_types" in notes
+    scaled, notes = patch_dflash_draft_config({"rope_parameters": {"rope_theta": 1e6, "rope_type": "yarn", "factor": 4.0}})
+    assert scaled["rope_scaling"]["rope_type"] == "yarn" and scaled["rope_theta"] == 1e6, scaled
+    work = tempfile.mkdtemp(prefix="dflash-self-test-")
+    try:
+        snapshot = os.path.join(work, "snapshot")
+        os.makedirs(snapshot)
+        with open(os.path.join(snapshot, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(zlab, f)
+        with open(os.path.join(snapshot, "model.safetensors"), "wb") as f:
+            f.write(b"weights")
+        path, changes = prepare_dflash_draft(snapshot, os.path.join(work, "draft"))
+        assert path == os.path.join(work, "draft") and set(changes) == {"rope_theta", "block_size"}
+        with open(os.path.join(path, "config.json"), encoding="utf-8") as f:
+            assert json.load(f)["block_size"] == 16
+        assert os.path.islink(os.path.join(path, "model.safetensors"))
+        with open(os.path.join(path, "model.safetensors"), "rb") as f:
+            assert f.read() == b"weights"
+        with open(os.path.join(snapshot, "config.json"), encoding="utf-8") as f:
+            assert "block_size" not in json.load(f), "the snapshot must stay untouched"
+        assert prepare_dflash_draft(path, os.path.join(work, "unused")) == (path, {})
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def main(argv=None):
@@ -1396,6 +1515,7 @@ def main(argv=None):
     if args.dflash:
         result = {"generated_at": started, "environment": environment()}
         try:
+            dflash_self_test()
             result.update(run_dflash(prompts, args))
         except Exception as error:  # noqa: BLE001
             result["error"] = describe(error)
