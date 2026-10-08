@@ -149,7 +149,9 @@ final class GDNReplayTests: XCTestCase {
                     "\(label), m = \(m), layer \(index) conv: max |Δ| = \(LogitCheck.maxAbsDifference(conv, expectedConv))")
             }
 
-            // Next-step logits: allClose to a fresh run over prompt + the first m drafts.
+            // Next-step logits: allClose to a fresh run over prompt + the first m drafts. One
+            // evaluation holds 9-, m- and 1-step gated-delta calls, as the engine's lazy rounds
+            // do (LibraryAssumptionTests 9).
             let afterCommit = try XCTUnwrap(
                 target.forward(Self.int32([next]), rows: .last, captureForRollback: false, wantHidden: false).logits)
 

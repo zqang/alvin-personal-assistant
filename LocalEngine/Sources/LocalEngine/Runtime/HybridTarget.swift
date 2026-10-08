@@ -39,7 +39,7 @@ public final class HybridTarget: TargetModel {
         self.vocabularySize = model.vocabularySize
     }
 
-    /// Feeds `tokens` (1-D int32 `[S]`, or `[1, S]`) through the fork.
+    /// Feeds `tokens` (1-D int32 `[S]`, or `[1, S]`, with `S ≥ 1`) through the fork.
     ///
     /// - `logits`: `[S, V]` for `.all`, `[1, V]` for `.last`, nil for `.none`.
     /// - `hidden`: `[S, H]` post-final-norm states of every input row when `wantHidden`,
@@ -49,6 +49,9 @@ public final class HybridTarget: TargetModel {
     public func forward(_ tokens: MLXArray, rows: LogitRows, captureForRollback: Bool, wantHidden: Bool) -> ForwardResult {
         let inputs = tokens.ndim == 1 ? tokens[.newAxis] : tokens
         precondition(inputs.ndim == 2 && inputs.dim(0) == 1, "The engine feeds one sequence: got shape \(tokens.shape).")
+        // An empty feed would launch zero-length gated-delta kernels, whose zero-size inputs
+        // also change the kernel's generated source (see `commit`).
+        precondition(inputs.dim(1) > 0, "Nothing to feed: got shape \(tokens.shape).")
         let sink = captureForRollback ? GDNCaptureSink() : nil
         let (logits, hidden) = fork.engineForward(inputs, cache: cache, rows: rows, capture: sink, wantHidden: wantHidden)
         return ForwardResult(
@@ -64,8 +67,11 @@ public final class HybridTarget: TargetModel {
     ///   first `keep` tokens, replayed from the capture (bitwise the verify pass's state at that
     ///   step, F5).
     ///
-    /// `keep == verified` changes nothing. Rolling back needs the capture of that same forward.
-    /// The results stay lazy.
+    /// `keep == verified` changes nothing, and `keep == 0` puts back the pre-pass slots without
+    /// launching a kernel. Rolling back needs the capture of that same forward. The results stay
+    /// lazy. Evaluating them in one graph with forwards of other lengths is safe only for models
+    /// with at least 8 value heads; the catalog's Qwen3.5 checkpoints have 16 or 32 (see
+    /// `GDNCapture.recurrentState(keeping:)`).
     public func commit(_ capture: (any RoundCapture)?, keep: Int, of verified: Int) {
         precondition(keep >= 0 && keep <= verified, "Can't keep \(keep) of \(verified) tokens.")
         guard keep < verified else { return }

@@ -63,16 +63,20 @@ jobs:
             -skipMacroValidation -skipPackagePluginValidation -quiet
           echo "=== BEGIN PACKAGE RESOLVED ==="; cat Package.resolved 2>/dev/null || echo "(none)"; echo "=== END PACKAGE RESOLVED ==="
 
+      # Not -quiet: a crashing test's stderr (Metal validation assertions, MLX errors) only
+      # reaches the log this way.
       - name: Unit tests (tiny models, no network)
         working-directory: LocalEngine
         env:
+          # Metal API validation. It caught a real lifetime bug in run 37791524986: MLX released
+          # a gated-delta pipeline state that encoded commands still used (see TinyModels).
           TEST_RUNNER_METAL_DEVICE_WRAPPER_TYPE: "1"
           TEST_RUNNER_LOCAL_ENGINE_REPORT: ${{ github.workspace }}/build/engine-report.md
         run: |
           set -o pipefail
           xcodebuild test-without-building -scheme LocalEngine-Package \
             -destination 'platform=macOS,arch=arm64' -configuration Release -derivedDataPath "$DD" \
-            -skip-testing:LocalEngineIntegrationTests -parallel-testing-enabled NO -quiet \
+            -skip-testing:LocalEngineIntegrationTests -parallel-testing-enabled NO \
             -resultBundlePath ../build/unit.xcresult
 
       - name: Compile for iOS
@@ -131,7 +135,7 @@ jobs:
           if [ "$WOOF" = "true" ]; then export TEST_RUNNER_LOCAL_ENGINE_WOOF=1; fi
           xcodebuild test-without-building -scheme LocalEngine-Package \
             -destination 'platform=macOS,arch=arm64' -configuration Release -derivedDataPath "$DD" \
-            -only-testing:LocalEngineIntegrationTests -parallel-testing-enabled NO -quiet \
+            -only-testing:LocalEngineIntegrationTests -parallel-testing-enabled NO \
             -test-timeouts-enabled YES -maximum-test-execution-time-allowance 1200 \
             -resultBundlePath ../build/integration.xcresult
 
@@ -144,8 +148,17 @@ jobs:
         if: failure()
         run: |
           for r in build/unit.xcresult build/integration.xcresult; do
-            [ -d "$r" ] && xcrun xcresulttool get test-results summary --path "$r" || true
+            [ -d "$r" ] || continue
+            echo "=== SUMMARY $r ==="
+            xcrun xcresulttool get test-results summary --path "$r" || true
+            echo "=== FAILED TESTS $r ==="
+            xcrun xcresulttool get test-results tests --path "$r" > "$r.tests.json" || true
+            # Failed test cases with their failure messages; the whole tree if jq can't filter it.
+            jq -e '[.. | objects | select(.nodeType? == "Test Case" and .result? == "Failed")] | select(length > 0)' "$r.tests.json" \
+              || head -c 200000 "$r.tests.json"
           done
+          echo "=== CRASH REPORTS ==="
+          ls -t ~/Library/Logs/DiagnosticReports/*.ips 2>/dev/null | head -5 | xargs -I{} sh -c 'echo "=== CRASH {} ==="; head -c 20000 "{}"'
 
       - name: Upload results on failure (for humans)
         if: failure()

@@ -69,7 +69,16 @@ public struct GDNCapture {
     }
 
     /// The gated-delta state after the first `m` of the pass's tokens, replayed from
-    /// `initialState` on the captured inputs. Lazy. `m == 0` gives `initialState` back.
+    /// `initialState` on the captured inputs. Lazy. `m == 0` gives `initialState` back and
+    /// launches nothing. Otherwise this is one kernel call with `T = m`. Its inputs are prefix
+    /// slices of the captured arrays, with the same dtypes. MLX copies any input that isn't
+    /// row-contiguous before the kernel runs, as it does in the pass (`v` is a strided view of
+    /// the conv output). Copying doesn't change values.
+    ///
+    /// The result is usually evaluated in the same graph as forwards with other step counts.
+    /// That is safe only when every call generates the same MLX kernel source, which needs at
+    /// least 8 value heads. See `LibraryAssumptionTests` 9; the catalog's Qwen3.5 checkpoints
+    /// have 16 or 32.
     public func recurrentState(keeping m: Int) -> MLXArray? {
         precondition(m >= 0 && m <= steps, "Can't keep \(m) of \(steps) tokens.")
         guard m > 0 else { return initialState }

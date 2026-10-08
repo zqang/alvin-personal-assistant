@@ -137,12 +137,12 @@ final class HybridTargetTests: XCTestCase {
             XCTAssertNil(entry.mask)
             XCTAssertEqual(entry.steps, 4)
             XCTAssertEqual(entry.convStateRows, 3)
-            XCTAssertEqual(entry.convInput.shape, [1, 3 + 4, 2 * 64 + 128])
+            XCTAssertEqual(entry.convInput.shape, [1, 3 + 4, 2 * 64 + 8 * 32])
             XCTAssertEqual(entry.q.shape, [1, 4, 2, 32])
             XCTAssertEqual(entry.k.shape, [1, 4, 2, 32])
-            XCTAssertEqual(entry.v.shape, [1, 4, 4, 32])
-            XCTAssertEqual(entry.a.shape, [1, 4, 4])
-            XCTAssertEqual(entry.b.shape, [1, 4, 4])
+            XCTAssertEqual(entry.v.shape, [1, 4, 8, 32])
+            XCTAssertEqual(entry.a.shape, [1, 4, 8])
+            XCTAssertEqual(entry.b.shape, [1, 4, 8])
         }
         eval(target.cache)
 
@@ -152,7 +152,7 @@ final class HybridTargetTests: XCTestCase {
             XCTAssertEqual(entry.steps, 3)
             let initial = try XCTUnwrap(entry.initialState)
             XCTAssertEqual(initial.dtype, .float32)
-            XCTAssertEqual(initial.shape, [1, 4, 32, 32], "layer \(index)")
+            XCTAssertEqual(initial.shape, [1, 8, 32, 32], "layer \(index)")
         }
 
         let plain = target.forward(Self.int32([65]), rows: .last, captureForRollback: false, wantHidden: false)
