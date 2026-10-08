@@ -147,7 +147,11 @@ final class OrchestratorTests: XCTestCase {
         let decision = RouteDecision(engine: .cloud, mode: .deep, reason: .deepRequested)
         let result = await expectError(orchestrator(decision, cloud: ScriptedProvider(answer)).streamEvents(system: "S", turns: turns))
         XCTAssertEqual(result.events, [.routed(decision)])
-        XCTAssertEqual(result.error as? AssistantError, .missingConfiguration(Orchestrator.missingEngineMessage(.cloud)))
+        XCTAssertEqual(result.error as? AssistantError, .missingConfiguration("Deep thinking isn't available right now."))
+
+        let noLocal = await expectError(orchestrator(localFirst, cloud: ScriptedProvider(answer)).streamEvents(system: "S", turns: turns))
+        XCTAssertEqual(noLocal.events, [.routed(localFirst)])
+        XCTAssertEqual(noLocal.error as? AssistantError, .missingConfiguration(Orchestrator.missingEngineMessage(.local)))
     }
 
     func testStreamReplyKeepsOnlyReplyEvents() async throws {

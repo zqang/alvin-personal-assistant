@@ -47,7 +47,7 @@ final class ConnectionPrewarmerTests: XCTestCase {
     }
 
     func testSendsTheRequestUnchangedAndDrainsIt() async {
-        let transport = RecordingTransport(.lines(["{\"data\":[", "{\"id\":\"claude-opus-5-5\"}", "]}"]))
+        let transport = RecordingTransport(.lines(["{\"data\":[", "{\"id\":\"model-1\"}", "]}"]))
         let prewarmer = ConnectionPrewarmer(transport: transport)
         await prewarmer.prewarm(modelsRequest())
 

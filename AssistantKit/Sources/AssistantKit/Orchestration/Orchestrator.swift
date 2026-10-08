@@ -95,7 +95,7 @@ public struct Orchestrator: AssistantProvider {
     private func run(system: String, turns: [ChatTurn], continuation: Continuation) async throws {
         continuation.yield(.routed(decision))
         guard let primary = engines.provider(for: decision.engine, mode: decision.mode) else {
-            throw AssistantError.missingConfiguration(Self.missingEngineMessage(decision.engine))
+            throw AssistantError.missingConfiguration(Self.missingEngineMessage(decision.engine, mode: decision.mode))
         }
 
         let attempt = Attempt()
@@ -208,10 +208,11 @@ public struct Orchestrator: AssistantProvider {
         }
     }
 
-    static func missingEngineMessage(_ engine: ReplyEngine) -> String {
-        switch engine {
-        case .cloud: return "Add your Anthropic API key in Settings to use Claude."
-        case .local: return "Download an on-device model in Settings to answer on this iPhone."
+    static func missingEngineMessage(_ engine: ReplyEngine, mode: ReplyMode = .standard) -> String {
+        switch (engine, mode) {
+        case (.cloud, .deep): return "Deep thinking isn't available right now."
+        case (.cloud, .standard): return "Add your Anthropic API key in Settings to use Claude."
+        case (.local, _): return "Download an on-device model in Settings to answer on this iPhone."
         }
     }
 
