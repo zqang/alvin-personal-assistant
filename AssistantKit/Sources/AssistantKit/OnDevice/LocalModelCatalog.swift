@@ -13,14 +13,18 @@ public struct LocalModelOption: Identifiable, Equatable, Sendable {
     public let draftModelID: String?
     public let draftApproximateBytes: Int
     public let note: String
+    /// Whether the model mixes attention with recurrent (gated-delta) layers, as Qwen3.5 and Woof
+    /// do. Its cache can't be trimmed, so the engine rewinds it through checkpoints.
+    public let isHybrid: Bool
 
-    public init(id: String, displayName: String, approximateBytes: Int, draftModelID: String? = nil, draftApproximateBytes: Int = 0, note: String) {
+    public init(id: String, displayName: String, approximateBytes: Int, draftModelID: String? = nil, draftApproximateBytes: Int = 0, note: String, isHybrid: Bool = false) {
         self.id = id
         self.displayName = displayName
         self.approximateBytes = approximateBytes
         self.draftModelID = draftModelID
         self.draftApproximateBytes = draftApproximateBytes
         self.note = note
+        self.isHybrid = isHybrid
     }
 
     public var supportsSpeculativeDecoding: Bool { draftModelID != nil }
@@ -31,14 +35,25 @@ public enum LocalModelCatalog {
         id: "ConwayResearch/Underdog-Woof-4B-1.1",
         displayName: "Underdog Woof 4B",
         approximateBytes: 2_500_000_000,
-        note: "Conway Research's open model (Qwen3.5-based), tuned for tool calls. About 2.5 GB."
+        note: "Conway Research's open model (Qwen3.5-based), tuned for tool calls. About 2.5 GB.",
+        isHybrid: true
+    )
+
+    public static let woof2B = LocalModelOption(
+        id: "ConwayResearch/Underdog-Woof-2B-1.1",
+        displayName: "Underdog Woof 2B",
+        // TODO: replace with model-facts size
+        approximateBytes: 1_400_000_000,
+        note: "The smaller Woof (Qwen3.5-based), tuned for tool calls: faster and lighter. About 1.4 GB.",
+        isHybrid: true
     )
 
     public static let qwen35_2B = LocalModelOption(
         id: "mlx-community/Qwen3.5-2B-4bit",
         displayName: "Qwen3.5 2B",
         approximateBytes: 1_600_000_000,
-        note: "Smaller and faster general chat model, same family as Woof."
+        note: "Smaller and faster general chat model, same family as Woof.",
+        isHybrid: true
     )
 
     public static let qwen3_4B = LocalModelOption(
@@ -50,7 +65,7 @@ public enum LocalModelCatalog {
         note: "Standard attention, so a 0.6B draft model can speed it up (speculative decoding)."
     )
 
-    public static let options = [woof4B, qwen35_2B, qwen3_4B]
+    public static let options = [woof4B, woof2B, qwen35_2B, qwen3_4B]
     public static let defaultModelID = woof4B.id
 
     public static func option(for id: String) -> LocalModelOption? {
