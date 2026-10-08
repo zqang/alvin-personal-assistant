@@ -107,7 +107,8 @@ struct ListRemindersTool: AssistantTool {
 
     func run(_ input: [String: JSONValue], context: ToolContext) async throws -> ToolOutput {
         let scope = Scope(rawValue: (input["scope"]?.stringValue ?? "").trimmed.lowercased()) ?? .all
-        let reminders = try await EventStoreService.shared.openReminders(timeZone: context.timeZone)
+        // Read-only, so not held by the commit gate; a first-time permission alert still waits for it.
+        let reminders = try await EventStoreService.shared.openReminders(timeZone: context.timeZone, askAfter: context.commitGate)
         let selected = Self.select(reminders, scope: scope, context: context)
 
         let items = selected.map { reminder -> JSONValue in

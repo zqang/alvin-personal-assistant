@@ -49,7 +49,8 @@ struct ListEventsTool: AssistantTool {
             clamped = true
         }
 
-        let events = try await EventStoreService.shared.events(from: from, to: to)
+        // Read-only, so not held by the commit gate; a first-time permission alert still waits for it.
+        let events = try await EventStoreService.shared.events(from: from, to: to, askAfter: context.commitGate)
         let items = events.map { event -> JSONValue in
             let times = CalendarToolText.times(of: event, timeZone: timeZone)
             var item: [String: JSONValue] = [

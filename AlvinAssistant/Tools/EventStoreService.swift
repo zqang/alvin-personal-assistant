@@ -1,3 +1,4 @@
+import AssistantKit
 import EventKit
 import Foundation
 
@@ -118,8 +119,9 @@ enum EventStoreError: LocalizedError, Equatable {
 
 /// The app's one `EKEventStore`, used by the reminders and calendar tools.
 ///
-/// Every call first makes sure the user allowed access, asking the first time. Results are copied
-/// into value types, so no EventKit object leaves the actor.
+/// Every call first makes sure the user allowed access, asking the first time. The reads take the
+/// turn's commit gate and ask only once it opens (see `ensureAccess`). Results are copied into
+/// value types, so no EventKit object leaves the actor.
 actor EventStoreService {
     static let shared = EventStoreService()
 
@@ -155,7 +157,18 @@ actor EventStoreService {
 
     /// Returns when the app may use `type`, asking the user the first time; throws when it may not.
     /// With `addOnly`, write-only calendar access is enough.
-    func ensureAccess(_ type: EKEntityType, addOnly: Bool = false) async throws {
+    ///
+    /// When the user hasn't been asked yet, it first waits for `gate` to open, and throws
+    /// `CancellationError` if the gate is cancelled. Read-only tools aren't held by the commit gate,
+    /// so they may run for an early reply that is later thrown away; a permission alert can't be
+    /// taken back once shown, and a "Don't Allow" lasts until the user changes it in Settings.
+    /// Side-effect tools pass no gate: the tool runner already waited on it.
+    func ensureAccess(_ type: EKEntityType, addOnly: Bool = false, askAfter gate: CommitGate? = nil) async throws {
+        if let gate, Self.access(for: type) == .notDetermined {
+            try await gate.wait()
+            // An open gate lets a cancelled task through; don't ask for an abandoned turn.
+            try Task.checkCancellation()
+        }
         let item = type == .reminder ? "Reminders" : "Calendars"
         switch Self.access(for: type) {
         case .granted:
@@ -188,9 +201,10 @@ actor EventStoreService {
 
     // MARK: Reminders
 
-    /// Every reminder that isn't completed, in no particular order.
-    func openReminders(timeZone: TimeZone) async throws -> [ReminderItem] {
-        try await ensureAccess(.reminder)
+    /// Every reminder that isn't completed, in no particular order. A first-time permission request
+    /// waits for `gate` (see `ensureAccess`).
+    func openReminders(timeZone: TimeZone, askAfter gate: CommitGate? = nil) async throws -> [ReminderItem] {
+        try await ensureAccess(.reminder, askAfter: gate)
         let store = self.store
         let predicate = store.predicateForIncompleteReminders(withDueDateStarting: nil, ending: nil, calendars: nil)
         return await withCheckedContinuation { (continuation: CheckedContinuation<[ReminderItem], Never>) in
@@ -202,9 +216,9 @@ actor EventStoreService {
         }
     }
 
-    /// Adds a reminder. A due time also gets an alarm at that time; a due day alone relies on the
-    /// Reminders app's own notification for the day. Returns the reminder, and whether the list
-    /// the user named was found (otherwise it went to the default list).
+    /// Adds a reminder. A due time also gets an alarm at that time. A due day without a time gets
+    /// no alarm (see below). Returns the reminder, and whether the list the user named was found
+    /// (otherwise it went to the default list).
     func addReminder(_ draft: ReminderDraft, timeZone: TimeZone) async throws -> (item: ReminderItem, listFound: Bool) {
         try await ensureAccess(.reminder)
         try Task.checkCancellation()
@@ -233,6 +247,9 @@ actor EventStoreService {
                 reminder.dueDateComponents = components
                 reminder.addAlarm(EKAlarm(absoluteDate: due))
             } else {
+                // No alarm on purpose: an absolute alarm at the stored start of the day would go off
+                // at 00:00. Saved like this, the reminder is the same as one made in the Reminders
+                // app without a time, which alerts at the user's "Today Notification" time.
                 reminder.dueDateComponents = calendar.dateComponents([.year, .month, .day], from: due)
             }
         }
@@ -278,9 +295,10 @@ actor EventStoreService {
 
     // MARK: Events
 
-    /// The events of all calendars that overlap `start..<end`, by start time.
-    func events(from start: Date, to end: Date) async throws -> [EventItem] {
-        try await ensureAccess(.event)
+    /// The events of all calendars that overlap `start..<end`, by start time. A first-time
+    /// permission request waits for `gate` (see `ensureAccess`).
+    func events(from start: Date, to end: Date, askAfter gate: CommitGate? = nil) async throws -> [EventItem] {
+        try await ensureAccess(.event, askAfter: gate)
         let predicate = store.predicateForEvents(withStart: start, end: end, calendars: nil)
         return store.events(matching: predicate)
             .map { EventItem($0) }
