@@ -153,7 +153,7 @@ final class LocalBenchmarkTests: XCTestCase {
 
     func testCatalogMarksHybridModels() {
         XCTAssertTrue(LocalModelCatalog.woof4B.isHybrid)
-        XCTAssertTrue(LocalModelCatalog.woof2B.isHybrid)
+        XCTAssertFalse(LocalModelCatalog.woof2B.isHybrid, "Woof 2B is a Llama model")
         XCTAssertTrue(LocalModelCatalog.qwen35_2B.isHybrid)
         XCTAssertFalse(LocalModelCatalog.qwen3_4B.isHybrid)
         XCTAssertEqual(LocalModelCatalog.woof2B.id, "ConwayResearch/Underdog-Woof-2B-1.1")

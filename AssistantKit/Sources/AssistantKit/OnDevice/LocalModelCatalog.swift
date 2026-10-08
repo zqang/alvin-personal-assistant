@@ -42,10 +42,11 @@ public enum LocalModelCatalog {
     public static let woof2B = LocalModelOption(
         id: "ConwayResearch/Underdog-Woof-2B-1.1",
         displayName: "Underdog Woof 2B",
-        // TODO: replace with model-facts size
-        approximateBytes: 1_400_000_000,
-        note: "The smaller Woof (Qwen3.5-based), tuned for tool calls: faster and lighter.",
-        isHybrid: true
+        // 1.43 GB of 4-bit weights (docs/model-facts.md).
+        approximateBytes: 1_450_000_000,
+        // A Llama model with its own tokenizer, not a Qwen3.5 hybrid (docs/model-facts.md), so it
+        // loads through the stock path and can't draft for Woof 4B.
+        note: "The smaller Woof (Llama-based): faster and lighter. Its tool-call format isn't supported yet."
     )
 
     public static let qwen35_2B = LocalModelOption(
