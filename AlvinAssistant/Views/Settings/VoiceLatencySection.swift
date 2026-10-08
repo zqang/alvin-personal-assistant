@@ -28,7 +28,7 @@ struct VoiceLatencySection: View {
         } header: {
             Text("Voice responsiveness")
         } footer: {
-            Text("Starting early prepares the answer while you pause, before your turn is over; nothing is said or done until it's final. “On-device only” does this only for on-device replies, so no extra cloud requests are made. Spoken cues are short phrases like “Let me check” while an answer is on its way. Lowering the voice needs echo cancellation and interrupting by talking.")
+            Text("Starting early prepares the answer while you pause, before your turn is over; nothing is said or done until it's final. “On-device only” does this only for on-device replies, so no extra cloud requests are made. Spoken cues are short phrases like “Let me check” while an answer is on its way; they need echo cancellation. Lowering the voice needs echo cancellation and interrupting by talking.")
         }
     }
 }

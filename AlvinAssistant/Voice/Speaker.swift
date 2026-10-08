@@ -80,6 +80,11 @@ final class Speaker {
         ([cueText, spokenText] + playback.map(\.text)).joined(separator: " ")
     }
 
+    /// A cue started playing since `beginReply()`, so its echo may still reach the microphone.
+    var hasPlayedCue: Bool {
+        !cueText.isEmpty
+    }
+
     /// Identifies the voice speech is rendered in, so audio rendered ahead of time can be reused
     /// while it stays the same.
     var voiceSignature: String {

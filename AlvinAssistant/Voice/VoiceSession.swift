@@ -39,6 +39,8 @@ final class VoiceSession: Identifiable {
     private(set) var lastDecision: RouteDecision?
     /// The next reply runs in deep mode.
     private(set) var deepNextTurn = false
+    /// The reply in flight runs in deep mode, so a turn reopened before it speaks keeps asking for that.
+    @ObservationIgnored private var replyDeep = false
     /// The latency trace of the last finished turn.
     private(set) var lastTrace: TurnLatencyTrace?
 
@@ -160,7 +162,7 @@ final class VoiceSession: Identifiable {
         }
         self.speaker = speaker
         let cuePlayer = CuePlayer(speaker: speaker, localeIdentifier: settings.speechLocale)
-        if settings.spokenCues, !usesLegacyPipeline {
+        if cuesWanted {
             cuePlayer.prerender()
         }
         self.cuePlayer = cuePlayer
@@ -183,8 +185,9 @@ final class VoiceSession: Identifiable {
         UIApplication.shared.isIdleTimerDisabled = true
         turn = TurnDetector(silenceTimeout: settings.endOfTurnDelay)
         // Ducking listens for the user over the assistant's voice, so it needs echo cancellation,
-        // and it only makes sense when talking over the assistant can interrupt it.
-        duckingEnabled = settings.bargeInDucking && settings.voiceInterruptions && settings.echoCancellation
+        // and it only makes sense when talking over the assistant can interrupt it. The legacy
+        // pipeline keeps today's playback untouched.
+        duckingEnabled = !usesLegacyPipeline && settings.bargeInDucking && settings.voiceInterruptions && settings.echoCancellation
         ducker.reset()
         startTicker()
         listen()
@@ -270,7 +273,6 @@ final class VoiceSession: Identifiable {
         assistantCaption = ""
         activity = nil
         turn.reset(transcript: carriedText, at: now)
-        updateEarlyStart()
         pipeline.prewarm(inputIsVoice: true)
         beginTurn(with: carriedText)
         beginRecognition()
@@ -318,7 +320,9 @@ final class VoiceSession: Identifiable {
             if isFinal { commitUserTurn() }
         case .thinking:
             // Nothing of the answer is playing yet, so new words mean the user wasn't finished.
-            // A cue may be playing, though, and its echo isn't the user.
+            // Once a cue has played, though, the words may be its echo, misheard: talking over a
+            // cue then follows the rule for talking over the answer.
+            if speaker?.hasPlayedCue == true, !store.settings.voiceInterruptions { return }
             if let words = interruptions.interruption(in: text, assistantSpeech: speaker?.recentSpeech ?? "") {
                 reopenUserTurn(with: words)
             }
@@ -402,7 +406,13 @@ final class VoiceSession: Identifiable {
     /// The user kept talking before the reply started: take back their turn and keep listening.
     private func reopenUserTurn(with text: String) {
         guard let user = lastUserMessage else { return }
+        // The turn wasn't over, so its trace isn't a turn of its own: drop it unlogged, and the
+        // next commit starts the turn's trace afresh.
+        trace = nil
+        let deep = replyDeep
         cancelReply()
+        // It's still the turn "Think deeper" was asked for.
+        deepNextTurn = deepNextTurn || deep
         let earlier = user.text
         conversation.remove(user)
         lastUserMessage = nil
@@ -437,6 +447,7 @@ final class VoiceSession: Identifiable {
     private func beginTurn(with text: String) {
         discardTentative()
         early.reset()
+        updateEarlyStart()
         tentativeStartedThisTurn = false
         prewarmedThisTurn = false
         noteTranscript(text)
@@ -528,6 +539,7 @@ final class VoiceSession: Identifiable {
         resetDucking()
         let deep = deepNextTurn
         deepNextTurn = false
+        replyDeep = deep
         cuePolicy = CuePolicy(enabled: cuesEnabled, isVoice: true, fillerDelay: store.settings.fillerDelay, deep: deep)
         cuePolicy.replyStarted(at: now, expectedFirstText: LatencyLog.shared.expectedFirstText())
 
@@ -701,8 +713,14 @@ final class VoiceSession: Identifiable {
         pipeline is LegacyReplyPipeline
     }
 
+    /// Cues play while the microphone listens for the user, so they need echo cancellation to
+    /// keep the assistant's own voice from reading as the user's.
+    private var cuesWanted: Bool {
+        store.settings.spokenCues && store.settings.echoCancellation && !usesLegacyPipeline
+    }
+
     private var cuesEnabled: Bool {
-        store.settings.spokenCues && !usesLegacyPipeline && cuePlayer != nil
+        cuesWanted && cuePlayer != nil
     }
 
     /// Back to full volume and a fresh ducker, for the next reply.
