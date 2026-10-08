@@ -1,0 +1,156 @@
+import AssistantKit
+import Foundation
+import LocalEngine
+import LocalEngineTestSupport
+import MLX
+import MLXLMCommon
+import XCTest
+
+/// Invariant L1 (the cache holds exactly the ledger) after every way a reply can end: a stop,
+/// a terminated stream, the length limit and a tool call with its continuation; on both tiny
+/// models.
+final class LedgerInvariantTests: XCTestCase {
+    private let tokenizer = FakeChatMLTokenizer()
+    private let system = "You are Alvin."
+
+    override func setUpWithError() throws {
+        try MetalAvailability.require()
+    }
+
+    private func assertConsistent(_ engine: InferenceEngine, _ label: String, file: StaticString = #filePath, line: UInt = #line) async throws {
+        let (report, pending) = try await engine.withSession { ($0.assertConsistent(), $0.pendingCount) }
+        XCTAssertEqual(pending, 0, label, file: file, line: line)
+        XCTAssertTrue(report.isConsistent(), "\(label): \(report)", file: file, line: line)
+    }
+
+    func testAfterStop() async throws {
+        for tiny in EngineTestHarness.Tiny.allCases {
+            let (engine, _) = try EngineTestHarness.makeScriptedEngine(tiny: tiny, scripts: [tokenizer.encodeRaw("All done.")])
+            let events = try await EngineTestHarness.collect(
+                engine.reply(EngineRequest(system: system, turns: [ChatTurn(role: .user, text: "Finish up.")])))
+            XCTAssertEqual(EngineTestHarness.finish(events)?.reason, .stop)
+            let last = try await engine.withSession { $0.ledger.last }
+            XCTAssertEqual(last, FakeChatMLTokenizer.imEnd, "\(tiny): the stop token is fed")
+            try await assertConsistent(engine, "\(tiny) stop")
+        }
+    }
+
+    func testAfterLength() async throws {
+        for tiny in EngineTestHarness.Tiny.allCases {
+            let reply = tokenizer.encodeRaw("This reply is far longer than the limit allows.")
+            let (engine, _) = try EngineTestHarness.makeScriptedEngine(tiny: tiny, scripts: [reply])
+            let events = try await EngineTestHarness.collect(
+                engine.reply(EngineRequest(system: system, turns: [ChatTurn(role: .user, text: "Talk.")], maxTokens: 9)))
+            let finish = try XCTUnwrap(EngineTestHarness.finish(events))
+            XCTAssertEqual(finish.reason, .length)
+            XCTAssertEqual(finish.stats.generatedTokens, 9)
+            let tail = try await engine.withSession { Array($0.ledger.suffix(9)) }
+            XCTAssertEqual(tail, Array(reply.prefix(9)), "\(tiny): the ledger ends with the last emitted token")
+            try await assertConsistent(engine, "\(tiny) length")
+        }
+    }
+
+    /// Terminating the stream mid-reply stops the engine at a step boundary; whatever it had
+    /// decoded by then is exactly in the cache, and the next turn reuses it consistently.
+    func testAfterTerminatingTheStream() async throws {
+        for tiny in EngineTestHarness.Tiny.allCases {
+            let long = tokenizer.encodeRaw(String(repeating: "word ", count: 12))
+            let (engine, _) = try EngineTestHarness.makeScriptedEngine(
+                tiny: tiny, scripts: [long, tokenizer.encodeRaw("Next.")])
+            var seen = ""
+            var turns = [ChatTurn(role: .user, text: "Say many words.")]
+            for try await event in engine.reply(EngineRequest(system: system, turns: turns)) {
+                if case .text(let text) = event {
+                    seen += text
+                    break
+                }
+            }
+            await engine.waitUntilIdle()
+            try await assertConsistent(engine, "\(tiny) terminated")
+
+            turns += [ChatTurn(role: .assistant, text: seen), ChatTurn(role: .user, text: "Go on.")]
+            let events = try await EngineTestHarness.collect(engine.reply(EngineRequest(system: system, turns: turns)))
+            XCTAssertEqual(EngineTestHarness.text(events), "Next.")
+            try await assertConsistent(engine, "\(tiny) after the terminated reply")
+        }
+    }
+
+    /// The hooks can stop a reply mid-stream: `.cancelled`, nothing pending, an exact ledger.
+    func testAfterCancellationByTheHooks() async throws {
+        for tiny in EngineTestHarness.Tiny.allCases {
+            let gate = CallBudget(calls: 10)
+            var configuration = EngineTestHarness.testConfiguration()
+            configuration.hooks = EngineHooks(beginGPU: { true }, endGPU: {}, isAllowed: { gate.take() })
+            let script = tokenizer.encodeRaw(String(repeating: "more ", count: 10))
+            let (engine, _) = try EngineTestHarness.makeScriptedEngine(tiny: tiny, scripts: [script], configuration: configuration)
+            let events = try await EngineTestHarness.collect(
+                engine.reply(EngineRequest(system: system, turns: [ChatTurn(role: .user, text: "Go.")])))
+            let finish = try XCTUnwrap(EngineTestHarness.finish(events))
+            XCTAssertEqual(finish.reason, .cancelled, "\(tiny)")
+            XCTAssertGreaterThan(finish.stats.generatedTokens, 0, "\(tiny): the prefill took at most a few calls")
+            XCTAssertLessThan(finish.stats.generatedTokens, script.count, "\(tiny)")
+            gate.reset(calls: 1_000)
+            let tail = try await engine.withSession { Array($0.ledger.suffix(finish.stats.generatedTokens)) }
+            XCTAssertEqual(tail, Array(script.prefix(finish.stats.generatedTokens)), "\(tiny)")
+            try await assertConsistent(engine, "\(tiny) cancelled")
+        }
+    }
+
+    /// A scripted tool call, its results and the final answer.
+    func testAfterAToolCallAndItsContinuation() async throws {
+        for tiny in EngineTestHarness.Tiny.allCases {
+            let call = "<tool_call>\n{\"name\": \"get_time\", \"arguments\": {}}\n</tool_call>"
+            let (engine, _) = try EngineTestHarness.makeScriptedEngine(
+                tiny: tiny, scripts: [tokenizer.encodeRaw(call), tokenizer.encodeRaw("It is noon.")])
+            let tools = [ToolDefinition(name: "get_time", description: "The current time.", inputSchema: ["type": "object", "properties": [:]])]
+            let request = EngineRequest(system: system, tools: tools, turns: [ChatTurn(role: .user, text: "What time is it?")])
+            let first = try await EngineTestHarness.collect(engine.reply(request))
+            XCTAssertEqual(EngineTestHarness.finish(first)?.reason, .toolCalls, "\(tiny)")
+            let calls = EngineTestHarness.toolCalls(first)
+            XCTAssertEqual(calls.map(\.name), ["get_time"])
+            try await assertConsistent(engine, "\(tiny) tool call")
+
+            let round = ToolRound(calls: calls.map { ToolCallRecord(call: $0, output: .ok(["time": "12:00"], summary: "12:00")) })
+            let second = try await EngineTestHarness.collect(engine.continueReply(after: round))
+            XCTAssertEqual(EngineTestHarness.text(second), "It is noon.")
+            XCTAssertEqual(EngineTestHarness.finish(second)?.reason, .stop)
+            try await assertConsistent(engine, "\(tiny) after the tool round")
+
+            // The stored turn (rounds plus the final text) extends the cache on the next request.
+            let turns = request.turns + [
+                ChatTurn(role: .assistant, text: "It is noon.", toolRounds: [round]),
+                ChatTurn(role: .user, text: "Thanks."),
+            ]
+            let before = try await engine.withSession { $0.ledger.count }
+            let third = try await EngineTestHarness.collect(engine.reply(EngineRequest(system: system, tools: tools, turns: turns)))
+            let finish = try XCTUnwrap(EngineTestHarness.finish(third))
+            XCTAssertEqual(finish.stats.planReason, "append", "\(tiny)")
+            XCTAssertEqual(finish.stats.reusedTokens, before, "\(tiny)")
+            try await assertConsistent(engine, "\(tiny) after the next turn")
+        }
+    }
+}
+
+/// Allows a fixed number of calls, then refuses.
+final class CallBudget: @unchecked Sendable {
+    private let lock = NSLock()
+    private var remaining: Int
+
+    init(calls: Int) {
+        remaining = calls
+    }
+
+    func take() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard remaining > 0 else { return false }
+        remaining -= 1
+        return true
+    }
+
+    func reset(calls: Int) {
+        lock.lock()
+        remaining = calls
+        lock.unlock()
+    }
+}
