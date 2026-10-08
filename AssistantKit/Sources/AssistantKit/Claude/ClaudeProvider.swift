@@ -132,8 +132,9 @@ public struct ClaudeProvider: AssistantProvider {
                 emit(.toolRound(round))
                 try Task.checkCancellation()
                 // All results go back in one message, in call order, so the model keeps calling
-                // tools in parallel.
-                let results = round.calls.map(ClaudeRequest.toolResultBlock)
+                // tools in parallel. The tool_use blocks above went back verbatim, so the results
+                // quote the server's ids unchanged too.
+                let results = round.calls.map { ClaudeRequest.toolResultBlock($0, remapID: false) }
                 messages.append(.object(ClaudeRequest.message(role: "user", content: results)))
                 continue
             default:

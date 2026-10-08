@@ -100,7 +100,7 @@ enum ClaudeRequest {
                 let rounds = turn.toolRounds.filter { !$0.calls.isEmpty }
                 for round in rounds {
                     messages.append(message(role: "assistant", content: round.calls.map(toolUseBlock)))
-                    messages.append(message(role: "user", content: round.calls.map(toolResultBlock)))
+                    messages.append(message(role: "user", content: round.calls.map { toolResultBlock($0) }))
                 }
                 if rounds.isEmpty || !turn.text.isEmpty {
                     messages.append(message(role: "assistant", content: [textBlock(turn.text)]))
@@ -131,11 +131,16 @@ enum ClaudeRequest {
         return .object(block)
     }
 
-    /// A stored call's result as a `tool_result` block. `is_error` is sent only when true.
-    static func toolResultBlock(_ record: ToolCallRecord) -> JSONValue {
+    /// A call's result as a `tool_result` block. `is_error` is sent only when true.
+    ///
+    /// A stored round (`remapID` true) answers the `tool_use` that `toolUseBlock` renders, so both
+    /// carry `claudeToolID(record.id)`. The live loop passes false: it appends the server's
+    /// `tool_use` blocks unchanged, so each result must quote the server's own id, even one that
+    /// doesn't start with `toolu_` (an Anthropic-compatible endpoint behind a custom `baseURL`).
+    static func toolResultBlock(_ record: ToolCallRecord, remapID: Bool = true) -> JSONValue {
         var block: [String: JSONValue] = [
             "type": .string("tool_result"),
-            "tool_use_id": .string(claudeToolID(record.id)),
+            "tool_use_id": .string(remapID ? claudeToolID(record.id) : record.id),
         ]
         if !record.result.isEmpty {
             block["content"] = .string(record.result)

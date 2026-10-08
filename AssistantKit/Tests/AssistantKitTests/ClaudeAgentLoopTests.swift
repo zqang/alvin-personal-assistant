@@ -112,6 +112,42 @@ final class ClaudeAgentLoopTests: XCTestCase {
         XCTAssertEqual(messages[2]["content"]?.arrayValue?.compactMap { $0["content"]?.stringValue }, [#"{"events":0}"#, #"{"reminders":1}"#])
     }
 
+    func testALiveCallIsAnsweredWithTheServersOwnID() async throws {
+        let calendar = FakeTool(name: "list_events", output: .ok(["events": 0]))
+        let executor = FakeToolExecutor([calendar])
+        let transport = MockTransport([
+            ClaudeSSE.response(
+                MockTransport.toolUse(index: 0, id: "call_1", name: "list_events", json: "{}"),
+                [ClaudeSSE.stop("tool_use")]
+            ),
+            ClaudeSSE.response(ClaudeSSE.text(index: 0, "Nothing on."), [ClaudeSSE.stop("end_turn")]),
+        ])
+        let provider = ClaudeProvider(configuration: claudeConfiguration(), transport: transport, tools: executor)
+
+        let events = try await collectEvents(provider.streamEvents(system: "S", turns: question))
+
+        let messages = transport.requests[1].sentMessages
+        XCTAssertEqual(messages.count, 3)
+        let toolUseID = messages[1]["content"]?.arrayValue?.first?["id"]?.stringValue
+        let resultID = messages[2]["content"]?.arrayValue?.first?["tool_use_id"]?.stringValue
+        XCTAssertEqual(toolUseID, "call_1", "the tool_use goes back verbatim")
+        XCTAssertEqual(resultID, toolUseID, "the result answers the id the server sent")
+
+        // Stored, the same round renders with both ids remapped, so they still pair.
+        let rounds = events.compactMap { event -> ToolRound? in
+            if case .toolRound(let round) = event { return round }
+            return nil
+        }
+        XCTAssertEqual(rounds.first?.calls.map(\.id), ["call_1"])
+        let history = question + [
+            ChatTurn(role: .assistant, text: "Nothing on.", toolRounds: rounds),
+            ChatTurn(role: .user, text: "Thanks"),
+        ]
+        let rendered = ClaudeRequest.messages(from: history)
+        XCTAssertEqual(rendered[1]["content"]?.arrayValue?.first?["id"]?.stringValue, "toolu_call_1")
+        XCTAssertEqual(rendered[2]["content"]?.arrayValue?.first?["tool_use_id"]?.stringValue, "toolu_call_1")
+    }
+
     func testServerSearchAndAClientToolInOneResponse() async throws {
         let reminder = FakeTool(
             name: "create_reminder",
