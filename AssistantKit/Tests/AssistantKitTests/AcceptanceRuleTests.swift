@@ -47,6 +47,23 @@ final class AcceptanceRuleTests: XCTestCase {
         XCTAssertEqual(resolve([10, 11], [10, 11, 12], remaining: 3), RoundResult(emitted: [10, 11, 12], acceptedDrafts: 2, keep: 3, stopped: false))
     }
 
+    func testStoppedOnDraftTellsAnAcceptedStopDraftFromASampledStop() {
+        // An accepted stop draft, even when the target also agrees with the drafts after it.
+        XCTAssertTrue(resolve([10, 99, 12], [10, 99, 12, 13]).stoppedOnDraft)
+        XCTAssertTrue(resolve([99, 1], [99, 1, 2]).stoppedOnDraft)
+        XCTAssertTrue(resolve([10, 99], [10, 99, 99]).stoppedOnDraft)
+        // A stop the target sampled, as the bonus or in place of a rejected draft.
+        XCTAssertFalse(resolve([10, 11], [10, 11, 99]).stoppedOnDraft)
+        XCTAssertFalse(resolve([10, 11], [10, 99, 5]).stoppedOnDraft)
+        XCTAssertFalse(resolve([10], [99, 5]).stoppedOnDraft)
+        XCTAssertFalse(resolve([], [99]).stoppedOnDraft)
+        // No stop at all, or a rejected stop draft.
+        XCTAssertFalse(resolve([10, 11, 12], [10, 11, 12, 13]).stoppedOnDraft)
+        XCTAssertFalse(resolve([10, 11, 12], [10, 21, 12, 13]).stoppedOnDraft)
+        XCTAssertFalse(resolve([99], [5, 6]).stoppedOnDraft)
+        XCTAssertFalse(resolve([], [7]).stoppedOnDraft)
+    }
+
     func testNoDrafts() {
         XCTAssertEqual(resolve([], [7]), RoundResult(emitted: [7], acceptedDrafts: 0, keep: 1, stopped: false))
         XCTAssertEqual(resolve([], [99]), RoundResult(emitted: [], acceptedDrafts: 0, keep: 1, stopped: true))

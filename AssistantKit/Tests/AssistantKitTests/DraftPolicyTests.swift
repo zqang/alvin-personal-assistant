@@ -22,6 +22,8 @@ final class DraftPolicyTests: XCTestCase {
         XCTAssertEqual(configuration.maxBackoff, 256)
         XCTAssertEqual(configuration.prior, 0.6)
         XCTAssertEqual(configuration.ewma, 0.3)
+        XCTAssertEqual(configuration.minPromptLookupMatch, 3)
+        XCTAssertEqual(configuration.shortMatchPrior, 0.3)
         let policy = DraftPolicy(curve: .stockMLXDefault)
         XCTAssertEqual(policy.maxDraft, 4)
         XCTAssertTrue(policy.isSpeculationEnabled)
@@ -67,16 +69,43 @@ final class DraftPolicyTests: XCTestCase {
         XCTAssertEqual(policy.expectedTokens(source: .promptLookup, matchLength: 3, k: 0), 1)
         XCTAssertEqual(policy.expectedTokens(source: .promptLookup, matchLength: 3, k: 2), 1.96, accuracy: 1e-12)
         XCTAssertEqual(policy.expectedTokens(source: .promptLookup, matchLength: 5, k: 4), 2.3056, accuracy: 1e-12)
-        // Short prompt-lookup matches start from the lower prior.
-        XCTAssertEqual(policy.expectedTokens(source: .promptLookup, matchLength: 2, k: 2), 1.39, accuracy: 1e-12)
+        // Prompt-lookup matches shorter than 3 never speculate by default, so they promise no gain.
+        XCTAssertEqual(policy.expectedTokens(source: .promptLookup, matchLength: 2, k: 2), 1)
+        XCTAssertEqual(policy.expectedTokens(source: .promptLookup, matchLength: 1, k: 4), 1)
+        // Short corpus matches are not gated; they start from the lower prior.
+        XCTAssertEqual(policy.expectedTokens(source: .corpus, matchLength: 2, k: 2), 1.39, accuracy: 1e-12)
     }
 
-    func testShortMatchesUseTheShortMatchPrior() {
-        let policy = DraftPolicy(curve: .stockMLXDefault)
+    func testShortPromptLookupMatchesDecodePlainlyByDefault() {
+        var policy = DraftPolicy(curve: .stockMLXDefault)
+        XCTAssertFalse(policy.isEligible(source: .promptLookup, matchLength: 2))
+        XCTAssertTrue(policy.isEligible(source: .promptLookup, matchLength: 3))
+        XCTAssertTrue(policy.isEligible(source: .corpus, matchLength: 2))
+        XCTAssertTrue(policy.isEligible(source: .exemplar, matchLength: 1))
+        XCTAssertTrue(policy.isEligible(source: .draftModel, matchLength: 0))
+        // Without the gate, a = 0.3 would give V(1) = 1.3 / 1.09 = 1.1927 > 1.05.
+        XCTAssertEqual(policy.draftLength(for: proposal(match: 2), remaining: 100, draftCostPerToken: 0), 0)
+        XCTAssertEqual(policy.draftLength(for: proposal(match: 1), remaining: 100, draftCostPerToken: 0), 0)
+        XCTAssertEqual(policy.draftLength(for: proposal(match: 3), remaining: 100, draftCostPerToken: 0), 1)
+        // The gate is not learned away: short matches stay plain however well they did.
+        for _ in 0..<20 { policy.record(proposal(match: 2), proposed: 4, accepted: 4) }
+        XCTAssertEqual(policy.draftLength(for: proposal(match: 2), remaining: 100, draftCostPerToken: 0), 0)
+        XCTAssertEqual(policy.expectedTokens(source: .promptLookup, matchLength: 2, k: 4), 1)
+        // Short matches of other drafters still speculate: a = 0.3, V(1) = 1.1927, V(2) = 1.39 / 1.39 = 1.
+        XCTAssertEqual(policy.draftLength(for: proposal(.corpus, match: 2), remaining: 100, draftCostPerToken: 0), 1)
+    }
+
+    func testLoweringTheGateAppliesTheShortMatchPrior() {
+        let policy = policy { $0.minPromptLookupMatch = 2 }
+        XCTAssertTrue(policy.isEligible(source: .promptLookup, matchLength: 2))
         // a = 0.3: V(1) = 1.3 / 1.09 = 1.1927, V(2) = 1.39 / 1.39 = 1.
         XCTAssertEqual(policy.draftLength(for: proposal(match: 2), remaining: 100, draftCostPerToken: 0), 1)
+        XCTAssertEqual(policy.expectedTokens(source: .promptLookup, matchLength: 2, k: 2), 1.39, accuracy: 1e-12)
         // With a draft cost of 0.2, V(1) = 1.3 / 1.29 = 1.0078: not worth it.
         XCTAssertEqual(policy.draftLength(for: proposal(match: 2), remaining: 100, draftCostPerToken: 0.2), 0)
+        // Below the lowered gate, still plain.
+        XCTAssertEqual(policy.draftLength(for: proposal(match: 1), remaining: 100, draftCostPerToken: 0), 0)
+        XCTAssertEqual(policy.expectedTokens(source: .promptLookup, matchLength: 1, k: 2), 1)
     }
 
     func testCurveShapesTheChoice() {
@@ -143,6 +172,44 @@ final class DraftPolicyTests: XCTestCase {
         XCTAssertEqual(policy.acceptance(source: .corpus, matchLength: 3, depth: 1), 0.72, accuracy: 1e-12)
     }
 
+    func testRoundEndingAtAnAcceptedStopDraftRecordsNoRejection() {
+        let stop = 99
+        func resolve(_ drafts: [Int], _ sampled: [Int]) -> RoundResult {
+            AcceptanceRule.resolve(drafts: drafts, sampled: sampled, stopTokens: [stop], remaining: 100)
+        }
+        func rates(_ policy: DraftPolicy) -> [Double] {
+            (1...4).map { policy.acceptance(source: .promptLookup, matchLength: 3, depth: $0) }
+        }
+
+        // The reply ends at the accepted stop draft; the target even agreed with the draft after it.
+        let atStop = resolve([10, stop, 12, 13], [10, stop, 12, 7, 8])
+        XCTAssertTrue(atStop.stoppedOnDraft)
+        XCTAssertEqual(atStop.acceptedDrafts, 2)
+        var policy = DraftPolicy(curve: .stockMLXDefault)
+        policy.record(proposal(), proposed: 4, round: atStop)
+        for (rate, expected) in zip(rates(policy), [0.72, 0.72, 0.6, 0.6]) { XCTAssertEqual(rate, expected, accuracy: 1e-12) }
+        // Passing the bare counts would score depth 3 as a rejection.
+        var counted = DraftPolicy(curve: .stockMLXDefault)
+        counted.record(proposal(), proposed: 4, accepted: atStop.acceptedDrafts)
+        XCTAssertEqual(counted.acceptance(source: .promptLookup, matchLength: 3, depth: 3), 0.42, accuracy: 1e-12)
+
+        // A stop sampled in place of draft 2 is a real rejection of draft 2.
+        let corrected = resolve([10, 11, 12], [10, stop, 12, 13])
+        XCTAssertTrue(corrected.stopped)
+        XCTAssertFalse(corrected.stoppedOnDraft)
+        var other = DraftPolicy(curve: .stockMLXDefault)
+        other.record(proposal(), proposed: 3, round: corrected)
+        for (rate, expected) in zip(rates(other), [0.72, 0.42, 0.6, 0.6]) { XCTAssertEqual(rate, expected, accuracy: 1e-12) }
+        // Rounds without a stop record exactly as the counts say.
+        other.record(proposal(), proposed: 2, round: resolve([10, 11], [10, 11, 12]))
+        other.record(proposal(), proposed: 2, round: resolve([10, 11], [10, 5, 12]))
+        var same = DraftPolicy(curve: .stockMLXDefault)
+        same.record(proposal(), proposed: 3, accepted: 1)
+        same.record(proposal(), proposed: 2, accepted: 2)
+        same.record(proposal(), proposed: 2, accepted: 1)
+        for (rate, expected) in zip(rates(other), rates(same)) { XCTAssertEqual(rate, expected, accuracy: 1e-12) }
+    }
+
     func testLearnedAcceptanceRaisesK() {
         var policy = DraftPolicy(curve: .stockMLXDefault)
         XCTAssertEqual(policy.draftLength(for: proposal(), remaining: 100, draftCostPerToken: 0), 1)
@@ -203,8 +270,9 @@ final class DraftPolicyTests: XCTestCase {
 
     func testThermalAndLowPower() {
         var policy = DraftPolicy(curve: .stockMLXDefault)
-        // a = 0.3 with draft cost 0.08: V(1) = 1.3 / 1.17 = 1.111, between 1.05 and 1.15.
-        let short = proposal(match: 2)
+        // A short corpus match, a = 0.3 with draft cost 0.08: V(1) = 1.3 / 1.17 = 1.111, between
+        // 1.05 and 1.15.
+        let short = proposal(.corpus, match: 2)
         XCTAssertEqual(policy.draftLength(for: short, remaining: 100, draftCostPerToken: 0.08), 1)
         policy.adjust(thermal: .fair, lowPower: false)
         XCTAssertEqual(policy.draftLength(for: short, remaining: 100, draftCostPerToken: 0.08), 1)

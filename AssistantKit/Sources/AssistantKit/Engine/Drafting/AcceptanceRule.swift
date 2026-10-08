@@ -19,6 +19,17 @@ public struct RoundResult: Equatable, Sendable {
         self.keep = keep
         self.stopped = stopped
     }
+
+    /// The reply ended at a stop token that was itself an accepted draft (as opposed to a stop the
+    /// target sampled in place of a draft). `acceptedDrafts` counts the stop draft; the drafts after
+    /// it never counted toward the reply, and whether they matched is not reported, so a policy must
+    /// not score the next depth as a rejection (`DraftPolicy.record(_:proposed:round:)` does not).
+    ///
+    /// Derived from `AcceptanceRule.resolve`'s output: only then are fewer tokens emitted than
+    /// drafts accepted, because the stop draft is accepted but not shown.
+    public var stoppedOnDraft: Bool {
+        stopped && emitted.count < acceptedDrafts
+    }
 }
 
 /// Sample-match verification. The target samples one token at every input row exactly as plain
