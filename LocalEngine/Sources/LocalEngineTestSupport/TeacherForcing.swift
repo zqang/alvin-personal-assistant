@@ -61,8 +61,11 @@ public enum TeacherForcing {
 public struct NearTieTally: Sendable {
     /// Tiny float32 models.
     public static let float32Tolerance: Float = 1e-3
-    /// Real 4-bit models.
-    public static let quantizedTolerance: Float = 0.25
+    /// Real 4-bit models. A reused cache and a fresh prefill reach the same position through
+    /// differently shaped matmuls, so fp16 rounding can flip a close top-2: on the CI GPU, Qwen3-0.6B
+    /// matched 56 positions and then flipped one with a 0.25 margin (Local engine run 37810247919).
+    /// A cache bug shows up as early, repeated mismatches, which `maxNearTieRate` still fails.
+    public static let quantizedTolerance: Float = 0.5
     /// The largest allowed share of near-ties among compared positions.
     public static let maxNearTieRate = 0.02
 
