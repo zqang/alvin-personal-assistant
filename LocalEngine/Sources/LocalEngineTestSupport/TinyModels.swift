@@ -11,6 +11,14 @@ public enum TinyModels {
 
     /// Qwen3.5 text model: layers alternate gated-delta (even) and attention (odd). The
     /// gated-delta kernel needs key and value head dims that are multiples of 32.
+    ///
+    /// It also needs at least 8 value heads. The kernel's `g` and `beta` inputs are
+    /// `[1, T, Hv]`, and MLX's custom-kernel codegen puts any input with fewer than 8 elements
+    /// in `constant` memory. With fewer heads, a 1-token call therefore generates different
+    /// source than a multi-token call under the same kernel name. When both kinds of call are
+    /// in one evaluated graph, MLX rebuilds the kernel and releases a pipeline state that
+    /// already-encoded commands still use. CI run 37791524986 crashed this way with 4 heads.
+    /// The catalog's Qwen3.5 checkpoints have 16 or 32. `LibraryAssumptionTests` pins this.
     public static let hybridTextConfigJSON = """
         {
           "model_type": "qwen3_5_text",
@@ -22,7 +30,7 @@ public enum TinyModels {
           "num_key_value_heads": 1,
           "head_dim": 32,
           "linear_num_key_heads": 2,
-          "linear_num_value_heads": 4,
+          "linear_num_value_heads": 8,
           "linear_key_head_dim": 32,
           "linear_value_head_dim": 32,
           "linear_conv_kernel_dim": 4,

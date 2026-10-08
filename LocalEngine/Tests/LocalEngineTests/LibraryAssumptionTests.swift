@@ -176,4 +176,36 @@ final class LibraryAssumptionTests: XCTestCase {
             XCTAssertTrue(LogitCheck.isExactlyEqual(prefixOut, maskedOut[0..., ..<m]), "output, m = \(m)")
         }
     }
+
+    /// 9. One evaluated graph can hold gated-delta calls over 1 step and over several steps. The
+    /// engine relies on this: a commit's replay, decode steps and the next verify pass stay lazy
+    /// until the caller evaluates them. It holds only when every call generates the same kernel
+    /// source. MLX's custom-kernel codegen puts inputs with fewer than 8 elements in `constant`
+    /// memory, and the kernel's `g` and `beta` are `[1, T, Hv]`, so the model needs at least 8
+    /// value heads. Otherwise MLX rebuilds the kernel partway through the graph and releases a
+    /// pipeline state that encoded commands still use. CI run 37791524986 crashed this way with
+    /// 4 heads.
+    func testOneStepAndMultiStepGatedDeltaCallsEvaluateInOneGraph() throws {
+        let valueHeads = try TinyForkModels.hybridTextConfiguration().linearNumValueHeads
+        guard valueHeads >= 8 else {
+            XCTFail("The tiny hybrid has \(valueHeads) value heads; it needs at least 8 (see TinyModels.hybridTextConfigJSON).")
+            return
+        }
+
+        let model = try TinyModels.makeStockHybrid(seed: 9)
+        let chunks = [TinyModels.tokens(9, seed: 10), [77], TinyModels.tokens(3, seed: 11), [65]]
+
+        let lazyCache = model.newCache(parameters: nil)
+        let together = chunks.map { TinyModels.logits(model, $0, cache: lazyCache) }
+        eval(together)
+
+        let stepCache = model.newCache(parameters: nil)
+        for (index, chunk) in chunks.enumerated() {
+            let expected = TinyModels.logits(model, chunk, cache: stepCache)
+            eval(expected)
+            XCTAssertTrue(
+                LogitCheck.isExactlyEqual(together[index], expected),
+                "chunk \(index) (\(chunk.count) tokens): max |Δ| = \(LogitCheck.maxAbsDifference(together[index], expected))")
+        }
+    }
 }

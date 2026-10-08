@@ -14,7 +14,7 @@ final class ForkSanitizeTests: XCTestCase {
         try MetalAvailability.require()
     }
 
-    private static let convChannels = 256  // 2 × (2 × 32) + 4 × 32 in the tiny config
+    private static let convChannels = 384  // 2 × (2 × 32) + 8 × 32 in the tiny config
     private static let normKeys = [
         "model.layers.0.input_layernorm.weight",
         "model.layers.0.post_attention_layernorm.weight",
@@ -160,7 +160,7 @@ final class ForkSanitizeTests: XCTestCase {
         XCTAssertEqual(text.kvHeads, 1)
         XCTAssertEqual(text.headDim, 32)
         XCTAssertEqual(text.linearNumKeyHeads, 2)
-        XCTAssertEqual(text.linearNumValueHeads, 4)
+        XCTAssertEqual(text.linearNumValueHeads, 8)
         XCTAssertEqual(text.linearKeyHeadDim, 32)
         XCTAssertEqual(text.linearValueHeadDim, 32)
         XCTAssertEqual(text.linearConvKernelDim, 4)
@@ -185,7 +185,7 @@ final class ForkSanitizeTests: XCTestCase {
             from: Data(TinyModels.hybridTextConfigJSON.replacingOccurrences(of: "\"qwen3_5_text\"", with: "\"qwen3_5\"").utf8))
         XCTAssertEqual(flat.modelType, "qwen3_5")
         XCTAssertEqual(flat.textConfig.hiddenLayers, 4)
-        XCTAssertEqual(flat.textConfig.linearNumValueHeads, 4)
+        XCTAssertEqual(flat.textConfig.linearNumValueHeads, 8)
     }
 
     func testConfigurationWithoutRopeParametersUsesTopLevelFieldsAndDefaults() throws {
@@ -240,7 +240,7 @@ final class ForkSanitizeTests: XCTestCase {
         let conv = MLXRandom.normal(sanitizedConv ? [convChannels, 4, 1] : [convChannels, 1, 4], key: key)
         var weights: [String: MLXArray] = [
             "model.layers.0.linear_attn.conv1d.weight": conv,
-            "model.layers.0.linear_attn.dt_bias": MLXArray([0.5, 0.25, -0.5, 1] as [Float]),
+            "model.layers.0.linear_attn.dt_bias": MLXArray([0.5, 0.25, -0.5, 1, 0.75, -0.25, 2, -1] as [Float]),
             "model.embed_tokens.weight": MLXArray.ones([128, 64]),
         ]
         for (index, normKey) in normKeys.enumerated() {
