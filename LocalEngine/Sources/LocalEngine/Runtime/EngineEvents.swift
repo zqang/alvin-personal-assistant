@@ -13,7 +13,8 @@ import Foundation
 public enum EngineEvent: Sendable {
     case progress(ReplyProgress)
     case text(String)
-    /// The calls to run; answer them with `InferenceEngine.continueReply(after:)`.
+    /// The calls to run; answer them with `InferenceEngine.continueReply(after:)`. A call the
+    /// model wrote that didn't parse has no `input` and keeps its text in `rawInput`.
     case toolCalls([PendingToolCall])
     case finished(EngineFinish)
 }

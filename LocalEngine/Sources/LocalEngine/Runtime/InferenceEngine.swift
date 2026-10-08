@@ -139,7 +139,8 @@ public final class InferenceEngine: @unchecked Sendable {
         }
     }
 
-    /// Answers `request`: see `EngineEvent` for the order of events.
+    /// Answers `request`: see `EngineEvent` for the order of events. A request that doesn't
+    /// end with a user turn throws `renderFailed` and changes nothing.
     public func reply(_ request: EngineRequest) -> AsyncThrowingStream<EngineEvent, Error> {
         stream { [self] continuation, cancellation in
             self.generate(.reply(request), continuation: continuation, cancellation: cancellation)
@@ -201,6 +202,16 @@ public final class InferenceEngine: @unchecked Sendable {
     private func generate(
         _ job: Job, continuation: AsyncThrowingStream<EngineEvent, Error>.Continuation, cancellation: StreamCancellation
     ) {
+        // A request that can't be answered is refused before anything changes: the live
+        // conversation and a reply waiting for tool results stay as they are.
+        if case .reply(let request) = job {
+            do {
+                try SessionRuntime.validate(request)
+            } catch {
+                continuation.finish(throwing: error)
+                return
+            }
+        }
         let hooks = configuration.hooks
         guard hooks.beginGPU() else {
             continuation.finish(throwing: EngineError.leftForeground)
@@ -327,6 +338,7 @@ public final class InferenceEngine: @unchecked Sendable {
             // Nothing was changed: the session stays as it was.
             continuation.finish(throwing: EngineError.busy)
         } catch {
+            // The cache may hold more than the ledger: start the session over.
             runtime.abandon()
             Memory.clearCache()
             continuation.finish(throwing: error)

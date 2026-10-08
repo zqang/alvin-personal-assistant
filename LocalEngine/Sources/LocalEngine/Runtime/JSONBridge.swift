@@ -100,8 +100,13 @@ public enum JSONBridge {
     /// A tool call the model made, for the app: the parser's id (or a fresh `call_…` id) and its
     /// arguments as the input object.
     public static func pendingCall(_ call: MLXLMCommon.ToolCall) -> PendingToolCall {
-        let id = call.id.flatMap { $0.isEmpty ? nil : $0 } ?? "call_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let id = call.id.flatMap { $0.isEmpty ? nil : $0 } ?? newCallID()
         return PendingToolCall(id: id, name: call.function.name, input: input(call.function.arguments), rawInput: nil)
+    }
+
+    /// A fresh tool-call id: `call_` and 32 lowercase hex digits.
+    public static func newCallID() -> String {
+        "call_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
 
     /// A recorded call, for a chat template's `tool_calls`.

@@ -89,10 +89,17 @@ final class SessionRuntime {
 
     // MARK: Preparing a reply
 
-    func prepare(_ request: EngineRequest, isAllowed: () -> Bool) throws -> Prepared {
+    /// Throws `renderFailed` for a request `prepare` can't answer (one that doesn't end with a
+    /// user turn). Checked before anything changes, so a refused request leaves the session and
+    /// a reply waiting for tool results as they were.
+    static func validate(_ request: EngineRequest) throws {
         guard request.turns.last?.role == .user else {
             throw EngineError.renderFailed("the request doesn't end with a user turn")
         }
+    }
+
+    func prepare(_ request: EngineRequest, isAllowed: () -> Bool) throws -> Prepared {
+        try Self.validate(request)
         reply = ReplyState(request: request)
         let key = prefixKey(system: request.system, tools: request.tools)
         guard let renderer, !session.noReuse else {
@@ -367,9 +374,12 @@ final class SessionRuntime {
         session.snapshot?.recordReply(ChatTurn(role: .assistant, text: text, toolRounds: rounds), tokenCount: session.ledger.count)
     }
 
-    /// Forgets the conversation in the cache after a failure (the ledger stays exact).
+    /// Forgets the conversation after a failure part-way through a job. The cache may then hold
+    /// tokens the ledger doesn't (a generator that threw with tokens still pending, a forward
+    /// cut short by an MLX error), so it starts over empty, which keeps L1 for every later job
+    /// (scratch work, checks). Nothing is lost: without a snapshot no plan reuses the cache.
     func abandon() {
-        session.snapshot = nil
+        session.reset()
         reply = nil
     }
 
@@ -414,8 +424,11 @@ final class SessionRuntime {
     func prewarm(system: String, tools: [ToolDefinition], isAllowed: () -> Bool) throws {
         guard let renderer, !session.noReuse else { return }
         let key = prefixKey(system: system, tools: tools)
+        // The live conversation already starts with this prefix: keep it (and a reply waiting
+        // for tool results). Its `systemEnd` checkpoint may be gone (`dropCheckpoints`); a later
+        // rewind to it then re-feeds from the deepest checkpoint left, which stays exact.
         if let snapshot = session.snapshot, snapshot.prefixKey == key, snapshot.systemEnd > 0,
-           session.checkpoints.marks[.systemEnd] == snapshot.systemEnd, session.ledger.count >= snapshot.systemEnd
+           session.ledger.count >= snapshot.systemEnd
         {
             return
         }

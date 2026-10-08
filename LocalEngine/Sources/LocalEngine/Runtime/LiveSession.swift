@@ -113,6 +113,7 @@ public final class LiveSession {
         precondition(pendingCount == 0, "Resolve the pending tokens before rewinding.")
         precondition(position >= 0 && position <= ledger.count, "Can't rewind to \(position) of \(ledger.count).")
         guard position < ledger.count else { return }
+        precondition(reusable, "This cache can't be rewound exactly.")
 
         if !layout.isHybrid {
             EngineCacheOps.trimAttention(target.cache, layout: layout, by: ledger.count - position)
@@ -174,20 +175,42 @@ public final class LiveSession {
     /// Runs `body`, which may feed (and commit) tokens after the current end, then puts the
     /// cache, ledger and checkpoints back exactly as they were. For warm-up, cost probes and
     /// checks that must not disturb the session.
+    ///
+    /// A cache that can't be rewound exactly (`reusable == false`: rotating or quantized
+    /// layers) is rebuilt from the ledger instead, which costs a prefill of the whole ledger
+    /// (nothing when it is empty, as at warm-up). Probes that run often should check
+    /// `reusable` first and skip such sessions.
     public func withScratch<R>(_ body: () throws -> R) rethrows -> R {
         precondition(pendingCount == 0, "Resolve the pending tokens before scratch work.")
         let position = ledger.count
-        let saved = EngineCacheOps.snapshot(target.cache, layout: layout, position: position)
+        let saved = reusable ? EngineCacheOps.snapshot(target.cache, layout: layout, position: position) : nil
         let savedLedger = ledger
         defer {
             let current = ledger.count + pendingCount
             precondition(current >= position, "Scratch work rewound below its start.")
-            EngineCacheOps.restore(target.cache, layout: layout, to: saved, currentPosition: current)
-            ledger = savedLedger
-            pendingCount = 0
-            checkpoints.drop(above: position)
+            if let saved {
+                EngineCacheOps.restore(target.cache, layout: layout, to: saved, currentPosition: current)
+                ledger = savedLedger
+                pendingCount = 0
+                checkpoints.drop(above: position)
+            } else {
+                rebuild(holding: savedLedger)
+            }
         }
         return try body()
+    }
+
+    /// Replaces the cache with a fresh one holding `tokens` (fed again, cache-only): how a cache
+    /// that can't be rewound exactly gets back to an earlier state. Checkpoints are dropped;
+    /// the snapshot, which describes the same tokens, stays.
+    private func rebuild(holding tokens: [Int]) {
+        target.resetCache()
+        ledger = []
+        pendingCount = 0
+        checkpoints.removeAll()
+        if !tokens.isEmpty {
+            feedCacheOnly(tokens)
+        }
     }
 
     // MARK: Consistency
@@ -196,7 +219,8 @@ public final class LiveSession {
     public struct ConsistencyReport: Sendable, CustomStringConvertible {
         /// Tokens in the ledger.
         public let ledgerCount: Int
-        /// Whether every attention layer's offset equals the ledger's length.
+        /// Whether every layer that counts its tokens (all but the recurrent ones) holds as many
+        /// as the ledger.
         public let offsetsMatch: Bool
         /// `max |live − fresh|` of the next-step logits (float32).
         public let maxAbsDifference: Float
@@ -224,20 +248,25 @@ public final class LiveSession {
         }
     }
 
-    /// Debug check of L1: feeds `probe` after the live cache (then restores it) and after a
-    /// fresh cache rebuilt from the ledger, through the raw model, and compares the logits.
-    /// `probe` defaults to the ledger's first token.
+    /// Debug check of L1: feeds `probe` after the live cache (then restores it, or rebuilds it
+    /// from the ledger when it can't be rewound exactly) and after a fresh cache rebuilt from
+    /// the ledger, through the raw model, and compares the logits. `probe` defaults to the
+    /// ledger's first token.
     public func assertConsistent(probe: Int? = nil) -> ConsistencyReport {
         precondition(pendingCount == 0, "Resolve the pending tokens before checking.")
         let count = ledger.count
-        let offsetsMatch = layout.attention.allSatisfy { target.cache[$0].offset == count }
+        let offsetsMatch = target.cache.allSatisfy { $0 is ArraysCache || $0.offset == count }
         let token = probe ?? ledger.first ?? 0
         let model = target.model
 
-        let saved = EngineCacheOps.snapshot(target.cache, layout: layout, position: count)
+        let saved = reusable ? EngineCacheOps.snapshot(target.cache, layout: layout, position: count) : nil
         let live = Self.lastRow(model(Self.array([token])[.newAxis], cache: target.cache))
         eval(live)
-        EngineCacheOps.restore(target.cache, layout: layout, to: saved, currentPosition: count + 1)
+        if let saved {
+            EngineCacheOps.restore(target.cache, layout: layout, to: saved, currentPosition: count + 1)
+        } else {
+            rebuild(holding: ledger)
+        }
 
         let fresh = model.newCache(parameters: nil)
         let tokens = ledger + [token]

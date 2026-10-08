@@ -9,6 +9,11 @@ import MLXLMCommon
 /// emitted (`toolCallStarted(nil)`) and once the function's name can be read from
 /// `<function=NAME>` or `"name": "NAME"` (`toolCallStarted(NAME)`).
 ///
+/// Tool-call markup is never shown. `ToolCallProcessor` hands a closed call it can't parse
+/// (malformed arguments, a tool the request didn't declare) back as plain text; the streamer
+/// takes it out and reports it as a call with no `input` and the model's text in `rawInput`,
+/// so the tool runner answers it with an error the model can act on.
+///
 /// Stop tokens never reach the streamer. Not thread-safe: engine queue only.
 public final class TextStreamer {
     public enum Output: Equatable {
@@ -29,6 +34,11 @@ public final class TextStreamer {
     private var nameReported = false
     /// Every tool call seen to start, with its name once known.
     public private(set) var startedCalls: [String?] = []
+    /// The reply's tool calls so far, in the order they were written (of calls that end in the
+    /// same detokenizer chunk, the parsed ones come first).
+    private var calls: [PendingToolCall] = []
+    /// How many of the processor's parsed calls are in `calls`.
+    private var parsedCount = 0
     /// Whether the text so far is inside a tool call.
     public private(set) var insideToolCall = false
     /// All visible text so far.
@@ -67,8 +77,10 @@ public final class TextStreamer {
                     insideToolCall = false
                 }
             }
-            if let text = processor.processChunk(chunk) {
-                emit(thinking.feed(text), into: &outputs)
+            let text = processor.processChunk(chunk)
+            collectParsedCalls()
+            if let text {
+                emit(thinking.feed(takeUnparsedCalls(from: text)), into: &outputs)
             }
         }
         return outputs
@@ -80,7 +92,9 @@ public final class TextStreamer {
         var outputs: [Output] = []
         // Text held back as a possible tool call is shown, unless it is the start of a call that
         // was cut off (by the length limit or a cancellation): markup is never shown.
-        if let rest = processor.processEOS(returnBufferedText: true),
+        let rest = processor.processEOS(returnBufferedText: true)
+        collectParsedCalls()
+        if let rest = rest.map(takeUnparsedCalls(from:)),
            !(startTag.map { rest.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix($0) } ?? false)
         {
             emit(thinking.feed(rest), into: &outputs)
@@ -91,7 +105,33 @@ public final class TextStreamer {
             return nil
         }.joined()
         insideToolCall = false
-        return (text, processor.toolCalls.map(JSONBridge.pendingCall))
+        return (text, calls)
+    }
+
+    /// Moves the calls the processor parsed since the last look into `calls`.
+    private func collectParsedCalls() {
+        let parsed = processor.toolCalls
+        guard parsed.count > parsedCount else { return }
+        calls += parsed[parsedCount...].map(JSONBridge.pendingCall)
+        parsedCount = parsed.count
+    }
+
+    /// `text` from the processor without the closed tool calls it couldn't parse (each
+    /// `startTag … endTag`), which are added to `calls` with their payload as `rawInput`.
+    private func takeUnparsedCalls(from text: String) -> String {
+        guard let startTag, let endTag, text.contains(startTag) else { return text }
+        var visible = ""
+        var rest = text[...]
+        while let start = rest.range(of: startTag),
+              let end = rest.range(of: endTag, range: start.upperBound ..< rest.endIndex)
+        {
+            visible += String(rest[..<start.lowerBound])
+            let payload = rest[start.upperBound ..< end.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+            calls.append(PendingToolCall(id: JSONBridge.newCallID(), name: Self.functionName(in: payload) ?? "", input: nil, rawInput: payload))
+            rest = rest[end.upperBound...]
+        }
+        visible += String(rest)
+        return visible
     }
 
     private func beginCall(_ outputs: inout [Output]) {

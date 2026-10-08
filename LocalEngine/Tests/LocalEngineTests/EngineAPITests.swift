@@ -94,6 +94,77 @@ final class EngineAPITests: XCTestCase {
         }
     }
 
+    /// A tagged call that doesn't parse (here: malformed arguments) is never shown; it comes
+    /// back as a call with its text in `rawInput`, so the tool runner can answer with an error.
+    func testUnparsedToolCallIsReportedNotShown() async throws {
+        let call = "<tool_call>\n{\"name\": \"set_timer\", \"arguments\": {\"seconds\": }}\n</tool_call>"
+        let (engine, _) = try EngineTestHarness.makeScriptedEngine(tiny: .qwen3, scripts: [tokenizer.encodeRaw("Ok. " + call)])
+        let events = try await EngineTestHarness.collect(engine.reply(request("Timer please", tools: tools)))
+        XCTAssertEqual(EngineTestHarness.text(events), "Ok. ")
+        XCTAssertEqual(Array(EngineTestHarness.kinds(events).suffix(2)), ["toolCalls", "finished(toolCalls)"])
+        let calls = EngineTestHarness.toolCalls(events)
+        XCTAssertEqual(calls.map(\.name), ["set_timer"])
+        XCTAssertNil(calls.first?.input)
+        XCTAssertEqual(calls.first?.rawInput, "{\"name\": \"set_timer\", \"arguments\": {\"seconds\": }}")
+        XCTAssertTrue(calls.first?.id.hasPrefix("call_") ?? false)
+    }
+
+    /// A request that doesn't end with a user turn is refused before anything changes: the
+    /// cached conversation and the reply waiting for tool results both survive it.
+    func testInvalidRequestLeavesTheSessionAlone() async throws {
+        let call = "<tool_call>\n{\"name\": \"set_timer\", \"arguments\": {\"seconds\": 60}}\n</tool_call>"
+        let (engine, _) = try EngineTestHarness.makeScriptedEngine(
+            tiny: .qwen3, scripts: [tokenizer.encodeRaw(call), tokenizer.encodeRaw("Timer set.")])
+        let first = try await EngineTestHarness.collect(engine.reply(request("One minute timer", tools: tools)))
+        XCTAssertEqual(EngineTestHarness.finish(first)?.reason, .toolCalls)
+        let before = try await engine.withSession { ($0.ledger, $0.snapshot) }
+
+        let invalid = EngineRequest(
+            system: system, tools: tools,
+            turns: [ChatTurn(role: .user, text: "One minute timer"), ChatTurn(role: .assistant, text: "On it.")])
+        do {
+            _ = try await EngineTestHarness.collect(engine.reply(invalid))
+            XCTFail("a request ending with an assistant turn should throw")
+        } catch {
+            if case .renderFailed? = error as? EngineError {} else { XCTFail("unexpected \(error)") }
+        }
+        let after = try await engine.withSession { ($0.ledger, $0.snapshot) }
+        XCTAssertEqual(after.0, before.0)
+        XCTAssertEqual(after.1, before.1)
+
+        let round = ToolRound(calls: EngineTestHarness.toolCalls(first).map { ToolCallRecord(call: $0, output: .ok(["ok": true], summary: "1 min")) })
+        let second = try await EngineTestHarness.collect(engine.continueReply(after: round))
+        XCTAssertEqual(EngineTestHarness.text(second), "Timer set.")
+        XCTAssertEqual(EngineTestHarness.finish(second)?.stats.planReason, "toolRound")
+    }
+
+    /// Prewarming the prefix the live conversation already starts with keeps the conversation
+    /// and its pending tool round, even after every checkpoint was dropped.
+    func testPrewarmKeepsTheLiveConversationWithoutCheckpoints() async throws {
+        for tiny in EngineTestHarness.Tiny.allCases {
+            let call = "<tool_call>\n{\"name\": \"set_timer\", \"arguments\": {\"seconds\": 60}}\n</tool_call>"
+            let (engine, _) = try EngineTestHarness.makeScriptedEngine(
+                tiny: tiny, scripts: [tokenizer.encodeRaw(call), tokenizer.encodeRaw("Timer set.")])
+            let first = try await EngineTestHarness.collect(engine.reply(request("One minute timer", tools: tools)))
+            XCTAssertEqual(EngineTestHarness.finish(first)?.reason, .toolCalls, "\(tiny)")
+            await engine.dropCheckpoints(keepSystem: false)
+            let before = try await engine.withSession { ($0.ledger, $0.snapshot, $0.checkpoints.marks.isEmpty) }
+            XCTAssertTrue(before.2, "\(tiny)")
+
+            try await engine.prewarm(system: system, tools: tools)
+            let after = try await engine.withSession { ($0.ledger, $0.snapshot) }
+            XCTAssertEqual(after.0, before.0, "\(tiny)")
+            XCTAssertEqual(after.1, before.1, "\(tiny)")
+
+            let round = ToolRound(calls: EngineTestHarness.toolCalls(first).map { ToolCallRecord(call: $0, output: .ok(["ok": true], summary: "1 min")) })
+            let second = try await EngineTestHarness.collect(engine.continueReply(after: round))
+            XCTAssertEqual(EngineTestHarness.text(second), "Timer set.", "\(tiny)")
+            XCTAssertEqual(EngineTestHarness.finish(second)?.stats.reusedTokens, before.0.count, "\(tiny)")
+            let report = try await engine.withSession { $0.assertConsistent() }
+            XCTAssertTrue(report.isConsistent(), "\(tiny): \(report)")
+        }
+    }
+
     func testDisallowedGPUCancels() async throws {
         let allowed = CallBudget(calls: 0)
         var configuration = EngineTestHarness.testConfiguration()
@@ -343,6 +414,42 @@ final class TextStreamerTests: XCTestCase {
         XCTAssertTrue(result.outputs.contains(.toolCallStarted("create_reminder")))
         XCTAssertEqual(result.toolCalls.first?.name, "create_reminder")
         XCTAssertEqual(result.toolCalls.first?.input, ["title": "Call mum", "minutes": 30])
+    }
+
+    /// The processor hands a closed call it can't parse back as text; the streamer takes the
+    /// markup out and reports the call with the model's text as `rawInput`.
+    func testUnparsedCallIsReportedWithItsRawInput() {
+        let tools = JSONBridge.templateTools([
+            ToolDefinition(name: "set_timer", description: "Timer.", inputSchema: ["type": "object", "properties": ["seconds": ["type": "integer"]]]),
+        ])
+        let payload = "{\"name\": \"set_timer\", \"arguments\": {\"seconds\": }}"
+        let result = stream("Sure. <tool_call>\n" + payload + "\n</tool_call>", tools: tools)
+        XCTAssertEqual(result.text, "Sure. ")
+        XCTAssertEqual(result.streamer.visibleText, "Sure. ")
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertEqual(result.toolCalls.first?.name, "set_timer")
+        XCTAssertNil(result.toolCalls.first?.input)
+        XCTAssertEqual(result.toolCalls.first?.rawInput, payload)
+        XCTAssertTrue(result.toolCalls.first?.id.hasPrefix("call_") ?? false)
+        XCTAssertEqual(result.streamer.startedCalls, ["set_timer"])
+        XCTAssertFalse(result.streamer.insideToolCall)
+    }
+
+    /// The JSON parser refuses a tool the request didn't declare; the call still isn't shown,
+    /// the text around it is, and calls keep the order they were written in.
+    func testCallToAnUndeclaredToolIsReportedNotShown() {
+        let tools = JSONBridge.templateTools([
+            ToolDefinition(name: "get_time", description: "Time.", inputSchema: ["type": "object", "properties": [:]]),
+        ])
+        let result = stream(
+            "One: <tool_call>\n{\"name\": \"launch\", \"arguments\": {}}\n</tool_call> then "
+                + "<tool_call>\n{\"name\": \"get_time\", \"arguments\": {}}\n</tool_call>", tools: tools)
+        XCTAssertEqual(result.text, "One:  then ")
+        XCTAssertEqual(result.toolCalls.map(\.name), ["launch", "get_time"])
+        XCTAssertNil(result.toolCalls.first?.input)
+        XCTAssertEqual(result.toolCalls.first?.rawInput, "{\"name\": \"launch\", \"arguments\": {}}")
+        XCTAssertEqual(result.toolCalls.last?.input, [:])
+        XCTAssertNil(result.toolCalls.last?.rawInput)
     }
 
     func testCutOffCallIsNeverShown() {
