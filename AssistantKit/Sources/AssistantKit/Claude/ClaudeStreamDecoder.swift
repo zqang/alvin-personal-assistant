@@ -1,7 +1,8 @@
 import Foundation
 
-/// Turns Messages API stream events into `ReplyEvent`s and rebuilds the assistant's content blocks,
-/// which go back verbatim when a server-tool turn pauses (`stop_reason: "pause_turn"`).
+/// Turns Messages API stream events into `AssistantEvent`s and rebuilds the assistant's content
+/// blocks, which go back verbatim when a server-tool turn pauses (`stop_reason: "pause_turn"`) or
+/// when client tool calls (`stop_reason: "tool_use"`) are answered.
 public struct ClaudeStreamDecoder: Sendable {
     /// Model that produced the message; differs from the requested one after a refusal fallback.
     public private(set) var model: String?
@@ -13,17 +14,28 @@ public struct ClaudeStreamDecoder: Sendable {
     private var texts: [Int: String] = [:]
     private var thinking: [Int: String] = [:]
     private var partialInputs: [Int: String] = [:]
+    /// Client `tool_use` input that didn't parse to a JSON object, as the model wrote it, by block index.
+    private var invalidInputs: [Int: String] = [:]
+    /// How each client tool shows while it runs, by name. Unlisted tools use `ToolPresentation.generic`.
+    private let clientTools: [String: ToolPresentation]
     /// Whether the last activity event is still on screen; the next text clears it.
     var showingActivity = false
+    /// Whether `.progress(.responseStarted)` has been emitted. A provider carries it across the
+    /// requests of one reply, so the mark appears once.
+    var responseStartReported = false
 
-    public init() {}
+    public init(clientTools: [String: ToolPresentation] = [:]) {
+        self.clientTools = clientTools
+    }
 
     /// Handles one event (a decoded `data:` payload). Throws for a mid-stream `error` event.
-    public mutating func handle(_ event: JSONValue) throws -> [ReplyEvent] {
+    public mutating func handle(_ event: JSONValue) throws -> [AssistantEvent] {
         switch event["type"]?.stringValue {
         case "message_start":
             model = event["message"]?["model"]?.stringValue
-            return []
+            guard !responseStartReported else { return [] }
+            responseStartReported = true
+            return [.progress(.responseStarted)]
         case "content_block_start":
             guard let index = event["index"]?.intValue,
                   let block = event["content_block"]?.objectValue else { return [] }
@@ -72,6 +84,28 @@ public struct ClaudeStreamDecoder: Sendable {
         return result
     }
 
+    /// The client tool calls in `continuationBlocks()`, in order, so a call made before a fallback
+    /// boundary is dropped with the rest of the declined output. A call whose input didn't parse to
+    /// a JSON object, or never finished streaming, has no `input` and keeps its text in `rawInput`.
+    public func clientToolCalls() -> [PendingToolCall] {
+        var rawInputs: [String: String] = [:]
+        for (index, raw) in invalidInputs.merging(partialInputs, uniquingKeysWith: { invalid, _ in invalid }) {
+            guard blocks[index]?["type"]?.stringValue == "tool_use",
+                  let id = blocks[index]?["id"]?.stringValue else { continue }
+            rawInputs[id] = raw
+        }
+        return continuationBlocks().compactMap { block -> PendingToolCall? in
+            guard block["type"]?.stringValue == "tool_use",
+                  let id = block["id"]?.stringValue,
+                  let name = block["name"]?.stringValue else { return nil }
+            if let raw = rawInputs[id] {
+                return PendingToolCall(id: id, name: name, input: nil, rawInput: raw)
+            }
+            let input = JSONValue.object(block["input"]?.objectValue ?? [:])
+            return PendingToolCall(id: id, name: name, input: input)
+        }
+    }
+
     static func activityDescription(tool: String?, input: JSONValue?) -> String {
         switch tool {
         case "web_search":
@@ -88,7 +122,7 @@ public struct ClaudeStreamDecoder: Sendable {
 
     // MARK: - Private
 
-    private mutating func start(_ block: [String: JSONValue], at index: Int) -> [ReplyEvent] {
+    private mutating func start(_ block: [String: JSONValue], at index: Int) -> [AssistantEvent] {
         if blocks[index] == nil { order.append(index) }
         blocks[index] = block
         switch block["type"]?.stringValue {
@@ -101,13 +135,24 @@ public struct ClaudeStreamDecoder: Sendable {
             return []
         case "server_tool_use":
             showingActivity = true
-            return [.activity(Self.activityDescription(tool: block["name"]?.stringValue, input: nil))]
+            let activity = Self.activityDescription(tool: block["name"]?.stringValue, input: nil)
+            return [.cue(.lookingUp), .reply(.activity(activity))]
+        case "tool_use":
+            let name = block["name"]?.stringValue
+            let presentation = name.flatMap { clientTools[$0] } ?? .generic
+            showingActivity = true
+            var events: [AssistantEvent] = [.progress(.toolCallStarted(name: name))]
+            if let cue = presentation.cue {
+                events.append(.cue(cue))
+            }
+            events.append(.reply(.activity(presentation.activity)))
+            return events
         default:
             return []
         }
     }
 
-    private mutating func apply(_ delta: JSONValue, at index: Int) -> [ReplyEvent] {
+    private mutating func apply(_ delta: JSONValue, at index: Int) -> [AssistantEvent] {
         guard blocks[index] != nil else { return [] }
         switch delta["type"]?.stringValue {
         case "text_delta":
@@ -133,28 +178,47 @@ public struct ClaudeStreamDecoder: Sendable {
         return []
     }
 
-    private mutating func stop(at index: Int) -> [ReplyEvent] {
+    private mutating func stop(at index: Int) -> [AssistantEvent] {
         guard let partial = partialInputs.removeValue(forKey: index) else { return [] }
         let trimmed = partial.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty, let input = try? JSONValue.parse(trimmed) {
-            blocks[index]?["input"] = input
+        let parsed: JSONValue? = trimmed.isEmpty ? nil : try? JSONValue.parse(trimmed)
+        switch blocks[index]?["type"]?.stringValue {
+        case "tool_use":
+            // Client tool input streams unvalidated. Input that isn't a JSON object is answered
+            // with INVALID_JSON; its block goes back with an empty input.
+            guard !trimmed.isEmpty else { return [] }
+            if let parsed, parsed.objectValue != nil {
+                blocks[index]?["input"] = parsed
+            } else {
+                invalidInputs[index] = partial
+                blocks[index]?["input"] = .object([:])
+            }
+            return []
+        case "server_tool_use":
+            if let parsed {
+                blocks[index]?["input"] = parsed
+            }
+            showingActivity = true
+            let description = Self.activityDescription(
+                tool: blocks[index]?["name"]?.stringValue,
+                input: blocks[index]?["input"]
+            )
+            return [.reply(.activity(description))]
+        default:
+            if let parsed {
+                blocks[index]?["input"] = parsed
+            }
+            return []
         }
-        guard blocks[index]?["type"]?.stringValue == "server_tool_use" else { return [] }
-        showingActivity = true
-        let description = Self.activityDescription(
-            tool: blocks[index]?["name"]?.stringValue,
-            input: blocks[index]?["input"]
-        )
-        return [.activity(description)]
     }
 
-    private mutating func textEvents(_ text: String) -> [ReplyEvent] {
+    private mutating func textEvents(_ text: String) -> [AssistantEvent] {
         guard !text.isEmpty else { return [] }
         if showingActivity {
             showingActivity = false
-            return [.activity(nil), .text(text)]
+            return [.reply(.activity(nil)), .reply(.text(text))]
         }
-        return [.text(text)]
+        return [.reply(.text(text))]
     }
 
     private func materializedBlock(at index: Int) -> [String: JSONValue]? {
