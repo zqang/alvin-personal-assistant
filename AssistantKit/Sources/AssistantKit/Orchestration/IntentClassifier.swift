@@ -3,11 +3,13 @@ import Foundation
 /// Cheap, rule-based hints about what an utterance asks for, in English and Chinese.
 ///
 /// The router uses them to choose an engine and a mode; they never change what a model is told.
-/// Matching is on the lowercased text. A phrase in Latin script matches only as whole words, so
-/// "plan" doesn't fire on "explanation" and "hi" doesn't fire on "this". In the fresh-facts,
-/// device-action and complex tables a trailing plural "s" is also allowed ("reminders",
-/// "meetings"). Chinese, Japanese and Korean phrases match anywhere, because those scripts don't
-/// separate words.
+/// Matching is a substring search of the lowercased text, with word boundaries at the ends of a
+/// phrase in Latin script, so "plan" doesn't fire on "explanation" or "planet" and "hi" doesn't fire
+/// on "this". In the fresh-facts, device-action and complex tables the last word may be inflected:
+/// every phrase may take a plural ("reminders", "searches"), and the phrases in `verbPhrases` also
+/// take verb endings ("scored", "searching", "scheduled", "planning"); see `endings(for:)`. Nouns
+/// don't take verb endings, so "alarming" isn't a device action. Chinese, Japanese and Korean
+/// phrases match anywhere, because those scripts don't separate words.
 public struct IntentClassifier: Sendable {
     public struct Intents: OptionSet, Hashable, Sendable {
         public let rawValue: UInt8
@@ -47,6 +49,10 @@ public struct IntentClassifier: Sendable {
         "right now", "search", "look up", "look it up", "look that up", "google",
         "天气", "新闻", "股价", "汇率", "比分", "最新", "今天的", "搜索", "查一下",
     ]
+
+    /// Phrases in the inflected tables that are also verbs, which take verb endings as well as plurals:
+    /// "scored", "searching", "googled", "scheduled", "compared", "planning".
+    static let verbPhrases: Set<String> = ["score", "search", "google", "schedule", "compare", "plan"]
 
     /// Fresh-facts phrases that only qualify time. They don't count in a question about the clock
     /// itself ("what time is it right now", "what's today's date").
@@ -99,13 +105,13 @@ public struct IntentClassifier: Sendable {
         let fresh = isClockQuestion
             ? Self.freshFactsPhrases.filter { !Self.timeQualifierPhrases.contains($0) }
             : Self.freshFactsPhrases
-        if Self.matchesAny(scalars, fresh, allowPlural: true) { intents.insert(.freshFacts) }
-        if Self.matchesAny(scalars, Self.deviceActionPhrases, allowPlural: true) { intents.insert(.deviceAction) }
+        if Self.matchesAny(scalars, fresh, inflected: true) { intents.insert(.freshFacts) }
+        if Self.matchesAny(scalars, Self.deviceActionPhrases, inflected: true) { intents.insert(.deviceAction) }
         if Self.matchesAny(scalars, Self.explicitDepthPhrases) { intents.insert(.explicitDepth) }
 
         let questions = scalars.filter { $0 == "?" || $0 == "？" }.count
         if words >= Self.complexMinWords || cjk >= Self.complexMinCJK || questions >= Self.complexMinQuestions
-            || Self.matchesAny(scalars, Self.complexPhrases, allowPlural: true) {
+            || Self.matchesAny(scalars, Self.complexPhrases, inflected: true) {
             intents.insert(.complex)
         }
 
@@ -160,13 +166,43 @@ public struct IntentClassifier: Sendable {
 
     // MARK: Matching
 
-    static func matchesAny(_ text: [Unicode.Scalar], _ phrases: [String], allowPlural: Bool = false) -> Bool {
-        phrases.contains { contains(text, phrase: Array($0.unicodeScalars), allowPlural: allowPlural) }
+    static func matchesAny(_ text: [Unicode.Scalar], _ phrases: [String], inflected: Bool = false) -> Bool {
+        phrases.contains { matches(text, phrase: $0, inflected: inflected) }
     }
 
-    /// Whether `phrase` occurs in `text`. An end of the phrase that is a letter or digit must sit at
-    /// a word boundary; with `allowPlural`, a plural "s" may follow the last word.
-    static func contains(_ text: [Unicode.Scalar], phrase: [Unicode.Scalar], allowPlural: Bool = false) -> Bool {
+    /// Whether `phrase` occurs in `text`; with `inflected`, also with the endings its last word may
+    /// take (see `endings(for:)`).
+    static func matches(_ text: [Unicode.Scalar], phrase: String, inflected: Bool) -> Bool {
+        let scalars = Array(phrase.unicodeScalars)
+        guard inflected else { return contains(text, phrase: scalars) }
+        if contains(text, phrase: scalars, endings: endings(for: phrase)) { return true }
+        // A verb's final "e" drops before "ing": "score" → "scoring".
+        return verbPhrases.contains(phrase) && phrase.hasSuffix("e") && scalars.count > 2
+            && contains(text, phrase: Array(scalars.dropLast()), endings: ["ing"])
+    }
+
+    /// The letters the last word of `phrase` may gain in an inflected table, "" being none: a plural
+    /// ("es" after s, x, z, ch or sh, otherwise "s"), and for a verb "d" after a final "e", otherwise
+    /// "ed" and "ing", also after a doubled final consonant. So "plan" matches "plans", "planned"
+    /// and "planning" but not "planes", and "alarm" matches "alarms" but not "alarming".
+    static func endings(for phrase: String) -> Set<String> {
+        guard let last = phrase.last else { return [""] }
+        let sibilant = ["s", "x", "z", "ch", "sh"].contains { phrase.hasSuffix($0) }
+        var endings: Set<String> = ["", sibilant ? "es" : "s"]
+        guard verbPhrases.contains(phrase) else { return endings }
+        if last == "e" {
+            endings.insert("d")
+        } else {
+            endings.formUnion(["ed", "ing", "\(last)ed", "\(last)ing"])
+        }
+        return endings
+    }
+
+    /// Whether `phrase` occurs in `text`. A start of the phrase that is a letter or digit must sit at
+    /// a word boundary. So must its end, after one of `endings`: the letters that may follow the
+    /// phrase within its last word, where "" is the bare phrase. An end that isn't a letter or digit
+    /// (Chinese, punctuation) needs no boundary.
+    static func contains(_ text: [Unicode.Scalar], phrase: [Unicode.Scalar], endings: Set<String> = [""]) -> Bool {
         guard let first = phrase.first, let last = phrase.last, phrase.count <= text.count else { return false }
         let boundedStart = isWordScalar(first)
         let boundedEnd = isWordScalar(last)
@@ -175,12 +211,13 @@ public struct IntentClassifier: Sendable {
             defer { start += 1 }
             guard text[start] == first, text[start..<start + phrase.count].elementsEqual(phrase) else { continue }
             if boundedStart, start > 0, isWordScalar(text[start - 1]) { continue }
+            guard boundedEnd else { return true }
             let end = start + phrase.count
-            if boundedEnd, end < text.count, isWordScalar(text[end]) {
-                let pluralEnds = allowPlural && text[end] == "s" && (end + 1 == text.count || !isWordScalar(text[end + 1]))
-                guard pluralEnds else { continue }
-            }
-            return true
+            var wordEnd = end
+            while wordEnd < text.count, isWordScalar(text[wordEnd]) { wordEnd += 1 }
+            var ending = String.UnicodeScalarView()
+            ending.append(contentsOf: text[end..<wordEnd])
+            if endings.contains(String(ending)) { return true }
         }
         return false
     }

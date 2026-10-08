@@ -117,6 +117,17 @@ final class ConnectionPrewarmerTests: XCTestCase {
         XCTAssertEqual(transport.requests.count, 2)
     }
 
+    func testDefaultClockIsContinuousSecondsFromCreation() async throws {
+        let clock = ConnectionPrewarmer.continuousSeconds()
+        let first = clock()
+        XCTAssertGreaterThanOrEqual(first, 0)
+        XCTAssertLessThan(first, 5)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let second = clock()
+        XCTAssertGreaterThanOrEqual(second - first, 0.015)
+        XCTAssertLessThan(second, 5)
+    }
+
     func testOrigin() {
         XCTAssertEqual(ConnectionPrewarmer.origin(of: modelsRequest()), "https://api.anthropic.com:443")
         XCTAssertEqual(ConnectionPrewarmer.origin(of: modelsRequest("HTTPS://API.Anthropic.com:443")), "https://api.anthropic.com:443")

@@ -421,12 +421,16 @@ final class OrchestratorTests: XCTestCase {
     func testConnectivityFailureClassification() {
         let connectivity: [URLError.Code] = [
             .notConnectedToInternet, .networkConnectionLost, .timedOut, .cannotFindHost, .cannotConnectToHost,
-            .dnsLookupFailed, .internationalRoamingOff, .dataNotAllowed, .secureConnectionFailed,
+            .dnsLookupFailed, .internationalRoamingOff, .dataNotAllowed,
         ]
         for code in connectivity {
             XCTAssertTrue(URLError(code).isConnectivityFailure, "\(code)")
         }
-        for code in [URLError.Code.cancelled, .badServerResponse, .badURL, .userAuthenticationRequired] {
+        let others: [URLError.Code] = [
+            .cancelled, .badServerResponse, .badURL, .userAuthenticationRequired, .secureConnectionFailed,
+            .serverCertificateUntrusted,
+        ]
+        for code in others {
             XCTAssertFalse(URLError(code).isConnectivityFailure, "\(code)")
         }
         XCTAssertTrue(NSError(domain: NSURLErrorDomain, code: URLError.Code.notConnectedToInternet.rawValue).isConnectivityFailure)

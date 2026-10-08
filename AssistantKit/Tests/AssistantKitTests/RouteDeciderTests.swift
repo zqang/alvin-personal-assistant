@@ -124,6 +124,35 @@ final class RouteDeciderTests: XCTestCase {
         XCTAssertEqual(decider.decide("Set an alarm", signals: signals(cloudFirstText: 9)), route(.cloud, .deviceAction, fallback: .local))
     }
 
+    func testRow8TrustsOnlyARecentCloudEstimate() {
+        let start = Date(timeIntervalSince1970: 1_790_000_000)
+        var latency = LatencyEstimator()
+        latency.record(engine: .cloud, mode: .standard, firstText: 5, at: start)
+        latency.record(engine: .local, mode: .standard, firstText: 0.8, at: start)
+        latency.record(engine: .cloud, mode: .deep, firstText: 1, at: start)
+
+        var fresh = signals()
+        fresh.setExpectations(from: latency, now: start.addingTimeInterval(RouteDecider.cloudSlowMaximumAge))
+        XCTAssertEqual(fresh.expectedCloudFirstText, 5)
+        XCTAssertEqual(fresh.expectedLocalFirstText, 0.8)
+        XCTAssertEqual(decider.decide("Tell me a joke", signals: fresh), route(.local, .cloudSlow, fallback: .cloud))
+
+        // Once the newest cloud sample is older than 15 minutes, rule 8 stops applying and the next
+        // simple request goes to the cloud, which measures it again. The local estimate doesn't age.
+        var stale = signals()
+        stale.setExpectations(from: latency, now: start.addingTimeInterval(RouteDecider.cloudSlowMaximumAge + 1))
+        XCTAssertNil(stale.expectedCloudFirstText)
+        XCTAssertEqual(stale.expectedLocalFirstText, 0.8)
+        XCTAssertEqual(decider.decide("Tell me a joke", signals: stale), route(.cloud, .cloudDefault, fallback: .local))
+        XCTAssertEqual(RouteDecider.cloudSlowMaximumAge, 900)
+
+        // An empty estimator clears both.
+        var cleared = signals(cloudFirstText: 9, localFirstText: 1)
+        cleared.setExpectations(from: LatencyEstimator(), now: start)
+        XCTAssertNil(cleared.expectedCloudFirstText)
+        XCTAssertNil(cleared.expectedLocalFirstText)
+    }
+
     func testRow9ComplexGoesToTheCloudWithoutFallback() {
         XCTAssertEqual(decider.decide("Help me plan a trip to Japan", signals: signals(preferLocal: true)), route(.cloud, .complex))
         XCTAssertEqual(decider.decide("优缺点是什么", signals: signals(preferLocal: true, voice: true)), route(.cloud, .complex))

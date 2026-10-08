@@ -10,7 +10,7 @@ import FoundationNetworking
 /// the same transport, and therefore the same `URLSession`, that the reply will use, so the reply
 /// reuses the warmed HTTP/2 connection. The response is read to the end and thrown away; errors are
 /// ignored. Each origin is warmed at most once per `minimumInterval`, counted from the start of the
-/// previous prewarm, whatever its outcome.
+/// previous prewarm, whatever its outcome, on a clock that keeps running while the device sleeps.
 public actor ConnectionPrewarmer {
     public nonisolated let minimumInterval: TimeInterval
     private let transport: HTTPStreamingTransport
@@ -18,7 +18,7 @@ public actor ConnectionPrewarmer {
     private var lastStarted: [String: TimeInterval] = [:]
 
     public init(transport: HTTPStreamingTransport, minimumInterval: TimeInterval = 30) {
-        self.init(transport: transport, minimumInterval: minimumInterval) { ProcessInfo.processInfo.systemUptime }
+        self.init(transport: transport, minimumInterval: minimumInterval, clock: Self.continuousSeconds())
     }
 
     /// `clock` returns monotonic seconds; tests pass a manual clock.
@@ -39,6 +39,18 @@ public actor ConnectionPrewarmer {
             for try await _ in try await transport.lines(for: request) {}
         } catch {
             // A failed prewarm costs nothing; the real request reports its own errors.
+        }
+    }
+
+    /// Seconds on `ContinuousClock`, which keeps counting while the device sleeps. A connection goes
+    /// cold during sleep, so time spent locked must count toward the interval; `systemUptime` stops
+    /// then, and would skip the prewarm when the user unlocks the phone and starts speaking.
+    static func continuousSeconds() -> @Sendable () -> TimeInterval {
+        let clock = ContinuousClock()
+        let origin = clock.now
+        return {
+            let elapsed = origin.duration(to: clock.now).components
+            return Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
         }
     }
 

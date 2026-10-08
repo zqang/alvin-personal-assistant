@@ -136,11 +136,52 @@ final class IntentClassifierTests: XCTestCase {
         let text = Array("what's on my calendar".unicodeScalars)
         XCTAssertTrue(IntentClassifier.contains(text, phrase: Array("what's on".unicodeScalars)))
         XCTAssertFalse(IntentClassifier.contains(Array("what's one".unicodeScalars), phrase: Array("what's on".unicodeScalars)))
-        XCTAssertTrue(IntentClassifier.contains(Array("two timers".unicodeScalars), phrase: Array("timer".unicodeScalars), allowPlural: true))
-        XCTAssertFalse(IntentClassifier.contains(Array("two timers".unicodeScalars), phrase: Array("timer".unicodeScalars)))
-        XCTAssertFalse(IntentClassifier.contains(Array("this".unicodeScalars), phrase: Array("hi".unicodeScalars), allowPlural: true))
+        XCTAssertTrue(IntentClassifier.matches(Array("two timers".unicodeScalars), phrase: "timer", inflected: true))
+        XCTAssertFalse(IntentClassifier.matches(Array("two timers".unicodeScalars), phrase: "timer", inflected: false))
+        XCTAssertFalse(IntentClassifier.matches(Array("this".unicodeScalars), phrase: "hi", inflected: true))
         XCTAssertTrue(IntentClassifier.contains(Array("hi你好".unicodeScalars), phrase: Array("hi".unicodeScalars)))
         XCTAssertTrue(IntentClassifier.contains(Array("帮我查一下".unicodeScalars), phrase: Array("查一下".unicodeScalars)))
+        XCTAssertTrue(IntentClassifier.contains(Array("the plan's fine".unicodeScalars), phrase: Array("plan".unicodeScalars)))
+    }
+
+    func testInflectedForms() {
+        assertIntents([
+            ("Who scored last night", .freshFacts),
+            ("Did Arsenal win? What were the scores", .freshFacts),
+            ("The scoring in that game was wild", .freshFacts),
+            ("Try searching for flights to Osaka", .freshFacts),
+            ("I searched but found nothing", .freshFacts),
+            ("Recent searches", .freshFacts),
+            ("Have you googled it", .freshFacts),
+            ("Is anything scheduled tomorrow", .deviceAction),
+            ("Help with scheduling", .deviceAction),
+            ("Cancel my alarms", .deviceAction),
+            ("I'm planning a trip to Japan", .complex),
+            ("We planned a trip to Japan", .complex),
+            ("What are my plans", .complex),
+            ("I compared both laptops", .complex),
+            ("Comparing apples and oranges", .complex),
+        ])
+        // Nouns take only plurals, and only the plural their spelling allows.
+        assertIntents([
+            ("How do planes fly", []),
+            ("That's alarming", []),
+            ("The house weathered the storm", []),
+            ("A planet of apes", []),
+            ("Scorpions are arachnids", []),
+            ("Researching mitochondria", []),
+        ])
+    }
+
+    func testEndings() {
+        XCTAssertEqual(IntentClassifier.endings(for: "alarm"), ["", "s"])
+        XCTAssertEqual(IntentClassifier.endings(for: "news"), ["", "es"])
+        XCTAssertEqual(IntentClassifier.endings(for: "plan"), ["", "s", "ed", "ing", "ned", "ning"])
+        XCTAssertEqual(IntentClassifier.endings(for: "search"), ["", "es", "ed", "ing", "hed", "hing"])
+        XCTAssertEqual(IntentClassifier.endings(for: "score"), ["", "s", "d"])
+        XCTAssertTrue(IntentClassifier.verbPhrases.isSubset(of: Set(
+            IntentClassifier.freshFactsPhrases + IntentClassifier.deviceActionPhrases + IntentClassifier.complexPhrases
+        )))
     }
 
     func testMeasures() {

@@ -260,16 +260,19 @@ public struct Orchestrator: AssistantProvider {
     }
 }
 
-/// The URL error codes that mean the network, not the server, failed.
+/// The URL error codes that mean the network, not the server, failed. TLS failures are left out:
+/// against a custom base URL or proxy they usually mean a configuration error, which the user
+/// should see rather than a silent switch to the on-device model. A captive portal that stalls
+/// the handshake is caught by the orchestrator's first-event watchdog instead.
 private let connectivityFailureCodes: [URLError.Code] = [
     .notConnectedToInternet, .networkConnectionLost, .timedOut, .cannotFindHost, .cannotConnectToHost,
-    .dnsLookupFailed, .internationalRoamingOff, .dataNotAllowed, .secureConnectionFailed,
+    .dnsLookupFailed, .internationalRoamingOff, .dataNotAllowed,
 ]
 
 extension Error {
     /// Whether this error means the network couldn't be used (no route, lost connection, timeout,
-    /// DNS, roaming or cellular data off, a TLS handshake broken by a captive portal). HTTP status
-    /// errors, such as a 401, are never connectivity failures.
+    /// DNS, roaming or cellular data off). HTTP status errors, such as a 401, and TLS failures are
+    /// never connectivity failures.
     public var isConnectivityFailure: Bool {
         if let urlError = self as? URLError {
             return connectivityFailureCodes.contains(urlError.code)

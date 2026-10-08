@@ -30,7 +30,8 @@ public struct RouteSignals: Equatable, Sendable {
     public var deepBudgetLeft: Bool
     /// The "Answer small talk on device" setting.
     public var fastLocalSmallTalk: Bool
-    /// The typical time to the first text of a standard cloud reply, from `LatencyEstimator`.
+    /// The typical time to the first text of a standard cloud reply, for rule 8. Leave it nil when the
+    /// estimate is old; `setExpectations(from:now:)` does that.
     public var expectedCloudFirstText: TimeInterval?
     /// The typical time to the first text of an on-device reply, from `LatencyEstimator`.
     public var expectedLocalFirstText: TimeInterval?
@@ -62,6 +63,18 @@ public struct RouteSignals: Equatable, Sendable {
         self.expectedCloudFirstText = expectedCloudFirstText
         self.expectedLocalFirstText = expectedLocalFirstText
     }
+
+    /// Fills `expectedCloudFirstText` and `expectedLocalFirstText` from the estimator, for standard
+    /// replies. The cloud's estimate counts only while its newest sample is at most
+    /// `RouteDecider.cloudSlowMaximumAge` old: while rule 8 keeps simple requests on device, the
+    /// cloud gets few new samples, so an old "slow" verdict has to lapse rather than hold. The series
+    /// itself keeps its history.
+    public mutating func setExpectations(from latency: LatencyEstimator, now: Date = Date()) {
+        expectedCloudFirstText = latency.expectedFirstText(
+            engine: .cloud, mode: .standard, recordedWithin: RouteDecider.cloudSlowMaximumAge, now: now
+        )
+        expectedLocalFirstText = latency.expectedFirstText(engine: .local, mode: .standard)
+    }
 }
 
 /// Picks the engine and mode for one request. A pure function of the utterance and the signals.
@@ -77,7 +90,7 @@ public struct RouteSignals: Equatable, Sendable {
 /// | 5 | device action ∧ prefer local ∧ local ready | local, `deviceAction` (cloud, by handoff) |
 /// | 6 | device action | cloud (local if downloaded) |
 /// | 7 | voice ∧ small talk ∧ fast local small talk ∧ local ready ∧ ¬complex | local, `latencyFirst` (cloud) |
-/// | 8 | ¬complex ∧ local ready ∧ cloud first text > 3.5 s ∧ local not expected slower | local, `cloudSlow` (cloud) |
+/// | 8 | ¬complex ∧ local ready ∧ recent cloud first text > 3.5 s ∧ local not expected slower | local, `cloudSlow` (cloud) |
 /// | 9 | complex | cloud |
 /// | 10 | prefer local ∧ local ready | local, `localFirst` (cloud) |
 /// | 11 | otherwise | cloud, `cloudDefault` (local if downloaded) |
@@ -92,6 +105,9 @@ public struct RouteSignals: Equatable, Sendable {
 public struct RouteDecider: Sendable {
     /// Rule 8 sends simple requests on device when the cloud's typical time to first text exceeds this.
     public static let cloudSlowThreshold: TimeInterval = 3.5
+    /// Rule 8 trusts a cloud estimate whose newest sample is at most this old (15 minutes); see
+    /// `RouteSignals.setExpectations(from:now:)`.
+    public static let cloudSlowMaximumAge: TimeInterval = 15 * 60
 
     public let classifier: IntentClassifier
 
