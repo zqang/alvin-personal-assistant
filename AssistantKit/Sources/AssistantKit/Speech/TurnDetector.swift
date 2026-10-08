@@ -31,6 +31,8 @@ public struct TurnDetector: Sendable {
 
     public private(set) var transcript = ""
     private var lastTranscriptChange: TimeInterval?
+    /// When the transcript last changed: the best estimate of when the user stopped speaking.
+    public var lastChange: TimeInterval? { lastTranscriptChange }
     private var lastVoice: TimeInterval?
     private var vad = EnergyVAD()
 
