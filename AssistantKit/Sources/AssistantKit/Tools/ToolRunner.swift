@@ -1,0 +1,233 @@
+import Foundation
+
+/// Runs a model's tool calls against a `ToolRegistry`.
+///
+/// For each round:
+/// - every call is checked first: an unknown, turned-off or blocked tool, or input that fails
+///   `ToolInputValidator`, gets an error record without running anything;
+/// - read-only tools run concurrently;
+/// - side-effect tools run one at a time in the model's order, alongside the read-only ones. Each
+///   first waits on `context.commitGate`; if the gate is cancelled (or the round is), the call is
+///   not run and gets `cancelledMessage`;
+/// - each run is limited to `timeout`. A tool that doesn't finish in time gets an error record; its
+///   task is cancelled, but the runner doesn't wait for it to stop;
+/// - a result is the output's `content` as JSON with sorted keys, cut to `maxResultCharacters`
+///   characters plus `"…(truncated)"` when longer.
+///
+/// Records come back in the calls' order, and `run` never throws.
+public struct ToolRunner: ToolExecutor {
+    public static let unknownToolMessage = "Unknown tool"
+    public static let cancelledMessage = "The request was cancelled before the action ran."
+    public static let truncationMarker = "…(truncated)"
+
+    public let registry: ToolRegistry
+    public let timeout: Duration
+    public let maxResultCharacters: Int
+    public let lenientInput: Bool
+
+    /// - Parameters:
+    ///   - timeout: the longest one tool may run; zero or less means no limit.
+    ///   - lenientInput: coerce slightly mistyped input (see `ToolInputValidator`), for on-device models.
+    public init(registry: ToolRegistry, timeout: Duration = .seconds(10), maxResultCharacters: Int = 2_000, lenientInput: Bool = false) {
+        self.registry = registry
+        self.timeout = timeout
+        self.maxResultCharacters = max(maxResultCharacters, 0)
+        self.lenientInput = lenientInput
+    }
+
+    public var definitions: [ToolDefinition] {
+        registry.definitions
+    }
+
+    public func presentation(for name: String) -> ToolPresentation {
+        registry.presentation(for: name)
+    }
+
+    public func run(_ calls: [PendingToolCall], context: ToolContext) async -> ToolRound {
+        var outputs = [ToolOutput?](repeating: nil, count: calls.count)
+        var reads: [Job] = []
+        var writes: [Job] = []
+        for (index, call) in calls.enumerated() {
+            switch prepare(call, index: index) {
+            case .finished(let output):
+                outputs[index] = output
+            case .run(let job):
+                if job.tool.effect == .sideEffect {
+                    writes.append(job)
+                } else {
+                    reads.append(job)
+                }
+            }
+        }
+
+        if !reads.isEmpty || !writes.isEmpty {
+            await withTaskGroup(of: [(Int, ToolOutput)].self) { group in
+                for job in reads {
+                    group.addTask { [(job.index, await self.execute(job, context: context))] }
+                }
+                if !writes.isEmpty {
+                    let serial = writes
+                    group.addTask {
+                        var finished: [(Int, ToolOutput)] = []
+                        for job in serial {
+                            finished.append((job.index, await self.runSideEffect(job, context: context)))
+                        }
+                        return finished
+                    }
+                }
+                for await finished in group {
+                    for (index, output) in finished {
+                        outputs[index] = output
+                    }
+                }
+            }
+        }
+
+        let records = calls.enumerated().map { index, call in
+            record(call, output: outputs[index] ?? .error(Self.cancelledMessage))
+        }
+        return ToolRound(calls: records)
+    }
+
+    // MARK: - Steps
+
+    private struct Job: Sendable {
+        var index: Int
+        var tool: any AssistantTool
+        var input: [String: JSONValue]
+    }
+
+    private enum Preparation {
+        case finished(ToolOutput)
+        case run(Job)
+    }
+
+    /// Resolves the tool and validates the input; anything that stops the call here is final.
+    private func prepare(_ call: PendingToolCall, index: Int) -> Preparation {
+        switch registry.resolve(call.name) {
+        case .unknown:
+            return .finished(.error(Self.unknownToolMessage))
+        case .unavailable(let message):
+            return .finished(.error(message))
+        case .runnable(let tool):
+            switch ToolInputValidator.validate(call, schema: tool.definition.inputSchema, lenient: lenientInput) {
+            case .success(let input):
+                return .run(Job(index: index, tool: tool, input: input))
+            case .failure(let error):
+                return .finished(ToolOutput(content: ToolInputValidator.errorContent(error), isError: true))
+            }
+        }
+    }
+
+    private func runSideEffect(_ job: Job, context: ToolContext) async -> ToolOutput {
+        guard !Task.isCancelled else { return .error(Self.cancelledMessage) }
+        if let gate = context.commitGate {
+            do {
+                try await gate.wait()
+            } catch {
+                return .error(Self.cancelledMessage)
+            }
+        }
+        // An open gate lets a cancelled task through; the round was abandoned, so don't act.
+        guard !Task.isCancelled else { return .error(Self.cancelledMessage) }
+        return await execute(job, context: context)
+    }
+
+    /// Runs the tool in its own task and returns its output, or a timeout error when `timeout`
+    /// passes first. Cancelling the caller cancels the tool's task; its output (often an error)
+    /// is still awaited, within the timeout, so the record says what actually happened.
+    private func execute(_ job: Job, context: ToolContext) async -> ToolOutput {
+        let outcome = FirstOutput()
+        let tool = job.tool
+        let input = job.input
+        let work = Task {
+            let output: ToolOutput
+            do {
+                output = try await tool.run(input, context: context)
+            } catch {
+                output = Self.failure(error)
+            }
+            outcome.offer(output)
+        }
+        var timer: Task<Void, Never>?
+        if timeout > .zero {
+            let limit = timeout
+            let message = tool.effect == .sideEffect
+                ? "The tool didn't finish in time; the action may or may not have happened."
+                : "The tool didn't finish in time."
+            timer = Task {
+                do {
+                    try await Task.sleep(for: limit)
+                } catch {
+                    return
+                }
+                outcome.offer(.error(message))
+            }
+        }
+        let output = await withTaskCancellationHandler {
+            await outcome.value()
+        } onCancel: {
+            work.cancel()
+        }
+        work.cancel()
+        timer?.cancel()
+        return output
+    }
+
+    private static func failure(_ error: Error) -> ToolOutput {
+        if error is CancellationError {
+            return .error("The request was cancelled.")
+        }
+        if let described = (error as? LocalizedError)?.errorDescription, !described.isEmpty {
+            return .error(described)
+        }
+        return .error(String(describing: error))
+    }
+
+    private func record(_ call: PendingToolCall, output: ToolOutput) -> ToolCallRecord {
+        var record = ToolCallRecord(call: call, output: output)
+        record.result = Self.truncate(record.result, to: maxResultCharacters)
+        return record
+    }
+
+    /// The first `limit` characters of `text` plus the marker, or `text` itself when it fits.
+    static func truncate(_ text: String, to limit: Int) -> String {
+        guard text.count > limit else { return text }
+        return String(text.prefix(limit)) + truncationMarker
+    }
+}
+
+/// Holds the first output offered, and hands it to the one task waiting for it.
+private final class FirstOutput: @unchecked Sendable {
+    private let lock = NSLock()
+    private var output: ToolOutput?
+    private var waiter: CheckedContinuation<ToolOutput, Never>?
+
+    /// Keeps `candidate` if no output arrived before it; later offers are ignored.
+    func offer(_ candidate: ToolOutput) {
+        lock.lock()
+        guard output == nil else {
+            lock.unlock()
+            return
+        }
+        output = candidate
+        let waiting = waiter
+        waiter = nil
+        lock.unlock()
+        waiting?.resume(returning: candidate)
+    }
+
+    /// Waits for the first output. Call it once.
+    func value() async -> ToolOutput {
+        await withCheckedContinuation { (continuation: CheckedContinuation<ToolOutput, Never>) in
+            lock.lock()
+            if let output {
+                lock.unlock()
+                continuation.resume(returning: output)
+            } else {
+                waiter = continuation
+                lock.unlock()
+            }
+        }
+    }
+}

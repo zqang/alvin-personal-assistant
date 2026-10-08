@@ -123,13 +123,34 @@ public struct OpenAICompatibleProvider: ChatProvider {
         var recent = Array(turns.suffix(max(maxHistoryTurns, 1)))
         while recent.first?.role == .assistant { recent.removeFirst() }
 
-        var messages: [JSONValue] = [message(role: "system", content: system)]
+        // These services get no tools, so an assistant turn's tool rounds are shown by their
+        // summaries when the turn has no text of its own.
+        var entries: [(role: ChatRole, content: String)] = []
         for turn in recent {
             var content = turn.text
-            if turn.role == .user, let context = turn.context, !context.isEmpty {
-                content = context + "\n\n" + content
+            switch turn.role {
+            case .user:
+                if let context = turn.context, !context.isEmpty {
+                    content = context + "\n\n" + content
+                }
+            case .assistant:
+                if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    content = turn.toolRounds.compactMap(\.summaryLine).joined(separator: " ")
+                }
+                if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
             }
-            messages.append(message(role: turn.role.rawValue, content: content))
+            if turn.role == .user, let last = entries.last, last.role == .user {
+                // A skipped assistant turn leaves two user turns in a row; some services reject
+                // that, so they become one, the way PromptBuilder folds user messages.
+                entries[entries.count - 1].content = last.content + "\n\n" + content
+            } else {
+                entries.append((role: turn.role, content: content))
+            }
+        }
+
+        var messages: [JSONValue] = [message(role: "system", content: system)]
+        for entry in entries {
+            messages.append(message(role: entry.role.rawValue, content: entry.content))
         }
         let body: [String: JSONValue] = [
             "model": .string(model),
