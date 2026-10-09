@@ -1,4 +1,5 @@
 import AssistantKit
+import EventKit
 import Foundation
 
 /// `create_reminder`: adds a reminder to the Reminders app.
@@ -22,6 +23,11 @@ struct CreateReminderTool: AssistantTool {
     var definition: ToolDefinition { Self.definition }
     var effect: ToolEffect { .sideEffect }
     var presentation: ToolPresentation { ToolPresentation(activity: "Adding a reminder", cue: nil) }
+
+    /// A first-time permission alert, outside the run's timeout.
+    func authorize(_ input: [String: JSONValue], context: ToolContext) async throws {
+        try await EventStoreService.shared.ensureAccess(.reminder)
+    }
 
     func run(_ input: [String: JSONValue], context: ToolContext) async throws -> ToolOutput {
         guard let title = DeviceToolSupport.text(input, "title") else {
@@ -104,6 +110,11 @@ struct ListRemindersTool: AssistantTool {
     var definition: ToolDefinition { Self.definition }
     var effect: ToolEffect { .readOnly }
     var presentation: ToolPresentation { ToolPresentation(activity: "Checking your reminders", cue: .checking) }
+
+    /// A first-time permission alert, outside the run's timeout; it still waits for the commit gate.
+    func authorize(_ input: [String: JSONValue], context: ToolContext) async throws {
+        try await EventStoreService.shared.ensureAccess(.reminder, askAfter: context.commitGate)
+    }
 
     func run(_ input: [String: JSONValue], context: ToolContext) async throws -> ToolOutput {
         let scope = Scope(rawValue: (input["scope"]?.stringValue ?? "").trimmed.lowercased()) ?? .all
@@ -201,6 +212,11 @@ struct CompleteReminderTool: AssistantTool {
     var definition: ToolDefinition { Self.definition }
     var effect: ToolEffect { .sideEffect }
     var presentation: ToolPresentation { ToolPresentation(activity: "Completing a reminder", cue: nil) }
+
+    /// A first-time permission alert, outside the run's timeout.
+    func authorize(_ input: [String: JSONValue], context: ToolContext) async throws {
+        try await EventStoreService.shared.ensureAccess(.reminder)
+    }
 
     func run(_ input: [String: JSONValue], context: ToolContext) async throws -> ToolOutput {
         guard let id = DeviceToolSupport.text(input, "id") else {

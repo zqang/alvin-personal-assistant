@@ -46,6 +46,9 @@ enum ClaudeRequest {
     /// `eager_input_streaming` is sent only to this host; proxies may reject the field.
     static let directHost = "api.anthropic.com"
     static let toolIDPrefix = "toolu_"
+    /// Server tools' names, which a client tool may not take (only `web_search` is ever declared).
+    static let serverToolNames: Set<String> = ["web_search", "web_fetch"]
+    static let maxToolNameLength = 64
 
     // MARK: - Options
 
@@ -125,7 +128,7 @@ enum ClaudeRequest {
         let block: [String: JSONValue] = [
             "type": .string("tool_use"),
             "id": .string(claudeToolID(record.id)),
-            "name": .string(record.name),
+            "name": .string(claudeToolName(record.name)),
             "input": input,
         ]
         return .object(block)
@@ -156,8 +159,25 @@ enum ClaudeRequest {
     /// outside `[A-Za-z0-9_-]` replaced by `_`. Deterministic, so re-rendered history stays cacheable.
     static func claudeToolID(_ id: String) -> String {
         if id.hasPrefix(toolIDPrefix) { return id }
+        return toolIDPrefix + safeCharacters(id)
+    }
+
+    /// The name Claude sees for a stored call, which `ToolRegistry.covering(_:)` also declares.
+    /// The API takes only 1 to 64 characters from `[A-Za-z0-9_-]`, unique among the request's
+    /// tools, but the on-device model may write any name: every other character becomes `_`, the
+    /// name is cut to 64 characters, an empty one becomes `unknown_tool`, and a server tool's name
+    /// gets the prefix `local_`. Valid names pass through. Deterministic, so re-rendered history
+    /// stays cacheable.
+    static func claudeToolName(_ name: String) -> String {
+        let sanitized = String(safeCharacters(name).prefix(maxToolNameLength))
+        if sanitized.isEmpty { return "unknown_tool" }
+        return serverToolNames.contains(sanitized) ? "local_" + sanitized : sanitized
+    }
+
+    /// `text` with every character outside `[A-Za-z0-9_-]` replaced by `_`.
+    private static func safeCharacters(_ text: String) -> String {
         var sanitized = ""
-        for scalar in id.unicodeScalars {
+        for scalar in text.unicodeScalars {
             switch scalar.value {
             case 0x30...0x39, 0x41...0x5A, 0x61...0x7A, 0x2D, 0x5F: // 0-9, A-Z, a-z, "-", "_"
                 sanitized.unicodeScalars.append(scalar)
@@ -165,7 +185,7 @@ enum ClaudeRequest {
                 sanitized += "_"
             }
         }
-        return toolIDPrefix + sanitized
+        return sanitized
     }
 
     static func message(role: String, content: [JSONValue]) -> [String: JSONValue] {

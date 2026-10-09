@@ -1,4 +1,5 @@
 import AssistantKit
+import EventKit
 import Foundation
 
 /// `list_events`: reads the user's calendars between two local times.
@@ -23,6 +24,11 @@ struct ListEventsTool: AssistantTool {
     var definition: ToolDefinition { Self.definition }
     var effect: ToolEffect { .readOnly }
     var presentation: ToolPresentation { ToolPresentation(activity: "Checking your calendar", cue: .checking) }
+
+    /// A first-time permission alert, outside the run's timeout; it still waits for the commit gate.
+    func authorize(_ input: [String: JSONValue], context: ToolContext) async throws {
+        try await EventStoreService.shared.ensureAccess(.event, askAfter: context.commitGate)
+    }
 
     func run(_ input: [String: JSONValue], context: ToolContext) async throws -> ToolOutput {
         let timeZone = context.timeZone
@@ -115,6 +121,11 @@ struct CreateEventTool: AssistantTool {
     var definition: ToolDefinition { Self.definition }
     var effect: ToolEffect { .sideEffect }
     var presentation: ToolPresentation { ToolPresentation(activity: "Adding to your calendar", cue: nil) }
+
+    /// A first-time permission alert, outside the run's timeout.
+    func authorize(_ input: [String: JSONValue], context: ToolContext) async throws {
+        try await EventStoreService.shared.ensureAccess(.event, addOnly: true)
+    }
 
     func run(_ input: [String: JSONValue], context: ToolContext) async throws -> ToolOutput {
         let timeZone = context.timeZone

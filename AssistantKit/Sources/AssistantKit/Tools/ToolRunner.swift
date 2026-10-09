@@ -9,6 +9,10 @@ import Foundation
 /// - side-effect tools run one at a time in the model's order, alongside the read-only ones. Each
 ///   first waits on `context.commitGate`; if the gate is cancelled (or the round is), the call is
 ///   not run and gets `cancelledMessage`;
+/// - before running, a tool's `authorize` gets what it needs from the user, such as a first-time
+///   permission alert. It has no time limit, so a slow answer doesn't cancel the action the user
+///   just allowed; cancelling the round stops the wait at once (`cancelledMessage`), and an error
+///   it throws is the call's result;
 /// - each run is limited to `timeout`. A tool that doesn't finish in time gets an error record; its
 ///   task is cancelled, but the runner doesn't wait for it to stop;
 /// - a side-effect tool that timed out may still be acting, so no later side-effect tool starts
@@ -72,7 +76,7 @@ public struct ToolRunner: ToolExecutor {
         if !reads.isEmpty || !writes.isEmpty {
             await withTaskGroup(of: [(Int, ToolOutput)].self) { group in
                 for job in reads {
-                    group.addTask { [(job.index, await self.execute(job, context: context))] }
+                    group.addTask { [(job.index, await self.runReadOnly(job, context: context))] }
                 }
                 if !writes.isEmpty {
                     let serial = writes
@@ -139,11 +143,55 @@ public struct ToolRunner: ToolExecutor {
         }
         // An open gate lets a cancelled task through; the round was abandoned, so don't act.
         guard !Task.isCancelled else { return .error(Self.cancelledMessage) }
+        // Only a committed turn asks the user, and the answer doesn't count against the timeout.
+        if let refused = await authorize(job, context: context) { return refused }
+        guard !Task.isCancelled else { return .error(Self.cancelledMessage) }
         // Never act while an earlier action that timed out may still be acting.
         let clear = await abandoned.waitUntilEnded(limit: timeout)
         guard !Task.isCancelled else { return .error(Self.cancelledMessage) }
         guard clear else { return .error(Self.earlierActionRunningMessage) }
         return await execute(job, context: context)
+    }
+
+    private func runReadOnly(_ job: Job, context: ToolContext) async -> ToolOutput {
+        if let refused = await authorize(job, context: context) { return refused }
+        return await execute(job, context: context)
+    }
+
+    /// Runs the tool's `authorize` in its own task, with no time limit. Returns nil when the tool
+    /// may run, or else the call's output: the error `authorize` threw, or `cancelledMessage` as
+    /// soon as the caller is cancelled. A cancelled `authorize` isn't waited for, since it may be
+    /// waiting on the user (a permission alert stays up until answered).
+    private func authorize(_ job: Job, context: ToolContext) async -> ToolOutput? {
+        guard !Task.isCancelled else { return .error(Self.cancelledMessage) }
+        let outcome = FirstValue<Authorization>()
+        let tool = job.tool
+        let input = job.input
+        let work = Task {
+            do {
+                try await tool.authorize(input, context: context)
+                outcome.offer(.granted)
+            } catch {
+                outcome.offer(.refused(Self.failure(error)))
+            }
+        }
+        let result = await withTaskCancellationHandler {
+            await outcome.value()
+        } onCancel: {
+            work.cancel()
+            outcome.offer(.refused(.error(Self.cancelledMessage)))
+        }
+        switch result {
+        case .granted:
+            return nil
+        case .refused(let output):
+            return output
+        }
+    }
+
+    private enum Authorization: Sendable {
+        case granted
+        case refused(ToolOutput)
     }
 
     /// Runs the tool in its own task and returns its output, or a timeout error when `timeout`
