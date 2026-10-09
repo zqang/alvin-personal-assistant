@@ -59,10 +59,17 @@ final class LocalModelHost {
     /// The stored self-test result for the loaded (else the selected, downloaded) model and this
     /// build.
     private(set) var selfTest: EngineSelfTest.Result?
-    /// The stored cost curve for that model on this device, if one was measured.
+    /// The stored cost curve for that model on this device (measured with the fast kernels
+    /// while the model runs them), if one was measured.
     private(set) var costCurve: CostCurve?
-    /// The stored fast-kernel gain for that model on this device (c(8) without ÷ with).
+    /// The stored fast-kernel gain for that model on this device: how much cheaper an 8-row
+    /// forward was with them (`1 − c(8) with ÷ c(8) without`).
     private(set) var kernelGain: Double?
+    /// What the fast kernels last reported for the loaded model (their `prepare` in the load's
+    /// warm-up, or `measureFastKernels()`), with the before/after c(8).
+    private(set) var kernelSummary: String?
+    /// Whether the loaded model runs the fast kernels.
+    private(set) var kernelsInstalled = false
     /// Whether that model's checkpoint holds multi-token-prediction weights.
     private(set) var hasMTPWeights = false
     /// The last reply's measurements.
@@ -83,7 +90,10 @@ final class LocalModelHost {
         var speculation: LocalSpeculationMode
         var prefixCache: Bool
         var extensions: [ObjectIdentifier]
+        var fastKernelsRequested: Bool
         var curve: CostCurve?
+        /// Whether the model runs the fast kernels (more drafts per round may pay).
+        var kernelsInstalled: Bool
     }
 
     @ObservationIgnored private var key: Key?
@@ -98,13 +108,22 @@ final class LocalModelHost {
     @ObservationIgnored private var latest: AssistantSettings?
     @ObservationIgnored private var live: LiveOptions?
     @ObservationIgnored private var prewarmAfterLoad = false
+    /// A scheduled prewarm, from waiting for its turn until it ends.
     @ObservationIgnored private var prewarming: Task<Void, Never>?
-    /// Set while a check (self-test, cost probe) has the engine to itself.
+    /// The engine work of a prewarm that has started (it counts in `activeJobs`); the stock path
+    /// waits for it.
+    @ObservationIgnored private var prewarmJob: Task<Void, Never>?
+    /// Set while a check (self-test, cost probe, kernel comparison) has the engine to itself.
     @ObservationIgnored private var maintenance: Task<Void, Never>?
     @ObservationIgnored private var pendingCheck: Task<Void, Never>?
-    /// Replies and prewarms in progress; a check waits for them.
+    /// Replies and prewarms in progress; a check waits for them. Only `beginJob` and
+    /// `beginPrewarmJob` add to it.
     @ObservationIgnored private var activeJobs = 0
+    /// The pending session reset (`resetSession()`); nil once a job or check has seen it end.
     @ObservationIgnored private var invalidating: Task<Void, Never>?
+    /// Whether the fast kernels' verdict for the loaded engine has been read (their `prepare`
+    /// runs in the warm-up, or at the first engine job when the warm-up was cut short).
+    @ObservationIgnored private var kernelReportTaken = false
     /// Whether the target can roll back rejected drafts (fixed per load).
     @ObservationIgnored private var targetRollback = false
     /// Whether the stock path may draft with the draft model (its cache can be trimmed).
@@ -195,6 +214,7 @@ final class LocalModelHost {
     func unload(stopDownload: Bool = false) {
         engine = nil
         draftModel = nil
+        kernelsInstalled = false
         resetSession()
         prewarming?.cancel()
         prewarming = nil
@@ -218,6 +238,8 @@ final class LocalModelHost {
             let previous = invalidating
             invalidating = Task {
                 await previous?.value
+                // Never between the engine jobs of a check, which needs the session unchanged.
+                await waitForChecks()
                 await engine.invalidateSession()
             }
         }
@@ -329,6 +351,7 @@ final class LocalModelHost {
             }.value
             try checkStillWanted()
             engine = loaded
+            kernelReportTaken = false
             live = liveOptions(settings)
             targetRollback = loaded.target.supportsRollback
             // The stock path drafts only when the cache can drop rejected drafts.
@@ -340,13 +363,16 @@ final class LocalModelHost {
                 stockDraftAllowed = false
             }
 
-            // Compile the GPU kernels now instead of on the first reply.
+            // Compile the GPU kernels now instead of on the first reply. The warm-up also prepares
+            // the extensions: the fast kernels, when requested, test and time themselves and stay
+            // only when they help.
             await QwenListener.finishPasses()
             do {
                 try await loaded.warmUp()
+                takeKernelReport(loaded)
             } catch EngineError.leftForeground {
                 // Leaving the screen: checkStillWanted unloads below. Otherwise the first reply
-                // compiles them.
+                // compiles them and prepares the extensions.
             }
             try checkStillWanted()
             lastLoadTime = Self.seconds(started.duration(to: .now))
@@ -380,6 +406,7 @@ final class LocalModelHost {
     private func fail(_ message: String) {
         engine = nil
         draftModel = nil
+        kernelsInstalled = false
         live = nil
         statusText = nil
         status = .failed(message)
@@ -414,13 +441,15 @@ final class LocalModelHost {
             speculation: settings.localSpeculation,
             prefixCache: settings.localPrefixCache,
             extensions: EngineSetup.extensions(for: settings).map { ObjectIdentifier($0) },
-            curve: costCurve
+            fastKernelsRequested: settings.localFastKernels,
+            curve: costCurve,
+            kernelsInstalled: kernelsInstalled
         )
     }
 
     /// Brings the running engine's speculation mode, disk prefix and extensions in line with
     /// `settings`. The generator factory (and with it the draft statistics) is replaced only when
-    /// the mode or the cost curve changed.
+    /// the mode, the cost curve or the kernels in the model changed.
     private func applyLive(_ settings: AssistantSettings) async {
         guard let engine else { return }
         let wanted = liveOptions(settings)
@@ -430,15 +459,20 @@ final class LocalModelHost {
         }
         live = wanted
         let factory = current.speculation != wanted.speculation || current.curve != wanted.curve
+            || current.kernelsInstalled != wanted.kernelsInstalled
             ? EngineSetup.generatorFactory(settings: settings, host: self) : nil
         let directory = EngineSetup.prefixCacheDirectory(settings: settings)
         let extensions = ExtensionList(EngineSetup.extensions(for: settings))
+        let kernels = EngineSetup.fastKernels
+        let requestKernels = settings.localFastKernels
         await engine.updateConfiguration { configuration in
             if let factory {
                 configuration.generatorFactory = factory
             }
             configuration.prefixCacheDirectory = directory
             configuration.extensions = extensions.items
+            // Assigning `extensions` dropped the fast-kernel request, which lives among them.
+            kernels?.request(requestKernels, in: &configuration)
         }
     }
 
@@ -490,9 +524,16 @@ final class LocalModelHost {
         storedResultsModelID = modelID
         let directory = snapshot ?? Self.downloadedSnapshot(modelID)
         selfTest = directory.flatMap { verification.selfTest(for: .init(modelID: modelID, snapshot: $0.lastPathComponent)) }
-        costCurve = verification.costCurve(for: .init(modelID: modelID))
+        costCurve = verification.costCurve(for: curveKey(modelID))
         kernelGain = verification.kernelGain(for: .init(modelID: modelID))
+        kernelSummary = nil
         hasMTPWeights = directory.map { EngineSetup.hasMTPWeights(in: $0) } ?? false
+    }
+
+    /// Where `modelID`'s cost curve is stored: the curve with the fast kernels in the model is
+    /// another one.
+    private func curveKey(_ modelID: String) -> EngineVerificationStore.DeviceKey {
+        .init(modelID: modelID, fastKernels: kernelsInstalled)
     }
 
     /// Whether a load under `settings` would run a check: the self-test in automatic mode
@@ -550,18 +591,82 @@ final class LocalModelHost {
         }
     }
 
-    /// Stores how much faster the fast kernels made an 8-row forward on this device (c(8)
-    /// without ÷ c(8) with), as measured by whoever compared them. Settings offers the fast-kernel
-    /// switch only once it is at least `EngineSetup.kernelGainThreshold`.
-    func recordKernelGain(_ gain: Double) {
-        guard let engine else { return }
-        verification.setKernelGain(gain, for: .init(modelID: engine.loaded.id))
-        kernelGain = verification.kernelGain(for: .init(modelID: engine.loaded.id))
+    // MARK: - Fast kernels
+
+    /// Whether this build has the fast kernels (launch setup put them in
+    /// `EngineSetup.extraExtensions`).
+    var fastKernelsAvailable: Bool {
+        EngineSetup.fastKernels != nil
     }
 
-    /// Whether the stored measurement says the fast kernels help on this device.
+    /// Whether the stored comparison says the fast kernels help on this device. Settings offers
+    /// the fast-kernel switch only then (and to switch it off).
     var fastKernelsHelp: Bool {
-        (kernelGain ?? 0) >= EngineSetup.kernelGainThreshold
+        (kernelGain ?? -1) >= EngineSetup.kernelGainThreshold
+    }
+
+    /// Compares the fast kernels with the stock layers on the loaded model now (Settings, the
+    /// benchmark): the kernel self-test, then the cost curve without and with them. The model
+    /// keeps the layers it has. Stores the gain and returns the comparison's summary line.
+    @discardableResult
+    func measureFastKernels() async throws -> String {
+        guard let kernels = EngineSetup.fastKernels else {
+            throw AssistantError.missingConfiguration("This build has no fast kernels.")
+        }
+        guard let engine, status == .ready else {
+            throw AssistantError.missingConfiguration("Load the on-device model first.")
+        }
+        return try await exclusively {
+            statusText = "Testing the fast kernels…"
+            defer { statusText = nil }
+            let before = Self.interruptions.withLock { $0 }
+            await QwenListener.finishPasses()
+            let verdict = try await kernels.measure(engine)
+            // A run the app interrupted timed the interruption: measure again later.
+            guard Self.interruptions.withLock({ $0 }) == before, self.engine === engine else { throw Self.leftForeground }
+            take(verdict, from: engine, prepared: false)
+            return verdict.summary
+        }
+    }
+
+    /// Reads what the fast kernels' `prepare` found for `engine`, once per load: in the warm-up,
+    /// else after the first engine reply (whose job prepared them). Their report describes the
+    /// latest `prepare` of any engine, so it is read only when this engine has the kernels among
+    /// its extensions (and so prepared them).
+    private func takeKernelReport(_ engine: InferenceEngine) {
+        guard !kernelReportTaken, self.engine === engine else { return }
+        kernelReportTaken = true
+        guard let kernels = EngineSetup.fastKernels, live?.extensions.contains(ObjectIdentifier(kernels)) == true,
+              let verdict = kernels.report, verdict.modelID == engine.loaded.id
+        else { return }
+        take(verdict, from: engine, prepared: true)
+    }
+
+    /// Stores `verdict`'s gain and shows its summary. A `prepare`'s verdict also says whether the
+    /// model runs the kernels; the cost curve then becomes the one measured that way.
+    private func take(_ verdict: any FastKernelsVerdict, from engine: InferenceEngine, prepared: Bool) {
+        guard self.engine === engine else { return }
+        kernelSummary = verdict.summary
+        if let gain = verdict.gain {
+            let key = EngineVerificationStore.DeviceKey(modelID: engine.loaded.id)
+            verification.setKernelGain(gain, for: key)
+            kernelGain = verification.kernelGain(for: key)
+        }
+        if prepared, verdict.isEnabled != kernelsInstalled {
+            kernelsInstalled = verdict.isEnabled
+            costCurve = verification.costCurve(for: curveKey(engine.loaded.id))
+        }
+    }
+
+    /// "On; an 8-token check takes 31% less time with them (25% needed)", or that they were
+    /// never compared on this iPhone.
+    var fastKernelsSummary: String {
+        let state = kernelsInstalled ? "On" : "Off"
+        guard let kernelGain else { return "\(state); not compared on this iPhone yet" }
+        let percent = Int((abs(kernelGain) * 100).rounded())
+        let needed = Int((EngineSetup.kernelGainThreshold * 100).rounded())
+        let effect = kernelGain >= 0 ? "\(percent)% less time" : "\(percent)% more time"
+        return "\(state); an 8-token check takes \(effect) with them (\(needed)% needed)"
     }
 
     private func performSelfTest(_ engine: InferenceEngine) async -> EngineSelfTest.Result? {
@@ -586,7 +691,7 @@ final class LocalModelHost {
         await QwenListener.finishPasses()
         let curve = try await CostProbe.measure(engine: engine)
         guard Self.interruptions.withLock({ $0 }) == before, self.engine === engine else { return nil }
-        verification.setCostCurve(curve, for: .init(modelID: engine.loaded.id))
+        verification.setCostCurve(curve, for: curveKey(engine.loaded.id))
         costCurve = curve
         // Draft with the measured curve from the next reply on.
         if let latest {
@@ -595,12 +700,14 @@ final class LocalModelHost {
         return curve
     }
 
-    /// Runs `body` with the engine to itself: it waits for any other check, then for replies and
-    /// prewarms in progress, and keeps new ones waiting until it returns. A check works in
-    /// several engine jobs and needs the session unchanged between them.
+    /// Runs `body` with the engine to itself: it waits for any other check and a pending session
+    /// reset, then for replies and prewarms in progress, and keeps new ones (and new resets)
+    /// waiting until it returns. A check works in several engine jobs and needs the session
+    /// unchanged between them.
     private func exclusively<T>(_ body: () async throws -> T) async rethrows -> T {
-        while let other = maintenance {
-            await other.value
+        // Claimed right after the last wait, with no suspension in between.
+        while let next = blocker {
+            await wait(for: next)
         }
         let (signal, done) = AsyncStream<Void>.makeStream()
         maintenance = Task {
@@ -625,6 +732,48 @@ final class LocalModelHost {
         }
     }
 
+    /// What a reply, prewarm or check waits for before it starts: a running check, else a
+    /// pending session reset.
+    private var blocker: Task<Void, Never>? {
+        maintenance ?? invalidating
+    }
+
+    /// Waits for `blocker`, and forgets it if it was the session reset.
+    private func wait(for blocker: Task<Void, Never>) async {
+        await blocker.value
+        if invalidating == blocker {
+            invalidating = nil
+        }
+    }
+
+    /// Waits until no check is running and no session reset is pending, then counts the caller
+    /// in `activeJobs` with no suspension in between, so a check can't start in that gap. The
+    /// caller takes it out of `activeJobs` when it ends.
+    private func beginJob() async {
+        while let next = blocker {
+            await wait(for: next)
+        }
+        activeJobs += 1
+    }
+
+    /// `beginJob` for a prewarm of `engine`, which also waits until no reply is in progress: a
+    /// stock reply waits for a prewarm that has started, so a started prewarm must never wait
+    /// for a reply. False, without counting anything, when the prewarm is no longer wanted.
+    private func beginPrewarmJob(_ engine: InferenceEngine) async -> Bool {
+        while true {
+            if let next = blocker {
+                await wait(for: next)
+            } else if self.engine !== engine || Task.isCancelled {
+                return false
+            } else if activeJobs > 0 {
+                try? await Task.sleep(for: .milliseconds(50))
+            } else {
+                activeJobs += 1
+                return true
+            }
+        }
+    }
+
     // MARK: - Prewarm
 
     private func schedulePrewarm(_ settings: AssistantSettings) {
@@ -634,18 +783,22 @@ final class LocalModelHost {
         let system = PromptBuilder.localSystemPrompt(base: provided.system, handoffAvailable: handoff)
         let tools = provided.tools
         prewarming = Task {
-            await waitForChecks()
-            await invalidating?.value
-            if self.engine === engine, !Task.isCancelled {
-                activeJobs += 1
-                await QwenListener.finishPasses()
-                do {
-                    try await engine.prewarm(system: system, tools: tools)
-                    if self.engine === engine {
-                        isWarm = true
+            if await beginPrewarmJob(engine) {
+                let job = Task {
+                    await QwenListener.finishPasses()
+                    do {
+                        try await engine.prewarm(system: system, tools: tools)
+                        if self.engine === engine {
+                            isWarm = true
+                        }
+                    } catch {
+                        // Left the foreground, or the template refused: the next reply prefills.
                     }
-                } catch {
-                    // Left the foreground, or the template refused: the next reply prefills.
+                }
+                prewarmJob = job
+                await job.value
+                if prewarmJob == job {
+                    prewarmJob = nil
                 }
                 activeJobs -= 1
                 refreshSessionDescription(engine)
@@ -687,15 +840,13 @@ final class LocalModelHost {
         await settle()
         if case .failed(let message) = status { throw AssistantError.missingConfiguration(message) }
         try Task.checkCancellation()
-        await waitForChecks()
-        await invalidating?.value
+        await beginJob()
+        defer { activeJobs -= 1 }
         try Task.checkCancellation()
         guard let engine, status == .ready else {
             throw AssistantError.missingConfiguration("The on-device model isn't loaded. Try again.")
         }
         if showLoading { emit(.reply(.activity(nil))) }
-        activeJobs += 1
-        defer { activeJobs -= 1 }
         latest = settings
         await applyLive(settings)
         updateSpeculation()
@@ -787,6 +938,7 @@ final class LocalModelHost {
         lastStats = stats
         isWarm = true
         refreshSessionDescription(engine)
+        takeKernelReport(engine)
         return (text, stats)
     }
 
@@ -800,9 +952,10 @@ final class LocalModelHost {
         guard let plan = LocalSessionPlan.make(cachedSystem: sessionSystem, cachedTurns: sessionTurns, system: system, turns: turns) else {
             throw AssistantError.invalidResponse("There's no question to answer.")
         }
-        // The session runs outside the engine's queue: let any engine job (a prewarm) finish
-        // first, so the two never use the GPU at once.
-        await prewarming?.value
+        // The session runs outside the engine's queue: let any engine job (a prewarm that has
+        // started) finish first, so the two never use the GPU at once. A prewarm that hasn't
+        // started waits for this reply.
+        await prewarmJob?.value
         await engine.waitUntilIdle()
         try Task.checkCancellation()
         let session: ChatSession
@@ -919,8 +1072,10 @@ final class LocalModelHost {
         lines.append("Self-test: \(selfTestSummary)")
         lines.append("Cost curve: \(costCurveSummary)")
         lines.append("Multi-token prediction weights: \(hasMTPWeights ? "yes" : "none")")
-        if let kernelGain {
-            lines.append("Fast kernels: \(String(format: "%.2f", kernelGain))× at 8 rows")
+        if fastKernelsAvailable || kernelGain != nil {
+            // The kernels' own line: their verdict with c(8) before → after.
+            lines.append(kernelSummary ?? "Fast kernels: not prepared for this model")
+            lines.append("Fast kernels on this iPhone: \(fastKernelsSummary)")
         }
         if info.bytesPerCheckpoint > 0 {
             lines.append("Checkpoint: \(info.bytesPerCheckpoint / (1 << 20)) MiB")

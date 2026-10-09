@@ -28,10 +28,12 @@ struct OnDeviceEngineSection: View {
             if host.hasMTPWeights {
                 Toggle("Multi-token prediction", isOn: $store.settings.localMTP)
             }
-            // Offered once a measurement on this iPhone showed the kernels help; always
-            // switchable off.
-            Toggle("Fast GPU kernels", isOn: $store.settings.localFastKernels)
-                .disabled(!host.fastKernelsHelp && !store.settings.localFastKernels)
+            if host.fastKernelsAvailable || store.settings.localFastKernels {
+                // Offered once “Test fast kernels” showed they help on this iPhone; always
+                // switchable off.
+                Toggle("Fast GPU kernels", isOn: $store.settings.localFastKernels)
+                    .disabled(!host.fastKernelsHelp && !store.settings.localFastKernels)
+            }
 
             if let statusText = host.statusText {
                 Text(statusText)
@@ -40,6 +42,9 @@ struct OnDeviceEngineSection: View {
             }
             LabeledContent("Self-test", value: host.selfTestSummary)
             LabeledContent("Speed", value: host.costCurveSummary)
+            if host.fastKernelsAvailable {
+                LabeledContent("Fast kernels", value: host.fastKernelsSummary)
+            }
             LabeledContent("Last reply", value: host.lastReplySummary)
             DisclosureGroup("Details") {
                 Text(host.engineSummary)
@@ -54,13 +59,19 @@ struct OnDeviceEngineSection: View {
                 Task { _ = try? await host.measureSpeed() }
             }
             .disabled(!canCheck)
+            if host.fastKernelsAvailable {
+                Button("Test fast kernels") {
+                    Task { _ = try? await host.measureFastKernels() }
+                }
+                .disabled(!canCheck)
+            }
             NavigationLink("Benchmark") {
                 LocalBenchmarkView(store: store)
             }
         } header: {
             Text("On-device engine")
         } footer: {
-            Text("The Alvin engine keeps the conversation in memory between replies, keeps the processed system prompt on disk, checks several drafted words at once, and lets the model use your reminders, calendar and timers. “Automatic” uses it once its self-test has passed on this iPhone for this model and app version, and MLX's stock session until then. Speed is measured once per model on this iPhone. Checks need the model loaded.")
+            Text("The Alvin engine keeps the conversation in memory between replies, keeps the processed system prompt on disk, checks several drafted words at once, and lets the model use your reminders, calendar and timers. “Automatic” uses it once its self-test has passed on this iPhone for this model and app version, and MLX's stock session until then. Speed is measured once per model on this iPhone. Fast GPU kernels can be switched on once “Test fast kernels” shows they cut the time to check 8 drafted words by at least \(Int(EngineSetup.kernelGainThreshold * 100))% here. Checks need the model loaded.")
         }
     }
 

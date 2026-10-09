@@ -9,9 +9,9 @@ import LocalEngine
 ///   and engine format version, so a new build, a new model revision or a new cache layout tests
 ///   again before `.automatic` trusts the engine;
 /// - **cost curves** measured by `CostProbe`, per model, device (`utsname` machine), OS major
-///   version and engine format version;
-/// - **fast-kernel gains**: how much faster an 8-row forward ran with the fast kernels than
-///   without (c(8) without ÷ c(8) with), per the same device key.
+///   version and engine format version, and whether the model ran the fast kernels;
+/// - **fast-kernel gains**: how much cheaper an 8-row forward was with the fast kernels than
+///   without (`1 − c(8) with ÷ c(8) without`), per model, device, OS and format version.
 ///
 /// Each kind keeps its `capacity` most recently saved entries.
 struct EngineVerificationStore {
@@ -31,12 +31,17 @@ struct EngineVerificationStore {
     /// Identifies a measurement that depends on the model and the hardware, not on the build.
     struct DeviceKey: Equatable, Sendable {
         var modelID: String
+        /// Whether the model ran the fast kernels (a cost curve measured with them is another
+        /// curve).
+        var fastKernels = false
         var machine: String = EngineVerificationStore.machine
         var osMajor: Int = EngineVerificationStore.osMajor
         var formatVersion: Int = EngineInfo.formatVersion
 
         var rawValue: String {
-            [modelID, machine, String(osMajor), String(formatVersion)].joined(separator: "|")
+            var parts = [modelID, machine, String(osMajor), String(formatVersion)]
+            if fastKernels { parts.append("fast-kernels") }
+            return parts.joined(separator: "|")
         }
     }
 
@@ -79,8 +84,9 @@ struct EngineVerificationStore {
         value(Double.self, in: Self.kernelGainsKey, key: key.rawValue)
     }
 
+    /// Stores `gain` (`1 − c(8) with ÷ c(8) without`; below 0 when the kernels were slower).
     func setKernelGain(_ gain: Double, for key: DeviceKey) {
-        guard gain.isFinite, gain > 0 else { return }
+        guard gain.isFinite else { return }
         set(gain, in: Self.kernelGainsKey, key: key.rawValue)
     }
 

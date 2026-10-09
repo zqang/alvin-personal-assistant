@@ -51,8 +51,14 @@ struct LocalBenchmarkView: View {
                     runner.runSelfTest(settings: store.settings)
                 }
                 .disabled(runner.isRunning)
+                if LocalModelHost.shared.fastKernelsAvailable {
+                    Button("Test fast kernels") {
+                        runner.measureFastKernels(settings: store.settings)
+                    }
+                    .disabled(runner.isRunning)
+                }
             } footer: {
-                Text("The cost curve is how long checking several tokens at once takes on this iPhone; speculative decoding uses it. The self-test checks that the Alvin engine gives the same answers as a fresh run.")
+                Text("The cost curve is how long checking several tokens at once takes on this iPhone; speculative decoding uses it. The self-test checks that the Alvin engine gives the same answers as a fresh run. The fast-kernel test compares the cost curve with and without the fast GPU kernels.")
             }
 
             if !runner.report.isEmpty {
@@ -114,6 +120,28 @@ final class LocalBenchmarkRunner {
                 return "The self-test was interrupted. Keep the app open and try again."
             }
             return Self.selfTestReport(result, model: Self.modelName(settings))
+        }
+    }
+
+    /// Compares the cost curve with and without the fast kernels and stores the gain.
+    func measureFastKernels(settings: AssistantSettings) {
+        start { [self] in
+            guard await ensureLoaded(settings) else { return "" }
+            progress = "Testing the fast kernels…"
+            defer { progress = nil }
+            do {
+                let summary = try await LocalModelHost.shared.measureFastKernels()
+                return [
+                    "On-device fast kernels",
+                    "Model: \(Self.modelName(settings))",
+                    "Device: \(Self.deviceModel())",
+                    "",
+                    summary,
+                    LocalModelHost.shared.fastKernelsSummary,
+                ].joined(separator: "\n")
+            } catch {
+                return "The fast-kernel test stopped: \(error.localizedDescription)"
+            }
         }
     }
 
