@@ -78,7 +78,7 @@ What became of Husky's public claims:
 | Conversation state stays resident | **Built.** Token-exact session reuse with rewind checkpoints (WP10, WP20). The stock path also no longer re-sends the system prompt every turn (WP40). |
 | ~35 ms to the first word on a continued chat | **The techniques are built:** delta-only prefill with logits for the last row only, a resident engine queue, the system prefix kept on disk, prewarm when the mic or composer opens, and early reply start. On the CI GPU a continued Woof 4B turn reached its first token in 349–577 ms (789 ms for the first turn); phone numbers are D1. |
 | Next read queued before this one ends | **Built.** Pipelined decode loop. |
-| Block verification ("eight tokens at once") | **Built**, lossless, with exact hybrid rollback (capture/replay). Up to 4 drafts per round on stock kernels; 8 only if the phone's cost curve allows it (D3). |
+| Block verification ("eight tokens at once") | **Built**, lossless, with exact hybrid rollback (capture/replay). Up to 4 drafts per round on stock kernels; 8 only with the fast kernels on and a cost curve measured with them that allows it (D3). |
 | Cheap wide verifies (small-M quantized matmul) | **Built, gated, off.** Correct, but 11–23 % slower than stock at 8 rows on the CI GPU. Enabled only after "Test fast kernels" measures a ≥ 25 % gain on the phone. |
 | Big gains when the output repeats the prompt | **Built.** Prompt lookup, a cross-session suffix corpus and tool-call skeletons. |
 | "Flash" trained drafter | **Partly.** A Qwen3-0.6B draft model for Qwen3 4B. MTP skipped (no weights). DFlash for Woof is deferred until the lab measures it ([§12](#12-skipped-and-deferred)). |
@@ -230,8 +230,8 @@ What became of Husky's public claims:
   plain decoding by 5 %. Prompt-lookup matches shorter than 3 tokens never speculate (the lab measured 43 %
   first-draft acceptance for length 2, about 90 % for 3 and more). After 3 rounds without an accepted draft a
   source backs off for 16 plain tokens, doubling up to 256. A `serious` thermal state triples the margin;
-  `critical` or Low Power Mode turns speculation off. At most 4 drafts per round, or 8 when the device's cost
-  curve gives c(9)/c(1) ≤ 2. The decision never uses wall time.
+  `critical` or Low Power Mode turns speculation off. At most 4 drafts per round; 8 only while the fast
+  kernels are on and the curve measured with them gives c(9)/c(1) ≤ 2. The decision never uses wall time.
 - **Cost curve.** The stock default is `{1: 1.0, 2: 1.05, 3: 1.35, 4: 1.63, 5: 1.95, 6: 2.3, 8: 3.07,
   9: 3.4}`. `CostProbe` measures the phone's own curve (S = 1, 2, 3, 4, 6, 8 on a scratch rewind of the live
   session, about a second) once per model, device, OS major version and engine format version.
@@ -261,9 +261,13 @@ What became of Husky's public claims:
   Claude ([§5](#5-routing)). Offline, the model gets a tool result saying the cloud is unreachable. After
   visible text it gets "Handoff unavailable now; finish your answer."
 - **Plausibility guard.** In the lab, asked how long a timer had left, Woof started a one-second timer. A
-  `set_timer` call now runs only when the user stated an amount the guard can read, and never when the
-  words ask about a running timer or the duration is implausibly short without being said. A refused call is
-  handed off when it still can be, else answered with an error that tells the model to ask the user.
+  `set_timer` call is now refused only when the user stated no amount the guard can read (a digit in any
+  script, an English number word, "a"/"an" before a unit of time, or a Chinese numeral before a unit of
+  time) and either the words ask about a running timer ("how long is left", "还剩多久") or `seconds` is under
+  5. A stated amount overrides the running-timer check ("how long is left on my 10 minute timer" runs), and
+  every other call runs, so "pon un temporizador de diez minutos" with `seconds` 600 sets the timer though
+  the guard cannot read Spanish. A refused call is handed off when it still can be, else answered with an
+  error that tells the model to ask the user.
 
 ### 4.9 Self-test, fallback, telemetry
 
@@ -416,7 +420,11 @@ offset, such as `2026-10-07T17:00`.
 | `handoff_to_cloud` | intercepted | **reason** | on device only, with automatic routing and a key |
 
 - Tools are sorted by name and keep their definitions when turned off (a disabled tool answers "The user
-  turned this off in Settings."), so the cached prompt prefix never changes with a toggle.
+  turned this off in Settings."), so the per-category switches (Reminders, Calendar, Timers) never change
+  the tool list or the cached prompt prefix. Claude keeps every definition even with the master switch
+  of Settings › Tools ("Reminders, calendar and timers", `deviceToolsEnabled`) off. The on-device prompt does
+  not: it then drops its device tools and keeps only `handoff_to_cloud` (or nothing), so the engine's prefix
+  key changes and its next reply starts a new session (`prefixChanged`, [§4.4](#44-session-reuse)).
 - Read-only calls run concurrently; side-effect calls run one at a time in the model's order, each first
   waiting on the request's `CommitGate`, so a reply started early acts only once the user's turn is final.
   Each call has a 10 s timeout and a 2,000-character result.
@@ -529,14 +537,16 @@ artifacts cannot be downloaded from the sandbox the agents work in:
 | Workflow | Step | Block | Contents |
 |---|---|---|---|
 | Local engine | Build for testing | `=== BEGIN PACKAGE RESOLVED ===` | the resolved package pins (`LocalEngine/Package.resolved` is copied from it) |
-| Local engine | Prefetch models | `=== BEGIN MODEL SNAPSHOTS ===` | repo, snapshot SHA and size of each test model (the pins in `ci-models.txt`) |
+| Local engine | Prefetch models (retried), only when the model cache missed | `=== BEGIN MODEL SNAPSHOTS ===` | repo, snapshot SHA and size of each test model (the pins in `ci-models.txt`). The cache key is a hash of `ci-models.txt` plus "core" or "woof", so the step runs, and the block appears, only on the first core or Woof run after that file changes, or after the cache was evicted; most runs restore the cache and print no snapshot block |
 | Local engine | Engine report | `=== BEGIN ENGINE REPORT ===` | the Markdown report the tests write: GPU device, parity, time to first token and reuse, throughput, speculation and cost curves, self-test, tool calls, kernel timings |
 | Local engine | Failure summary (on failure) | `=== SUMMARY …`, `=== FAILED TESTS …`, `=== CRASH REPORTS ===` | the xcresult summary, failed test cases with messages, recent crash reports |
 | Model facts | Print facts | `=== BEGIN MODEL FACTS ===`, `=== BEGIN MODEL FACTS SUMMARY ===` | one JSON object per repo; the Markdown tables of [Model facts](model-facts.md) |
 | Drafter lab | Print lab | `=== BEGIN DRAFTER LAB ===`, `=== BEGIN DRAFTER LAB SUMMARY ===` | the lab JSON; the Markdown tables of [Drafter lab](drafter-lab.md) |
 | Drafter lab | Print DFlash | `=== BEGIN DFLASH ===`, `=== BEGIN DFLASH SUMMARY ===` | DFlash rounds, tokens per round and acceptance |
 
-Each block ends at the next `=== END` line.
+Each `=== BEGIN` block ends at the next `=== END` line. The failure-summary sections (`=== SUMMARY`,
+`=== FAILED TESTS`, `=== CRASH REPORTS`, then `=== CRASH <file>` per report) have no END marker: each runs
+until the next `===` header or the end of the step.
 
 - **In a browser:** open the run in the Actions tab, open the job, expand the step and search for
   `=== BEGIN`. A failed Local engine run also uploads `local-engine-xcresult` (kept 7 days) for Xcode.
@@ -581,7 +591,7 @@ What only a run on an iPhone can settle. Run the benchmark from a **Release** bu
 |---|---|---|---|
 | D1 | Time to first token and tok/s of Woof 4B (and the smaller models) on target iPhones, engine versus stock: continued chat, barge-in, cold start with and without the disk prefix, long chat | Benchmark scenarios with "Compare engines" | Whether `.automatic` stays the engine default; which model is the default |
 | D2 | Self-test pass rate on iPhone GPUs (A17, A18; on iOS 26.2+ the A19 runs MLX's neural-accelerator matmul and attention kernels) | Automatic at load; On-device engine › Run self-test | Engine availability per device |
-| D3 | The iPhone's cost curve c(S) | On-device engine › Measure speed (stored) | 4 or 8 drafts per round; whether the fast kernels are worth enabling (they need a ≥ 25 % lower c(8): Test fast kernels) |
+| D3 | The iPhone's cost curve c(S) | On-device engine › Measure speed (stored) | 4 or 8 drafts per round (8 needs the fast kernels on as well); whether the fast kernels are worth enabling (they need a ≥ 25 % lower c(8): Test fast kernels) |
 | D4 | Memory headroom: Woof plus Qwen3-ASR plus 3 checkpoints (about 150 MB) plus the prefix cache; jetsam limits; the increased-memory entitlement | Benchmark peak memory; Instruments | The checkpoint budget; whether to request the entitlement (a signing decision) |
 | D5 | Thermals over a 10-minute voice session; how often the speculation gate backs off | Benchmark long chat plus the thermal state | Policy margins |
 | D6 | Answer quality with as-generated history (empty think blocks kept) | Side-by-side benchmark transcripts | Whether to add an "exact re-render" policy |
