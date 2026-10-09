@@ -92,6 +92,40 @@ final class SelfTestTests: XCTestCase {
         }
     }
 
+    /// The self-test leaves nothing behind: no system prefix saved to disk (the disk prefix is
+    /// on), and the configured generator factory, whose corpus is persisted and whose draft
+    /// statistics carry over, is never used. A normal reply afterwards does both, so the checks
+    /// can see them.
+    func testLeavesNoTracesBehind() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("self-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        for tiny in EngineTestHarness.Tiny.allCases {
+            let directory = root.appendingPathComponent(tiny.rawValue)
+            let factory = CountingGeneratorFactory()
+            var configuration = EngineTestHarness.testConfiguration()
+            configuration.prefixCacheDirectory = directory
+            configuration.generatorFactory = factory
+            let engine = try EngineTestHarness.makeEngine(tiny: tiny, seed: 730, configuration: configuration)
+
+            let result = await EngineSelfTest.run(engine: engine)
+            await engine.waitUntilIdle()
+            XCTAssertTrue(result.passed, "\(tiny):\n\(result.detail)")
+            XCTAssertEqual(try prefixFiles(in: directory), [], "\(tiny): the self-test saved no system prefix")
+            XCTAssertEqual(factory.made, 0, "\(tiny): the self-test didn't use the configured generator factory")
+
+            _ = try await EngineTestHarness.collect(engine.reply(
+                EngineRequest(system: "You are Alvin.", turns: [ChatTurn(role: .user, text: "Hello")])))
+            await engine.waitUntilIdle()
+            XCTAssertEqual(try prefixFiles(in: directory).count, 1, "\(tiny): a reply saves its system prefix")
+            XCTAssertEqual(factory.made, 1, "\(tiny): a reply uses the factory")
+        }
+    }
+
+    private func prefixFiles(in directory: URL) throws -> [String] {
+        guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
+        return try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.hasSuffix(".safetensors") }
+    }
+
     func testRefusedGPUFails() async throws {
         var configuration = EngineTestHarness.testConfiguration()
         configuration.hooks = EngineHooks(beginGPU: { false }, endGPU: {}, isAllowed: { true })
@@ -111,9 +145,46 @@ final class SelfTestTests: XCTestCase {
 
     /// The sequence comparison of check 2 follows the near-tie rule.
     func testSequenceComparison() {
+        let tie = EngineSelfTest.nearTieMargin
+        XCTAssertEqual(tie, 0.5, "the 4-bit near-tie margin the engine tests use (plan §10)")
         XCTAssertTrue(EngineSelfTest.compareSequences(plain: [1, 2, 3], margins: [1, 1, 1], speculative: [1, 2, 3]).0)
-        XCTAssertTrue(EngineSelfTest.compareSequences(plain: [1, 2, 3], margins: [1, 0.1, 1], speculative: [1, 5, 3]).0)
-        XCTAssertFalse(EngineSelfTest.compareSequences(plain: [1, 2, 3], margins: [1, 0.5, 1], speculative: [1, 5, 3]).0)
+        XCTAssertTrue(EngineSelfTest.compareSequences(plain: [1, 2, 3], margins: [1, tie * 0.8, 1], speculative: [1, 5, 3]).0)
+        XCTAssertFalse(EngineSelfTest.compareSequences(plain: [1, 2, 3], margins: [1, tie, 1], speculative: [1, 5, 3]).0)
+        XCTAssertFalse(EngineSelfTest.compareSequences(plain: [1, 2, 3], margins: [1, tie * 1.2, 1], speculative: [1, 5, 3]).0)
         XCTAssertFalse(EngineSelfTest.compareSequences(plain: [1, 2, 3], margins: [1, 1, 1, 1], speculative: [1, 2]).0)
+    }
+
+    /// The logits comparison of checks 1 and 3: a different argmax agrees only when the candidate
+    /// picked one of the reference's near-tied tokens, not merely when the reference is close.
+    func testLogitsComparison() {
+        let reference = MLXArray([5.0, 4.8, 0.0, -1.0] as [Float])
+        XCTAssertTrue(EngineSelfTest.compare(MLXArray([5.0, 4.8, 0.1, -1.0] as [Float]), reference).agrees, "same argmax")
+        let flipped = EngineSelfTest.compare(MLXArray([4.8, 5.0, 0.0, -1.0] as [Float]), reference)
+        XCTAssertTrue(flipped.agrees, "a near-tie flip: \(flipped)")
+        XCTAssertEqual(flipped.candidateGap, 0.2, accuracy: 1e-5)
+        let unrelated = EngineSelfTest.compare(MLXArray([0.0, 0.0, 9.0, 0.0] as [Float]), reference)
+        XCTAssertEqual(unrelated.referenceMargin, 0.2, accuracy: 1e-5)
+        XCTAssertFalse(unrelated.agrees, "the reference is close, but the candidate's choice isn't one of its near-ties: \(unrelated)")
+        let wide = MLXArray([5.0, 3.0, 0.0, -1.0] as [Float])
+        XCTAssertFalse(EngineSelfTest.compare(MLXArray([3.0, 5.0, 0.0, -1.0] as [Float]), wide).agrees, "a margin of 2 is no near-tie")
+    }
+}
+
+/// A plain generator factory that counts the generators it makes.
+final class CountingGeneratorFactory: GeneratorFactory, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var made: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func makeGenerator(_ context: GeneratorContext) -> TokenGenerator {
+        lock.lock()
+        count += 1
+        lock.unlock()
+        return DecodeLoop(context)
     }
 }

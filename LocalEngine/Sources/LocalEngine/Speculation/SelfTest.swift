@@ -8,11 +8,11 @@ import MLXLMCommon
 /// phone. Three checks:
 ///
 /// 1. **Session reuse** (`sessionReuse`): two turns; the reused turn 2's first-token logits must
-///    match a fresh rebuild of the same tokens: the same argmax, or a near-tie (the fresh top-1
-///    minus top-2 margin below 0.25).
+///    match a fresh rebuild of the same tokens: the same argmax, or a near-tie (the reused
+///    argmax's fresh logit within `nearTieMargin` of the fresh top-1).
 /// 2. **Speculation** (`speculation`): a copy-heavy prompt, 32 tokens decoded plainly and with
 ///    prompt lookup forced to 4 drafts per round. The tokens must be equal up to the first
-///    near-tie of the plain run.
+///    near-tie of the plain run (top-1 minus top-2 below `nearTieMargin`).
 /// 3. **Rollback** (`rollback`): after a forced all-wrong round of 4 drafts, the cache must hold
 ///    exactly the kept tokens and the next logits must equal those of the same tokens fed without
 ///    the round (same argmax or a near-tie, and close in value).
@@ -20,6 +20,10 @@ import MLXLMCommon
 /// The session is invalidated afterwards. A model without exact rollback (a hybrid on the stock
 /// model code) never speculates, so checks 2 and 3 pass as not applicable; a tokenizer without
 /// ChatML markers never reuses, so check 1 does.
+///
+/// The test leaves nothing behind but the invalidated session: it never saves its system prefix
+/// to disk (the prefix store keeps only a few) and never feeds the engine's generator factory,
+/// so the persisted drafting corpus and the shared draft statistics don't learn from it.
 public enum EngineSelfTest {
     public struct Result: Codable, Equatable, Sendable {
         public var passed: Bool
@@ -46,8 +50,15 @@ public enum EngineSelfTest {
     /// in the cache, so check 3 must fail.
     static var debugBreakRollback = false
 
-    /// The near-tie margin for real quantized models (plan §6.4).
-    static let nearTieMargin: Float = 0.25
+    /// The near-tie margin for real 4-bit models. Plan §6.4 started at 0.25; CI then measured a
+    /// reused Qwen3-0.6B-4bit cache that agreed for 56 teacher-forced positions and flipped a top-2
+    /// pair whose margin was exactly 0.25 (differently shaped matmuls round differently in fp16),
+    /// and the engine tests moved to 0.5 (`NearTieTally.quantizedTolerance`, plan §10). Checks 1
+    /// and 2 compare such differently shaped runs, and a false failure turns the engine off for
+    /// the model and build, so they use the same 0.5. A broken cache still fails: it disagrees
+    /// away from near-ties, and check 1 also requires the reused choice to be one of the fresh
+    /// run's near-tied tokens.
+    static let nearTieMargin: Float = 0.5
     /// The largest difference the rollback check allows, relative to the reference: for the next
     /// logits `max |Δ|` over their scale, for each recurrent slot `‖Δ‖ / ‖reference‖`. Well above
     /// batched-versus-single-row rounding, well below a state that wasn't rolled back.
@@ -95,9 +106,8 @@ public enum EngineSelfTest {
 
     private static func checkSessionReuse(_ engine: InferenceEngine) async throws -> (Bool, String) {
         let first = EngineRequest(system: system, turns: [ChatTurn(role: .user, text: firstQuestion)], maxTokens: maxTokens, greedy: true)
-        var text = ""
-        for try await event in engine.reply(first) {
-            if case .text(let chunk) = event { text += chunk }
+        let text = try await engine.onQueue {
+            try onGPU(engine) { try replyWithoutSideEffects(engine, first) }
         }
         let second = EngineRequest(
             system: system,
@@ -122,6 +132,56 @@ public enum EngineSelfTest {
                 return (ok, line)
             }
         }
+    }
+
+    /// Turn 1 of check 1, as `InferenceEngine.reply` answers it (prepare, decode, record the reply
+    /// in the session) but greedy and without what a reply leaves behind: no system prefix saved
+    /// to disk, and a generator of its own instead of the configured factory's (whose corpus is
+    /// persisted and whose draft statistics carry over). With a speculative factory it decodes
+    /// speculatively too (prompt lookup only, a fresh policy, the factory's mode), so turn 2 reuses
+    /// a cache that any rounds wrote, as the app's would. Returns the reply's visible text.
+    /// Engine queue only, under the GPU hooks.
+    private static func replyWithoutSideEffects(_ engine: InferenceEngine, _ request: EngineRequest) throws -> String {
+        let hooks = engine.configuration.hooks
+        let session = engine.session
+        let prepared = try withError { try engine.runtime.prepare(request, isAllowed: hooks.isAllowed) }
+        let streamer = TextStreamer(
+            tokenizer: engine.loaded.tokenizer, renderer: engine.loaded.renderer, format: engine.toolCallFormat,
+            tools: JSONBridge.templateToolsOrNil(request.tools))
+        let context = GeneratorContext(
+            session: session, sampler: FastSampler(configuration: engine.configuration, greedy: true),
+            firstLogits: prepared.firstLogits, stopTokens: engine.loaded.stopTokenIDs, maxTokens: request.maxTokens ?? maxTokens,
+            request: request, drafters: [], insideToolCall: { streamer.insideToolCall }, isAllowed: hooks.isAllowed,
+            renderer: engine.loaded.renderer, toolCallFormat: engine.toolCallFormat)
+        let generator: TokenGenerator
+        if let factory = engine.configuration.generatorFactory as? SpeculativeGeneratorFactory, factory.mode != .off,
+           session.target.supportsRollback
+        {
+            let lookup = PromptLookupDrafter(renderer: engine.loaded.renderer)
+            lookup.reset(ledger: session.ledger, request: request)
+            generator = SpeculativeLoop(
+                context, drafters: [lookup], policy: SharedDraftPolicy(curve: factory.curve, maxDraft: factory.maxDraft),
+                options: SpeculativeLoop.Options(mode: factory.mode))
+        } else {
+            generator = DecodeLoop(context)
+        }
+        var reason: EngineFinish.Reason = .stop
+        while true {
+            let (emitted, finished) = try withError { try generator.step() }
+            _ = streamer.append(emitted)
+            if let finished {
+                reason = finished
+                break
+            }
+        }
+        if reason == .cancelled {
+            throw EngineError.leftForeground
+        }
+        try withError { try generator.flush() }
+        let (_, calls) = streamer.finish()
+        engine.runtime.finishGeneration(
+            text: streamer.visibleText, calls: calls, startedCall: !streamer.startedCalls.isEmpty, reason: reason)
+        return streamer.visibleText
     }
 
     // MARK: Checks 2 and 3
@@ -330,16 +390,24 @@ public enum EngineSelfTest {
         let referenceArgmax: Int
         /// Reference top-1 minus top-2.
         let referenceMargin: Float
+        /// Reference top-1 minus the reference logit of the candidate's argmax (0 when they agree).
+        let candidateGap: Float
         let maxDifference: Float
         /// `max |reference|`.
         let scale: Float
 
+        /// The same argmax, or a near-tie: the candidate picked a token the reference has within
+        /// `nearTieMargin` of its top-1 (so the reference's own top-2 margin is below it too).
         var agrees: Bool {
-            candidateArgmax == referenceArgmax || referenceMargin < nearTieMargin
+            candidateArgmax == referenceArgmax || candidateGap < nearTieMargin
         }
 
         var description: String {
-            "argmax \(candidateArgmax)/\(referenceArgmax), margin \(String(format: "%.3f", referenceMargin)), max |Δ| \(String(format: "%.4g", maxDifference)) of \(String(format: "%.3g", scale))"
+            var text = "argmax \(candidateArgmax)/\(referenceArgmax), margin \(String(format: "%.3f", referenceMargin))"
+            if candidateArgmax != referenceArgmax {
+                text += ", gap \(String(format: "%.3f", candidateGap))"
+            }
+            return text + ", max |Δ| \(String(format: "%.4g", maxDifference)) of \(String(format: "%.3g", scale))"
         }
     }
 
@@ -350,9 +418,12 @@ public enum EngineSelfTest {
         let candidateBest = argMax(candidate, axis: -1)
         let (referenceBest, margin) = greedyChoice(reference)
         eval(difference, scale, candidateBest)
+        let candidateIndex = candidateBest.item(Int.self)
+        let gap = reference.max() - reference[candidateIndex]
+        eval(gap)
         return Comparison(
-            candidateArgmax: candidateBest.item(Int.self), referenceArgmax: referenceBest, referenceMargin: margin,
-            maxDifference: difference.item(Float.self), scale: scale.item(Float.self))
+            candidateArgmax: candidateIndex, referenceArgmax: referenceBest, referenceMargin: margin,
+            candidateGap: gap.item(Float.self), maxDifference: difference.item(Float.self), scale: scale.item(Float.self))
     }
 
     /// Token equality up to the first near-tie of the plain run (plan §6.4).

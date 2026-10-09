@@ -123,6 +123,8 @@ final class SpeculationResources: @unchecked Sendable {
             drafter.reset(ledger: ledger, request: context.request)
         }
         draftDrafter?.reset(ledger: ledger, request: context.request)
+        // Its catch-up prefill stops when this reply may no longer use the GPU.
+        draftDrafter?.isAllowed = context.isAllowed
 
         var drafters = builtIns + context.drafters
         if let draftDrafter { drafters.append(draftDrafter) }

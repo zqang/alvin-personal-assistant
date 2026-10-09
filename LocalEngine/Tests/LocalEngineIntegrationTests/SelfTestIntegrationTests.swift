@@ -7,7 +7,9 @@ import MLXLMCommon
 import XCTest
 
 /// `EngineSelfTest` on real models: it must pass on Qwen3.5-0.8B (the hybrid fork, which the app
-/// gates on it) and is reported for Qwen3-0.6B and, with `[ci woof]`, Woof 4B.
+/// gates on it) and, with `[ci woof]`, on Woof 4B. Qwen3-0.6B is only reported: the plan doesn't
+/// require it to pass (a failure there turns the engine off for that model, nothing worse), and
+/// its 4-bit near-ties are the closest CI has measured.
 final class SelfTestIntegrationTests: XCTestCase {
     override func setUpWithError() throws {
         try IntegrationEnvironment.requireEnabled()
@@ -21,7 +23,9 @@ final class SelfTestIntegrationTests: XCTestCase {
 
     func testSelfTestOnQwen3_0_6B() async throws {
         let result = try await run("mlx-community/Qwen3-0.6B-4bit", speculative: false)
-        XCTAssertTrue(result.passed, result.detail)
+        // Reported, not required: it must only run every check to the end.
+        XCTAssertEqual(Set(result.checks.keys), Set(EngineSelfTest.checkNames), result.detail)
+        print("SelfTestIntegrationTests: Qwen3-0.6B \(result.passed ? "passed" : "FAILED"):\n\(result.detail)")
     }
 
     func testSelfTestOnWoof() async throws {

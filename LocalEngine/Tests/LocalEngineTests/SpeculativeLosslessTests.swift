@@ -420,6 +420,8 @@ enum SpecHarness {
         let session: LiveSession
         let loop: SpeculativeLoop
         let confidence: ConfidenceRecorder
+        /// What the session fed the target to verify, and what it kept.
+        let recorder: RecordingTarget
     }
 
     struct PlainRun {
@@ -473,7 +475,8 @@ enum SpecHarness {
         options: SpeculativeLoop.Options = SpeculativeLoop.Options(), sampler: FastSampler = FastSampler(temperature: 0),
         insideToolCall: Bool = false, policy: SharedDraftPolicy = SharedDraftPolicy(curve: .stockMLXDefault)
     ) throws -> Run {
-        let session = LiveSession(target: target(for: model))
+        let recorder = RecordingTarget(target(for: model))
+        let session = LiveSession(target: recorder)
         let logits = session.feed(prompt, rows: .last).logits!
         let request = EngineRequest(system: "", turns: [])
         for drafter in drafters {
@@ -485,7 +488,7 @@ enum SpecHarness {
                     insideToolCall: insideToolCall, confidence: confidence),
             drafters: drafters, policy: policy, options: options)
         let (tokens, reason) = try drain(loop)
-        return Run(tokens: tokens, reason: reason, session: session, loop: loop, confidence: confidence)
+        return Run(tokens: tokens, reason: reason, session: session, loop: loop, confidence: confidence, recorder: recorder)
     }
 
     /// The invariants every run keeps, whatever it drafted.
@@ -504,22 +507,102 @@ enum SpecHarness {
         }
         XCTAssertEqual(run.session.pendingCount, 0, file: file, line: line)
 
+        // The counts, checked against what the target was really given rather than against the
+        // loop's own bookkeeping: each round is one verify forward of `[y] + drafts` (proposed =
+        // the drafts fed) and one commit (accepted = the drafts kept, rejected = the rows rolled
+        // back), and what it kept is in the ledger at that position.
         let rounds = run.loop.rounds
-        let proposed = rounds.reduce(0) { $0 + $1.proposed }
-        let accepted = rounds.reduce(0) { $0 + $1.accepted }
-        let rejected = rounds.reduce(0) { $0 + $1.rejected }
-        XCTAssertEqual(accepted + rejected, proposed, "\(label): accepted + rejected == proposed", file: file, line: line)
-        let stats = try XCTUnwrap(run.loop.speculation, file: file, line: line)
-        XCTAssertEqual(stats.rounds, rounds.count, file: file, line: line)
-        XCTAssertEqual(stats.totalDrafted, proposed, file: file, line: line)
-        XCTAssertEqual(stats.totalAccepted, accepted, file: file, line: line)
-        XCTAssertEqual(stats.plainTokens + stats.roundTokens, run.tokens.count, "\(label): every token counted once", file: file, line: line)
-        for round in rounds {
-            XCTAssertLessThanOrEqual(round.accepted, round.proposed, file: file, line: line)
-            XCTAssertLessThanOrEqual(round.emitted, round.accepted + 1, file: file, line: line)
+        let verifies = run.recorder.verifies
+        let commits = run.recorder.commits
+        XCTAssertEqual(verifies.count, rounds.count, "\(label): one verify forward per round", file: file, line: line)
+        XCTAssertEqual(commits.count, rounds.count, "\(label): one commit per round", file: file, line: line)
+        var fed = 0, kept = 0, rolledBack = 0
+        for (index, (verify, commit)) in zip(verifies, commits).enumerated() {
+            let roundLabel = "\(label) round \(index)"
+            XCTAssertEqual(commit.verified, verify.tokens.count, "\(roundLabel): commits the rows it verified", file: file, line: line)
+            XCTAssertTrue(commit.keep >= 1 && commit.keep <= commit.verified, "\(roundLabel): keeps y and at most every row", file: file, line: line)
+            fed += verify.tokens.count - 1
+            kept += commit.keep - 1
+            rolledBack += commit.verified - commit.keep
+            if let position = verify.position {
+                let end = position + commit.keep
+                XCTAssertTrue(
+                    end <= run.session.ledger.count && Array(run.session.ledger[position ..< end]) == Array(verify.tokens.prefix(commit.keep)),
+                    "\(roundLabel): the kept rows are what the ledger holds there", file: file, line: line)
+            }
+            if index < rounds.count {
+                let round = rounds[index]
+                XCTAssertEqual(round.proposed, verify.tokens.count - 1, "\(roundLabel): proposed = the drafts fed", file: file, line: line)
+                XCTAssertEqual(round.accepted, commit.keep - 1, "\(roundLabel): accepted = the drafts kept", file: file, line: line)
+                XCTAssertEqual(round.rejected, commit.verified - commit.keep, "\(roundLabel): rejected = the rows rolled back", file: file, line: line)
+                XCTAssertEqual(round.kept, commit.keep, file: file, line: line)
+                XCTAssertLessThanOrEqual(round.emitted, round.accepted + 1, file: file, line: line)
+            }
         }
+        let stats = try XCTUnwrap(run.loop.speculation, file: file, line: line)
+        XCTAssertEqual(stats.rounds, verifies.count, file: file, line: line)
+        XCTAssertEqual(stats.totalDrafted, fed, "\(label): drafted = the drafts fed", file: file, line: line)
+        XCTAssertEqual(stats.totalAccepted, kept, "\(label): accepted = the drafts kept", file: file, line: line)
+        XCTAssertEqual(
+            stats.totalAccepted + rolledBack, fed,
+            "\(label): accepted + rejected == proposed (accepted as reported, rejected as rolled back, proposed as fed)",
+            file: file, line: line)
+        XCTAssertEqual(stats.plainTokens + stats.roundTokens, run.tokens.count, "\(label): every token counted once", file: file, line: line)
         let report = run.session.assertConsistent()
         XCTAssertTrue(report.isConsistent(), "\(label): \(report)", file: file, line: line)
+    }
+}
+
+/// A target that records what the session asks of it: every verify forward (`.all` with a
+/// rollback capture: a speculative round's `[y] + drafts`) with the cache position it started
+/// at, and every commit. The speculation tests derive the round counts from these.
+final class RecordingTarget: TargetModel {
+    struct Verify {
+        let tokens: [Int]
+        /// The attention cache's offset before the forward (nil without attention layers).
+        let position: Int?
+    }
+
+    struct Commit {
+        let keep: Int
+        let verified: Int
+    }
+
+    let inner: any TargetModel
+    private(set) var verifies: [Verify] = []
+    private(set) var commits: [Commit] = []
+
+    init(_ inner: any TargetModel) {
+        self.inner = inner
+    }
+
+    var model: any LanguageModel { inner.model }
+    var cache: [KVCache] { inner.cache }
+    var layout: CacheLayout { inner.layout }
+    var vocabularySize: Int { inner.vocabularySize }
+    var supportsRollback: Bool { inner.supportsRollback }
+    var supportsRowSelection: Bool { inner.supportsRowSelection }
+
+    func forward(_ tokens: MLXArray, rows: LogitRows, captureForRollback: Bool, wantHidden: Bool) -> ForwardResult {
+        if rows == .all && captureForRollback {
+            let values = tokens.asType(.int32).asArray(Int32.self).map { Int($0) }
+            let position = inner.layout.attention.first.map { inner.cache[$0].offset }
+            verifies.append(Verify(tokens: values, position: position))
+        }
+        return inner.forward(tokens, rows: rows, captureForRollback: captureForRollback, wantHidden: wantHidden)
+    }
+
+    func commit(_ capture: (any RoundCapture)?, keep: Int, of verified: Int) {
+        commits.append(Commit(keep: keep, verified: verified))
+        inner.commit(capture, keep: keep, of: verified)
+    }
+
+    func resetCache() {
+        inner.resetCache()
+    }
+
+    func adopt(_ cache: [KVCache]) throws {
+        try inner.adopt(cache)
     }
 }
 

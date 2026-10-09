@@ -19,6 +19,9 @@ import MLXLMCommon
 ///   c(K + 1)).
 /// - The draft must match the target's vocabulary size, stop tokens and tokenization
 ///   (`compatibilityProblem`).
+/// - A long catch-up (a new conversation, a rebuilt session) checks `isAllowed` before every
+///   chunk and stops, without a proposal, once it turns false; the chunks fed so far stay in
+///   `fed`, so the next proposal carries on from there.
 ///
 /// An MLX error while drafting starts the draft cache over and skips the proposal; the target's
 /// reply is unaffected. Not thread-safe: engine queue only.
@@ -56,6 +59,9 @@ public final class DraftModelDrafter: Drafter {
     public private(set) var calibrated = false
     /// Most tokens one draft-model forward feeds while catching up with the context.
     public var prefillChunk = 512
+    /// Whether the GPU may still be used, checked before every catch-up chunk (plan §4.11).
+    /// `SpeculativeGeneratorFactory` sets it to each reply's `GeneratorContext.isAllowed`.
+    public var isAllowed: () -> Bool = { true }
 
     /// The timing of the last measured draft (sync excluded), until calibrated.
     private var measuredDraft: (seconds: Double, count: Int)?
@@ -163,6 +169,9 @@ public final class DraftModelDrafter: Drafter {
         var start = common
         let chunk = max(1, prefillChunk)
         while start < context.count {
+            // The app may have taken the GPU away during a long catch-up: no proposal this
+            // time; `fed` holds exactly the chunks fed.
+            guard isAllowed() else { return [] }
             let end = min(start + chunk, context.count)
             let piece = Array(context[(context.startIndex + start) ..< (context.startIndex + end)])
             if end == context.count {

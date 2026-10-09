@@ -98,6 +98,29 @@ final class DraftModelTests: XCTestCase {
         XCTAssertEqual(fourth.tokens, freshDraft(model, context: other, count: 3))
     }
 
+    /// A long catch-up checks `isAllowed` before every chunk: once it turns false the drafter
+    /// stops without a proposal and `fed` holds exactly the chunks fed; the next proposal carries
+    /// on from there and drafts what a fresh draft model would.
+    func testCatchUpStopsWhenTheGPUIsTakenAway() throws {
+        let model = try EngineTestHarness.makeModel(.qwen3, seed: 540)
+        let drafter = try DraftModelDrafter(draft: draft(model, id: "draft-allowed"))
+        drafter.prefillChunk = 4
+        let context = TinyModels.tokens(14, seed: 541)
+        var checks = 0
+        drafter.isAllowed = {
+            checks += 1
+            return checks <= 2
+        }
+        XCTAssertNil(drafter.propose(context: context[...], maxTokens: 3))
+        XCTAssertEqual(checks, 3, "checked before every chunk")
+        XCTAssertEqual(drafter.fed, Array(context.prefix(8)), "two chunks fed, then it stopped")
+
+        drafter.isAllowed = { true }
+        let proposal = try XCTUnwrap(drafter.propose(context: context[...], maxTokens: 3))
+        XCTAssertEqual(drafter.fed, context + Array(proposal.tokens.prefix(2)))
+        XCTAssertEqual(proposal.tokens, freshDraft(model, context: context, count: 3))
+    }
+
     /// Greedy drafts from a fresh cache, one token at a time.
     private func freshDraft(_ model: any LanguageModel, context: [Int], count: Int) -> [Int] {
         let cache = model.newCache(parameters: nil)
