@@ -9,6 +9,8 @@ struct ChatView: View {
     @Environment(SettingsStore.self) private var store
     @State private var controller = ChatController()
     @State private var draft = ""
+    /// "Think deeper" is on for the next message.
+    @State private var thinkDeeper = false
     @State private var voiceSession: VoiceSession?
     @FocusState private var composerFocused: Bool
 
@@ -24,6 +26,7 @@ struct ChatView: View {
                         MessageRow(
                             message: message,
                             activity: message.status == .streaming ? controller.activity : nil,
+                            routedEngine: controller.engine(for: message),
                             onRetry: { controller.retry(message, in: conversation, store: store) }
                         )
                         .id(message.id)
@@ -44,11 +47,28 @@ struct ChatView: View {
         .fullScreenCover(item: $voiceSession) { session in
             VoiceModeView(session: session)
         }
+        .onChange(of: composerFocused) {
+            // Opening the composer warms the connection, and the on-device model when it may answer.
+            if composerFocused {
+                pipeline.prewarm(inputIsVoice: false)
+            }
+        }
+    }
+
+    /// The reply pipeline, shared with the controller.
+    private var pipeline: any ReplyPipeline {
+        controller.pipeline(for: store)
+    }
+
+    /// Whether "Think deeper" is offered: the pipeline routes deep replies, Claude answers, and
+    /// deep mode isn't off.
+    private var canThinkDeeper: Bool {
+        !(pipeline is LegacyReplyPipeline) && store.settings.provider == .anthropic && store.settings.deepMode != .off
     }
 
     private var composer: some View {
         VStack(spacing: 8) {
-            if let problem = ReplyService.missingSetup(settings: store.settings, store: store) {
+            if let problem = pipeline.missingSetup() {
                 Button {
                     openSettings()
                 } label: {
@@ -59,6 +79,9 @@ struct ChatView: View {
                         .background(Color.orange.opacity(0.15), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 .buttonStyle(.plain)
+            }
+            if canThinkDeeper {
+                thinkDeeperToggle
             }
             HStack(alignment: .bottom, spacing: 10) {
                 TextField("Message", text: $draft, axis: .vertical)
@@ -105,11 +128,38 @@ struct ChatView: View {
         }
     }
 
+    /// "Think deeper" for the next message, with what's left of today's deep replies.
+    private var thinkDeeperToggle: some View {
+        let left = store.deepRunsLeft()
+        return HStack(spacing: 8) {
+            Toggle(isOn: $thinkDeeper) {
+                Label("Think deeper", systemImage: "brain")
+                    .font(.footnote.weight(.medium))
+            }
+            .toggleStyle(.button)
+            .buttonBorderShape(.capsule)
+            .controlSize(.small)
+            .disabled(left == 0)
+            .accessibilityHint("The next message gets a slower, more thorough answer.")
+            Text(left == 0 ? "None left today" : "\(left) left today")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+    }
+
     private func send() {
         let text = draft
         guard !text.trimmed.isEmpty else { return }
+        let deep = thinkDeeper && canThinkDeeper
+        let sent = deep
+            ? controller.sendDeep(text, in: conversation, store: store)
+            : controller.send(text, in: conversation, store: store)
+        guard sent else { return }
         draft = ""
-        controller.send(text, in: conversation, store: store)
+        if deep {
+            thinkDeeper = false
+        }
     }
 
     private func startVoice() {
@@ -121,6 +171,8 @@ struct ChatView: View {
 struct MessageRow: View {
     let message: ChatMessage
     var activity: String?
+    /// The engine that answered, when known; "On device" shows for the on-device model.
+    var routedEngine: ReplyEngine? = nil
     var onRetry: () -> Void
 
     var body: some View {
@@ -152,7 +204,12 @@ struct MessageRow: View {
     }
 
     private var assistantBody: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let rounds = message.toolRounds
+        return VStack(alignment: .leading, spacing: 8) {
+            if !rounds.isEmpty {
+                // What the reply did with tools, ahead of what it said about it.
+                ToolRoundChip(rounds: rounds)
+            }
             switch message.status {
             case .streaming where message.text.isEmpty:
                 HStack(spacing: 8) {
@@ -175,7 +232,9 @@ struct MessageRow: View {
                 Button("Retry") { onRetry() }
                     .buttonStyle(.bordered)
             default:
-                MarkdownText(message.text)
+                if !message.text.isEmpty {
+                    MarkdownText(message.text)
+                }
                 if let activity {
                     Label(activity, systemImage: "globe")
                         .font(.footnote)
@@ -186,6 +245,11 @@ struct MessageRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            }
+            if routedEngine == .local {
+                Label("On device", systemImage: "iphone")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

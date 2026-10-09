@@ -10,16 +10,24 @@ enum SecretKey: String, CaseIterable {
     case openAI = "openai-api-key"
 }
 
-/// Preferences (UserDefaults) and API keys (Keychain).
+/// Preferences (UserDefaults) and API keys (Keychain), plus what the app learns as it runs: the
+/// deep-mode replies used today and how long each engine takes to its first text.
 @MainActor
 @Observable
 final class SettingsStore {
     /// Bind to this directly; call `save()` after changes.
     var settings: AssistantSettings
     private(set) var secrets: [SecretKey: String]
+    /// Deep-mode replies started today (`recordDeepRun()`), against `settings.deepDailyLimit`.
+    private(set) var deepUsage: DeepBudget
+    /// Times to first text per engine and mode (`recordFirstText(engine:mode:seconds:)`), for
+    /// routing.
+    private(set) var latency: LatencyEstimator
 
     private let defaults: UserDefaults
     private static let settingsKey = "assistant.settings"
+    private static let deepUsageKey = "assistant.deepUsage"
+    private static let latencyKey = "assistant.latency"
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -36,12 +44,49 @@ final class SettingsStore {
             loaded[key] = Keychain.read(account: key.rawValue) ?? ""
         }
         secrets = loaded
+        deepUsage = Self.load(DeepBudget.self, key: Self.deepUsageKey, from: defaults) ?? DeepBudget()
+        latency = Self.load(LatencyEstimator.self, key: Self.latencyKey, from: defaults) ?? LatencyEstimator()
     }
 
     func save() {
         if let data = try? JSONEncoder().encode(settings) {
             defaults.set(data, forKey: Self.settingsKey)
         }
+    }
+
+    // MARK: Deep mode and latency
+
+    /// Counts one deep-mode reply for today (in the current time zone).
+    func recordDeepRun(now: Date = Date()) {
+        deepUsage.record(now: now, timeZone: .current)
+        persist(deepUsage, key: Self.deepUsageKey)
+    }
+
+    /// Deep-mode replies still allowed today.
+    func deepRunsLeft(now: Date = Date()) -> Int {
+        deepUsage.remaining(limit: settings.deepDailyLimit, now: now, timeZone: .current)
+    }
+
+    /// Deep-mode replies started today.
+    func deepRunsToday(now: Date = Date()) -> Int {
+        deepUsage.usedToday(now: now, timeZone: .current)
+    }
+
+    /// Adds one measured time from a reply's start (or its fallback's) to its first text.
+    func recordFirstText(engine: ReplyEngine, mode: ReplyMode, seconds: TimeInterval, now: Date = Date()) {
+        latency.record(engine: engine, mode: mode, firstText: seconds, at: now)
+        persist(latency, key: Self.latencyKey)
+    }
+
+    private func persist<Value: Encodable>(_ value: Value, key: String) {
+        if let data = try? JSONEncoder().encode(value) {
+            defaults.set(data, forKey: key)
+        }
+    }
+
+    private static func load<Value: Decodable>(_ type: Value.Type, key: String, from defaults: UserDefaults) -> Value? {
+        guard let data = defaults.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
     }
 
     func secret(_ key: SecretKey) -> String {
