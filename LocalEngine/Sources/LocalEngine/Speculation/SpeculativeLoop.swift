@@ -452,7 +452,7 @@ public final class SpeculativeLoop: TokenGenerator {
                 if potentialDraftLength(drafter, remaining: remaining) > 0 { return true }
                 continue
             }
-            guard let raw = drafter.propose(context: ledger[...], maxTokens: maxProposal + 1),
+            guard let raw = drafter.propose(context: ledger[...], maxTokens: min(maxProposal, remaining - 1) + 1),
                   let proposal = sanitize(raw), proposal.tokens.count >= 2
             else { continue }
             let shifted = DraftProposal(tokens: Array(proposal.tokens.dropFirst()), source: proposal.source, matchLength: proposal.matchLength)
@@ -471,6 +471,7 @@ public final class SpeculativeLoop: TokenGenerator {
         let policy = sharedPolicy.policy
         var best: Choice?
         for drafter in drafters where mayAsk(drafter, insideToolCall: insideToolCall) {
+            var limit = min(maxProposal, remaining - 1)
             if isExpensive(drafter) {
                 if options.mode == .toolsOnly && !insideToolCall { continue }
                 let potential = potentialDraftLength(drafter, remaining: remaining)
@@ -478,8 +479,10 @@ public final class SpeculativeLoop: TokenGenerator {
                 if let best, best.expected >= policy.expectedTokens(source: drafter.source, matchLength: 0, k: potential) {
                     continue
                 }
+                // Drafting costs model work per token: ask for no more than a round could use.
+                limit = min(limit, potential)
             }
-            guard let raw = drafter.propose(context: tokens[...], maxTokens: min(maxProposal, remaining - 1)),
+            guard let raw = drafter.propose(context: tokens[...], maxTokens: limit),
                   let proposal = sanitize(raw)
             else { continue }
             if options.mode == .toolsOnly && !insideToolCall && proposal.matchLength < 3 { continue }
