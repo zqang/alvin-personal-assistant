@@ -76,6 +76,8 @@ final class VoiceSession: Identifiable {
     /// The pipeline was prewarmed for the open turn's first words.
     @ObservationIgnored private var prewarmedThisTurn = false
     @ObservationIgnored private var cuePolicy = CuePolicy(enabled: false, isVoice: true, fillerDelay: -1)
+    /// Whether the user's turn may still be taken back, given what the reply in flight has done.
+    @ObservationIgnored private var reopenPolicy = TurnReopenPolicy()
     @ObservationIgnored private var ducker = BargeInDucker()
     @ObservationIgnored private var duckingEnabled = false
     /// The latency trace of the turn in progress, from its commit to the end of its reply.
@@ -324,21 +326,21 @@ final class VoiceSession: Identifiable {
             // cue then follows the rule for talking over the answer.
             if speaker?.hasPlayedCue == true, !store.settings.voiceInterruptions { return }
             if let words = interruptions.interruption(in: text, assistantSpeech: speaker?.recentSpeech ?? "") {
-                reopenUserTurn(with: words)
+                if reopenPolicy.canReopen {
+                    reopenUserTurn(with: words)
+                } else {
+                    // The reply may already have acted on the turn, so the turn stands and the
+                    // words start the next one.
+                    interruptReply(with: words)
+                }
             }
         case .speaking:
             guard store.settings.voiceInterruptions, let speaker else { return }
             if let words = interruptions.interruption(in: text, assistantSpeech: speaker.recentSpeech) {
                 ducker.interruptionConfirmed()
-                cancelReply()
                 // This request's audio also holds the assistant's voice, so keep the live text.
                 recognizer?.feeder.dropSamples()
-                // The running request already holds the interruption, so keep it.
-                phase = .listening
-                carriedText = ""
-                userCaption = words
-                turn.reset(transcript: words, at: now)
-                beginTurn(with: words)
+                interruptReply(with: words)
             }
         default:
             break
@@ -404,6 +406,7 @@ final class VoiceSession: Identifiable {
     }
 
     /// The user kept talking before the reply started: take back their turn and keep listening.
+    /// Only while `reopenPolicy` allows it.
     private func reopenUserTurn(with text: String) {
         guard let user = lastUserMessage else { return }
         // The turn wasn't over, so its trace isn't a turn of its own: drop it unlogged, and the
@@ -423,6 +426,18 @@ final class VoiceSession: Identifiable {
         beginTurn(with: userCaption)
     }
 
+    /// The user cut in: stop the reply and start their next turn with `words`. Their committed
+    /// turn stays, and so does what the reply said or did before it stopped.
+    private func interruptReply(with words: String) {
+        cancelReply()
+        // The running request already holds the interruption, so keep it.
+        phase = .listening
+        carriedText = ""
+        userCaption = words
+        turn.reset(transcript: words, at: now)
+        beginTurn(with: words)
+    }
+
     // MARK: - Early start
 
     /// Whether replies may start before the user's turn is committed.
@@ -431,6 +446,8 @@ final class VoiceSession: Identifiable {
         guard pipeline.supportsEarlyStart, settings.earlyReplyStart != .off else { return false }
         let localRoute = settings.provider == .onDevice || (settings.routingMode == .automatic && settings.preferOnDevice)
         // "On-device only" leaves cloud replies alone: an early start there may cost a request.
+        // Automatic routing picks the route per request, so the pipeline also fails an early
+        // reply it doesn't route on device; the reply then starts once the turn commits.
         if settings.earlyReplyStart == .onDeviceOnly, !localRoute { return false }
         // Qwen3-ASR and the reply model would compete for the GPU.
         if localRoute, settings.usesQwenListening { return false }
@@ -542,6 +559,7 @@ final class VoiceSession: Identifiable {
         replyDeep = deep
         cuePolicy = CuePolicy(enabled: cuesEnabled, isVoice: true, fillerDelay: store.settings.fillerDelay, deep: deep)
         cuePolicy.replyStarted(at: now, expectedFirstText: LatencyLog.shared.expectedFirstText())
+        reopenPolicy = TurnReopenPolicy()
 
         let reply = ChatMessage(role: .assistant, text: "", isVoice: true, status: .streaming)
         conversation.append(reply)
@@ -572,6 +590,7 @@ final class VoiceSession: Identifiable {
         do {
             for try await event in stream {
                 guard reply === self.reply else { return }
+                reopenPolicy.received(event)
                 if let cue = cuePolicy.received(event, at: now) {
                     cuePlayer?.play(cue)
                 }

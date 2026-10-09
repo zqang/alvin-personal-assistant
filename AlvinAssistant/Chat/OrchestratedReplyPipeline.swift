@@ -16,7 +16,10 @@ import Foundation
 ///
 /// Side-effect tools wait on the request's commit gate, so a reply started early acts only once
 /// its turn is final. A deep reply started early doesn't start at all before then: a discarded one
-/// would spend deep-mode work and budget.
+/// would spend deep-mode work and budget. With "Start answering early" set to "On-device only", a
+/// reply started early doesn't reach the cloud before then either: one routed to the cloud fails
+/// at once (the voice session then starts the reply when the turn commits), and an on-device
+/// reply's handoff to Claude waits for the gate.
 @MainActor
 final class OrchestratedReplyPipeline: ReplyPipeline {
     private let store: SettingsStore
@@ -45,26 +48,43 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
         let turns = PromptBuilder.turns(from: messages)
         let system = PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: settings.customInstructions)
 
+        let decision = decide(settings: settings, turns: turns, request: request)
+        // Under "On-device only", a reply started early may run only on device, and with automatic
+        // routing only this request's route says whether it does.
+        let onDeviceOnly = request.pendingUser != nil && settings.earlyReplyStart == .onDeviceOnly
+        if onDeviceOnly, decision.engine != .local {
+            return AsyncThrowingStream { continuation in
+                continuation.finish(throwing: EarlyReplyNotOnDevice())
+            }
+        }
         let engines: Orchestrator.Engines
         do {
-            engines = try makeEngines(settings: settings, turns: turns, request: request)
+            engines = try makeEngines(settings: settings, turns: turns, request: request, onDeviceOnly: onDeviceOnly)
         } catch {
             return AsyncThrowingStream { continuation in
                 continuation.finish(throwing: error)
             }
         }
-        let decision = decide(settings: settings, turns: turns, request: request)
         // Voice waits less for a silent cloud when the on-device model can answer at once.
         let watchdog: Duration = request.inputIsVoice && LocalModelHost.shared.status == .ready ? .seconds(3) : .seconds(8)
         let orchestrator = Orchestrator(decision: decision, engines: engines, firstEventTimeout: watchdog)
         // The OpenAI-compatible service isn't one of the router's engines; its times would skew
         // Claude's.
         let recordsLatency = settings.provider != .openAICompatible
-        return relay(orchestrator, system: system, turns: turns, deep: decision.mode == .deep, gate: request.commitGate, recordsLatency: recordsLatency)
+        return relay(
+            orchestrator,
+            system: system,
+            turns: turns,
+            deep: decision.mode == .deep,
+            gate: request.commitGate,
+            recordsLatency: recordsLatency,
+            cloudWaitsForGate: onDeviceOnly
+        )
     }
 
-    /// The engines for one reply under `settings`.
-    private func makeEngines(settings: AssistantSettings, turns: [ChatTurn], request: ReplyRequest) throws -> Orchestrator.Engines {
+    /// The engines for one reply under `settings`. With `onDeviceOnly` the route is on device, and
+    /// Claude is there only for a handoff, which waits for the request's commit gate.
+    private func makeEngines(settings: AssistantSettings, turns: [ChatTurn], request: ReplyRequest, onDeviceOnly: Bool) throws -> Orchestrator.Engines {
         let gate = request.commitGate
         let toolContext: @Sendable () -> ToolContext = { ToolContext(commitGate: gate) }
         switch settings.provider {
@@ -91,6 +111,11 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
             )
             // With a single provider, Claude answers alone (plan §5.2: no on-device fallback).
             let local = settings.routingMode == .automatic && localAvailable(settings) ? localProvider(settings: settings, gate: gate) : nil
+            if onDeviceOnly {
+                // A handoff reaches Claude only once the turn is final: until then the reply may
+                // still be discarded.
+                return Orchestrator.Engines(cloud: gate.map { CommitGatedProvider(base: cloud, gate: $0) }, local: local)
+            }
             return Orchestrator.Engines(cloud: cloud, deep: deliberation, local: local)
         case .onDevice:
             // Downloaded on first use, as before routing existed.
@@ -147,13 +172,15 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
     }
 
     /// Streams `orchestrator`'s events, recording deep-mode use and the time to first text.
+    /// `cloudWaitsForGate`: Claude's time would include the wait for the gate, so it isn't recorded.
     private func relay(
         _ orchestrator: Orchestrator,
         system: String,
         turns: [ChatTurn],
         deep: Bool,
         gate: CommitGate?,
-        recordsLatency: Bool
+        recordsLatency: Bool,
+        cloudWaitsForGate: Bool
     ) -> AsyncThrowingStream<AssistantEvent, Error> {
         let store = store
         return AsyncThrowingStream { continuation in
@@ -167,7 +194,7 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
                     }
                     var firstText = FirstTextTap()
                     for try await event in orchestrator.streamEvents(system: system, turns: turns) {
-                        if recordsLatency, let sample = firstText.observe(event, at: .now) {
+                        if recordsLatency, let sample = firstText.observe(event, at: .now), !(cloudWaitsForGate && sample.engine == .cloud) {
                             store.recordFirstText(engine: sample.engine, mode: sample.mode, seconds: sample.seconds)
                         }
                         continuation.yield(event)
@@ -255,6 +282,34 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
         let downloaded = LocalModelHost.shared.isDownloaded(settings.localModelID)
         downloadCheck = (settings.localModelID, downloaded, now)
         return downloaded
+    }
+}
+
+/// Ends a reply started early under "On-device only" that isn't routed on device. The voice
+/// session doesn't adopt a failed early reply: it starts the turn's reply afresh.
+private struct EarlyReplyNotOnDevice: Error {}
+
+/// `base`, once `gate` is open: the stream waits for that, and fails with `CancellationError`
+/// when the gate is cancelled instead, without ever calling `base`.
+private struct CommitGatedProvider: AssistantProvider {
+    let base: any AssistantProvider
+    let gate: CommitGate
+
+    func streamEvents(system: String, turns: [ChatTurn]) -> AsyncThrowingStream<AssistantEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    try await gate.wait()
+                    for try await event in base.streamEvents(system: system, turns: turns) {
+                        continuation.yield(event)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
     }
 }
 
