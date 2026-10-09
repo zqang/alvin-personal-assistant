@@ -88,8 +88,18 @@ public protocol AssistantTool: Sendable {
     var definition: ToolDefinition { get }
     var effect: ToolEffect { get }
     var presentation: ToolPresentation { get }
+    /// Gets what the tool needs from the user before it runs, such as a first-time permission
+    /// alert. `ToolRunner` calls it before `run` (after the commit gate, for a side effect) and
+    /// doesn't count its time against the run's timeout; a throw becomes the call's result and the
+    /// tool doesn't run. A cancelled call doesn't wait for it, so it must not act, and `run` must
+    /// still work when it wasn't called. The default does nothing.
+    func authorize(_ input: [String: JSONValue], context: ToolContext) async throws
     /// `input` has already been validated against `definition.inputSchema`.
     func run(_ input: [String: JSONValue], context: ToolContext) async throws -> ToolOutput
+}
+
+extension AssistantTool {
+    public func authorize(_ input: [String: JSONValue], context: ToolContext) async throws {}
 }
 
 /// One tool call and its result, as stored with a reply and replayed to models in later turns.

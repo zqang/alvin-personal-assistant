@@ -24,6 +24,11 @@ struct SetTimerTool: AssistantTool {
     var effect: ToolEffect { .sideEffect }
     var presentation: ToolPresentation { ToolPresentation(activity: "Setting a timer", cue: nil) }
 
+    /// A first-time permission alert, outside the run's timeout.
+    func authorize(_ input: [String: JSONValue], context: ToolContext) async throws {
+        try await TimerService.shared.ensureAccess()
+    }
+
     func run(_ input: [String: JSONValue], context: ToolContext) async throws -> ToolOutput {
         guard let seconds = DeviceToolSupport.integer(input, "seconds") else {
             return .error("seconds must be a whole number of seconds, e.g. 600 for ten minutes.")

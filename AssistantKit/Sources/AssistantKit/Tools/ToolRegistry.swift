@@ -100,12 +100,17 @@ public struct ToolRegistry: Sendable {
     ///
     /// The model sees those calls in its history; a stub keeps their name defined (APIs reject
     /// history that uses undefined tools) and answers any new call with `unavailableMessage`.
+    /// Calls are looked up, and stubbed, under the name Claude sees (`ClaudeRequest.claudeToolName`):
+    /// the on-device model may have written a name the API rejects, or a server tool's name.
     public func covering(_ history: [ChatTurn]) -> ToolRegistry {
         var combined = entries
         for turn in history {
             for round in turn.toolRounds {
-                for call in round.calls where combined[call.name] == nil {
-                    combined[call.name] = Entry(tool: StubTool(name: call.name), blocked: Self.unavailableMessage)
+                for call in round.calls {
+                    let name = ClaudeRequest.claudeToolName(call.name)
+                    if combined[name] == nil {
+                        combined[name] = Entry(tool: StubTool(name: name), blocked: Self.unavailableMessage)
+                    }
                 }
             }
         }

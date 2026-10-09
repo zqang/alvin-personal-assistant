@@ -34,6 +34,45 @@ private struct StubbornTool: AssistantTool {
     }
 }
 
+/// `base` behind a first-time permission alert: `authorize` takes `seconds` whatever happens (an
+/// alert can't be dismissed), then throws `refusal` if there is one.
+private final class AuthorizingTool: AssistantTool, @unchecked Sendable {
+    let base: FakeTool
+    let seconds: Double
+    let refusal: Error?
+    private let lock = NSLock()
+    private var asked = 0
+    private var answered = 0
+
+    init(_ base: FakeTool, seconds: Double = 0, refusal: Error? = nil) {
+        self.base = base
+        self.seconds = seconds
+        self.refusal = refusal
+    }
+
+    var definition: ToolDefinition { base.definition }
+    var effect: ToolEffect { base.effect }
+    var presentation: ToolPresentation { base.presentation }
+    /// How many times `authorize` started, and how many of those ended.
+    var askCount: Int { lock.withTestLock { asked } }
+    var answerCount: Int { lock.withTestLock { answered } }
+
+    func authorize(_ input: [String: JSONValue], context: ToolContext) async throws {
+        lock.withTestLock { asked += 1 }
+        if seconds > 0 {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { continuation.resume() }
+            }
+        }
+        lock.withTestLock { answered += 1 }
+        if let refusal { throw refusal }
+    }
+
+    func run(_ input: [String: JSONValue], context: ToolContext) async throws -> ToolOutput {
+        try await base.run(input, context: context)
+    }
+}
+
 final class ToolRunnerTests: XCTestCase {
     // MARK: - Order and concurrency
 
@@ -249,6 +288,97 @@ final class ToolRunnerTests: XCTestCase {
 
         XCTAssertEqual(round.calls.map(\.result), [#"{"error":"The request was cancelled before the action ran."}"#])
         XCTAssertEqual(next.runCount, 0)
+    }
+
+    // MARK: - Authorization
+
+    func testTheWaitForAPermissionAlertDoesNotCountAgainstTheTimeout() async {
+        // The user takes longer to answer the alert than a tool may run; the action still happens.
+        let write = AuthorizingTool(FakeTool(name: "create_reminder", effect: .sideEffect, output: .ok(["status": "added"])), seconds: 0.5)
+        let read = AuthorizingTool(FakeTool(name: "list_events", output: .ok(["count": 0])), seconds: 0.5)
+        let runner = ToolRunner(registry: ToolRegistry([write, read]), timeout: .milliseconds(100))
+
+        let round = await runner.run([call("c1", "create_reminder"), call("c2", "list_events")], context: ToolContext())
+
+        XCTAssertEqual(round.calls.map(\.result), [#"{"status":"added"}"#, #"{"count":0}"#])
+        XCTAssertEqual(round.calls.map(\.isError), [false, false])
+        XCTAssertEqual(write.base.runCount, 1)
+        XCTAssertEqual(read.base.runCount, 1)
+    }
+
+    func testTheRunAfterAuthorizationIsStillLimited() async {
+        let slow = AuthorizingTool(FakeTool(name: "slow_write", effect: .sideEffect, delay: 5), seconds: 0.2)
+        let runner = ToolRunner(registry: ToolRegistry([slow]), timeout: .milliseconds(100))
+        let started = Date()
+        let round = await runner.run([call("c1", "slow_write")], context: ToolContext())
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        XCTAssertEqual(round.calls[0].result, sideEffectTimedOut)
+        XCTAssertEqual(slow.answerCount, 1)
+    }
+
+    func testARefusedAuthorizationIsTheResultAndTheToolNeverRuns() async {
+        let denied = AssistantError.missingConfiguration("The user hasn't allowed this app to use Reminders.")
+        let write = AuthorizingTool(FakeTool(name: "create_reminder", effect: .sideEffect), refusal: denied)
+        let read = AuthorizingTool(FakeTool(name: "list_reminders"), refusal: denied)
+        let runner = ToolRunner(registry: ToolRegistry([write, read]))
+
+        let round = await runner.run([call("c1", "create_reminder"), call("c2", "list_reminders")], context: ToolContext())
+
+        let error = #"{"error":"The user hasn't allowed this app to use Reminders."}"#
+        XCTAssertEqual(round.calls.map(\.result), [error, error])
+        XCTAssertEqual(round.calls.map(\.isError), [true, true])
+        XCTAssertEqual(write.base.runCount + read.base.runCount, 0)
+    }
+
+    func testSideEffectsAskOnlyOnceTheCommitGateOpens() async throws {
+        let write = AuthorizingTool(FakeTool(name: "create_reminder", effect: .sideEffect))
+        let runner = ToolRunner(registry: ToolRegistry([write]))
+        let gate = CommitGate()
+
+        let running = Task { await runner.run([call("c1", "create_reminder")], context: ToolContext(commitGate: gate)) }
+        let waiting = await waitUntil { gate.waiterCount == 1 }
+        XCTAssertTrue(waiting)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(write.askCount, 0, "no permission alert for a turn that may be thrown away")
+
+        gate.open()
+        let round = await running.value
+        XCTAssertFalse(round.calls[0].isError)
+        XCTAssertEqual(write.askCount, 1)
+        XCTAssertEqual(write.base.runCount, 1)
+    }
+
+    func testCancellingTheRoundStopsWaitingForAnAlertAndNeverActs() async throws {
+        let write = AuthorizingTool(FakeTool(name: "create_reminder", effect: .sideEffect), seconds: 1)
+        let read = AuthorizingTool(FakeTool(name: "list_events"), seconds: 1)
+        let runner = ToolRunner(registry: ToolRegistry([write, read]))
+
+        let started = Date()
+        let running = Task { await runner.run([call("c1", "create_reminder"), call("c2", "list_events")], context: ToolContext()) }
+        let asked = await waitUntil { write.askCount == 1 && read.askCount == 1 }
+        XCTAssertTrue(asked)
+        running.cancel()
+        let round = await running.value
+
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.8, "the round doesn't wait for the alert")
+        let cancelled = #"{"error":"The request was cancelled before the action ran."}"#
+        XCTAssertEqual(round.calls.map(\.result), [cancelled, cancelled])
+        // Answering the alert later doesn't run the tools.
+        let answered = await waitUntil { write.answerCount == 1 && read.answerCount == 1 }
+        XCTAssertTrue(answered)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(write.base.runCount + read.base.runCount, 0)
+    }
+
+    func testToolsThatMayNotRunNeverAsk() async {
+        let write = AuthorizingTool(FakeTool(name: "create_event", effect: .sideEffect))
+        let off = AuthorizingTool(FakeTool(name: "set_timer", effect: .sideEffect))
+        let registry = ToolRegistry([write, off], disabled: ["set_timer"]).readOnly()
+
+        let round = await ToolRunner(registry: registry).run([call("c1", "create_event"), call("c2", "set_timer")], context: ToolContext())
+
+        XCTAssertEqual(round.calls.map(\.result), [#"{"error":"Not available here."}"#, #"{"error":"The user turned this off in Settings."}"#])
+        XCTAssertEqual(write.askCount + off.askCount, 0)
     }
 
     func testLongResultsAreCutDeterministically() async throws {
@@ -467,6 +597,52 @@ final class ToolRegistryTests: XCTestCase {
         XCTAssertEqual(round.calls[0].result, #"{"error":"Not available here."}"#)
         XCTAssertTrue(round.calls[0].isError)
         XCTAssertFalse(round.calls[1].isError)
+    }
+
+    func testCoveringDeclaresHistoryCallsUnderNamesClaudeAccepts() async throws {
+        // Names the on-device model wrote. Claude takes only unique names of 1 to 64 characters
+        // from [A-Za-z0-9_-], and web_search is its own server tool.
+        let unknown = #"{"error":"Unknown tool"}"#
+        let history = [
+            ChatTurn(role: .user, text: "Weather, and a timer"),
+            ChatTurn(role: .assistant, text: "Done.", toolRounds: [
+                ToolRound(calls: [
+                    ToolCallRecord(id: "call_0", name: "web_search", input: ["query": "weather"], result: unknown, isError: true),
+                    ToolCallRecord(id: "call_1", name: "", input: [:], result: unknown, isError: true),
+                    ToolCallRecord(id: "call_2", name: "set timer", input: ["seconds": 60], result: unknown, isError: true),
+                    ToolCallRecord(id: "call_3", name: "get.weather", input: [:], result: unknown, isError: true),
+                ]),
+            ]),
+            ChatTurn(role: .user, text: "Thanks"),
+        ]
+        let timer = FakeTool(name: "set_timer", effect: .sideEffect)
+        let registry = ToolRegistry([timer]).covering(history)
+
+        XCTAssertEqual(registry.definitions.map(\.name), ["get_weather", "local_web_search", "set_timer", "unknown_tool"])
+        XCTAssertEqual(registry.definitions[2], timer.definition, "a call that maps onto a real tool adds no stub")
+
+        // The request declares each name the history replays, once, next to the server's web_search.
+        let messages = ClaudeRequest.messages(from: history)
+        let body = ClaudeRequest.body(
+            configuration: ClaudeConfiguration(apiKey: "key", webSearchEnabled: true),
+            system: "S",
+            messages: messages,
+            clientTools: registry.definitions
+        )
+        let declared = try XCTUnwrap(body["tools"]?.arrayValue).compactMap { $0["name"]?.stringValue }
+        XCTAssertEqual(declared, ["web_search", "get_weather", "local_web_search", "set_timer", "unknown_tool"])
+        XCTAssertEqual(Set(declared).count, declared.count)
+        let replayed = messages.flatMap { $0["content"]?.arrayValue ?? [] }.filter { $0["type"] == "tool_use" }.compactMap { $0["name"]?.stringValue }
+        XCTAssertEqual(replayed, ["local_web_search", "unknown_tool", "set_timer", "get_weather"])
+        XCTAssertTrue(Set(replayed).isSubset(of: Set(declared)))
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+        for name in declared {
+            XCTAssertTrue((1...64).contains(name.count) && name.unicodeScalars.allSatisfy { allowed.contains($0) }, name)
+        }
+
+        // A new call to a stub is answered without running anything.
+        let round = await ToolRunner(registry: registry).run([call("e", "local_web_search")], context: ToolContext())
+        XCTAssertEqual(round.calls[0].result, #"{"error":"Not available here."}"#)
     }
 
     func testHandoffTool() async throws {

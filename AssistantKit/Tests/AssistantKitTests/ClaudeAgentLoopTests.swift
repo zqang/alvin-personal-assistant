@@ -459,6 +459,27 @@ final class ClaudeAgentLoopTests: XCTestCase {
         XCTAssertEqual(messages[2]["content"]?.arrayValue?.first?["tool_use_id"]?.stringValue, "toolu_call_1_a")
     }
 
+    func testToolNamesAreOnesClaudeAccepts() {
+        XCTAssertEqual(ClaudeRequest.claudeToolName("create_reminder"), "create_reminder")
+        XCTAssertEqual(ClaudeRequest.claudeToolName("get-weather_2"), "get-weather_2")
+        XCTAssertEqual(ClaudeRequest.claudeToolName("set timer"), "set_timer")
+        XCTAssertEqual(ClaudeRequest.claudeToolName("天气.查询"), "_____")
+        XCTAssertEqual(ClaudeRequest.claudeToolName(""), "unknown_tool")
+        XCTAssertEqual(ClaudeRequest.claudeToolName("web_search"), "local_web_search")
+        XCTAssertEqual(ClaudeRequest.claudeToolName("web fetch"), "local_web_fetch")
+        XCTAssertEqual(ClaudeRequest.claudeToolName(String(repeating: "a", count: 70)), String(repeating: "a", count: 64))
+
+        // An on-device call to an undeclared tool replays under that name.
+        let record = ToolCallRecord(id: "call_0", name: "web_search", input: ["query": "news"], result: #"{"error":"Unknown tool"}"#, isError: true)
+        let turns = [
+            ChatTurn(role: .user, text: "News?"),
+            ChatTurn(role: .assistant, text: "I can't look that up here.", toolRounds: [ToolRound(calls: [record])]),
+            ChatTurn(role: .user, text: "Try online"),
+        ]
+        let messages = ClaudeRequest.messages(from: turns)
+        XCTAssertEqual(messages[1]["content"]?.arrayValue?.first?["name"]?.stringValue, "local_web_search")
+    }
+
     // MARK: - Options
 
     private let followUp = [
