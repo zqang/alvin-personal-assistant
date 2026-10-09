@@ -104,8 +104,13 @@ final class LocalModelHost {
     @ObservationIgnored private(set) var draftModel: LoadedModel?
     @ObservationIgnored private var loading: Task<Void, Never>?
     /// A cancelled load that may still be reading weights or checking its engine; the next load
-    /// waits for it, so two models are never resident at once.
+    /// waits for it before downloading.
     @ObservationIgnored private var orphan: Task<Void, Never>?
+    /// Ends once nothing uses the engine `unload()` let go of: its pending check (cancelled),
+    /// the checks, replies and prewarms in progress, and the jobs on its queue. The next load
+    /// waits for it, and for `orphan`, before its memory check, so two models are never resident
+    /// at once.
+    @ObservationIgnored private var retired: Task<Void, Never>?
     @ObservationIgnored private var downloading = false
     /// The settings most recently passed in; a load in progress applies them when it ends.
     @ObservationIgnored private var latest: AssistantSettings?
@@ -141,6 +146,9 @@ final class LocalModelHost {
     @ObservationIgnored private var session: ChatSession?
     @ObservationIgnored private var sessionSystem: String?
     @ObservationIgnored private var sessionTurns: [ChatTurn]?
+    /// Changes whenever the stock session is reset or a stock reply takes it over: a reply keeps
+    /// what it built only if it is still the latest.
+    @ObservationIgnored private var sessionVersion = 0
 
     /// Whether GPU work may start. iOS refuses GPU work from a background app and MLX aborts when
     /// it does, so replies start only in the foreground, and leaving waits for `inFlight`.
@@ -161,7 +169,7 @@ final class LocalModelHost {
         isAllowed: { LocalModelHost.gpuAllowed.withLock { $0 } }
     )
 
-    private static let parameters = GenerateParameters(maxTokens: 1024, temperature: 0.7, topP: 0.8, topK: 20)
+    nonisolated private static let parameters = GenerateParameters(maxTokens: 1024, temperature: 0.7, topP: 0.8, topK: 20)
     private static let numDraftTokens = 4
     /// Room left for the rest of the app after the weights are loaded.
     private static let memoryMargin = 600_000_000
@@ -223,6 +231,7 @@ final class LocalModelHost {
 
     /// Frees the model. A download in progress carries on unless `stopDownload`.
     func unload(stopDownload: Bool = false) {
+        retire()
         engine = nil
         draftModel = nil
         kernelsInstalled = false
@@ -238,8 +247,29 @@ final class LocalModelHost {
         statusText = nil
         if case .failed = status {} else { status = .off }
         // Off the main thread: it waits for the MLX evaluation in progress, such as a stock
-        // reply's prefill, which can't be stopped, and the background handler must not.
+        // reply's prefill chunk, and the background handler must not.
         DispatchQueue.global(qos: .userInitiated).async { Memory.clearCache() }
+    }
+
+    /// Sets `retired` for the loaded engine, which is about to be let go of. Its pending check is
+    /// cancelled; a check, reply or prewarm in progress ends on its own (a reply when it is done
+    /// or the app leaves the screen), and the next load waits for that.
+    private func retire() {
+        guard let engine else { return }
+        let previous = retired
+        let check = pendingCheck
+        check?.cancel()
+        let reset = invalidating
+        retired = Task {
+            await previous?.value
+            await check?.value
+            await waitForChecks()
+            while activeJobs > 0 {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            await reset?.value
+            await engine.waitUntilIdle()
+        }
     }
 
     /// Forgets the cached session, so the next reply processes the whole conversation again.
@@ -247,6 +277,7 @@ final class LocalModelHost {
         session = nil
         sessionSystem = nil
         sessionTurns = nil
+        sessionVersion += 1
         isWarm = false
         if let engine {
             let previous = invalidating
@@ -343,6 +374,8 @@ final class LocalModelHost {
                 })
             }
             downloading = false
+            // An unloaded engine stays in memory until the check or reply still using it ends.
+            await retired?.value
             // The memory an earlier model held (`previous`'s, or one unloaded meanwhile) may still
             // be in MLX's cache, which counts against the app.
             await Task.detached { Memory.clearCache() }.value
@@ -991,25 +1024,27 @@ final class LocalModelHost {
         await prewarmJob?.value
         await engine.waitUntilIdle()
         try Task.checkCancellation()
-        let session: ChatSession
-        if plan.action == .append, let cached = self.session {
-            session = cached
+        // As on the engine path, no text in the conversation becomes a control token.
+        let escaper = SpecialTokenEscaper(renderer: engine.loaded.renderer)
+        let prompt = escaper.escape(LocalSessionPlan.content(of: plan.newTurn))
+        let source: StockSource
+        var speculation: SpeculativeDecodingConfig?
+        if plan.action == .append, let cached = session {
+            source = .session(cached, prompt: prompt)
         } else {
             let history: [ChatTurn]
             if case .rebuild(let turns) = plan.action { history = turns } else { history = [] }
-            // The system prompt goes in as the first history message, which the session reads
-            // once; as `instructions` it would be prefilled again before every turn (F1).
-            session = ChatSession(
-                engine.loaded.container,
-                instructions: nil,
-                history: [.system(system)] + history.map(Self.message),
-                speculativeDecoding: stockSpeculation(),
-                generateParameters: Self.parameters,
-                additionalContext: Self.chatContext
-            )
+            // What a ChatSession built from this history would render. The system prompt goes in
+            // as the first history message, which the session reads once; as `instructions` it
+            // would be prefilled again before every turn (F1).
+            let messages: [Chat.Message] = [.system(system)] + history.map { Self.message($0, escaper: escaper) } + [.user(prompt)]
+            source = .fresh(engine.loaded, messages: messages)
+            speculation = stockSpeculation()
+            session = nil
         }
         // Trusted again only once this reply completes.
-        self.session = session
+        sessionVersion += 1
+        let version = sessionVersion
         sessionSystem = system
         sessionTurns = nil
 
@@ -1019,11 +1054,9 @@ final class LocalModelHost {
         // Generated off the main actor, which the background handler blocks while it waits for
         // `inFlight`: `relay` stops the generation on leaving the foreground and leaves `inFlight`.
         let (items, sink) = AsyncThrowingStream<Generation, Error>.makeStream()
-        let prompt = LocalSessionPlan.content(of: plan.newTurn)
-        let box = StockSessionBox(session: session)
-        async let relayed: Void = LocalModelHost.relay(prompt, to: box, into: sink)
+        async let relayed = LocalModelHost.relay(source, into: sink)
 
-        var stats = LocalGenerationStats(reusedSession: plan.action == .append, engine: "stock")
+        var stats = LocalGenerationStats(reusedSession: source.isCached, engine: "stock")
         var filter = ThinkingFilter()
         var text = ""
         var firstChunk = true
@@ -1064,15 +1097,30 @@ final class LocalModelHost {
         // If the loop stopped early, `relay` stops at its next item. Then wait until generation
         // has really stopped using the GPU and the cache.
         sink.finish()
-        await relayed
+        let outcome = await relayed
         show(filter.finish())
+        stats.promptTime += outcome.prefillTime
         stats.peakMemoryBytes = Memory.peakMemory
 
         if let failure { throw failure }
         try Task.checkCancellation()
         switch stopReason {
         case .stop:
-            if self.session === session {
+            if sessionVersion == version {
+                if let cache = outcome.cache {
+                    // Later turns append to this cache as to the cache of a session built from
+                    // the history. This reply decoded without the draft model, and the session
+                    // gets no draft cache: the draft model starts one at the next turn and drafts
+                    // without the earlier context (fewer drafts accepted, still lossless).
+                    session = ChatSession(
+                        engine.loaded.container,
+                        instructions: nil,
+                        cache: cache,
+                        speculativeDecoding: speculation,
+                        generateParameters: Self.parameters,
+                        additionalContext: Self.chatContext
+                    )
+                }
                 sessionTurns = turns + [ChatTurn(role: .assistant, text: text)]
             }
             emit(.reply(.finished(.completed)))
@@ -1188,12 +1236,13 @@ final class LocalModelHost {
     private static let leftForeground = AssistantError.stream(type: "background", message: "the app left the screen.")
 
     /// Qwen-family chat templates: answer directly, without a reasoning block.
-    private static let chatContext: [String: any Sendable] = ["enable_thinking": false]
+    nonisolated private static let chatContext: [String: any Sendable] = ["enable_thinking": false]
 
-    private static func message(_ turn: ChatTurn) -> Chat.Message {
+    /// A history turn as the stock session reads it, its text escaped as `TurnRenderer` escapes it.
+    private static func message(_ turn: ChatTurn, escaper: SpecialTokenEscaper) -> Chat.Message {
         switch turn.role {
-        case .user: return .user(LocalSessionPlan.content(of: turn))
-        case .assistant: return .assistant(turn.text)
+        case .user: return .user(escaper.escape(LocalSessionPlan.content(of: turn)))
+        case .assistant: return .assistant(escaper.escape(turn.text))
         }
     }
 
@@ -1266,29 +1315,95 @@ final class LocalModelHost {
         return true
     }
 
-    /// Generates the stock session's reply to `prompt` off the main actor, passing it on to
-    /// `sink`, and stops it at the first item after the app stopped being active (or once
-    /// cancelled, or once `sink` is finished). Then waits until generation has really stopped
-    /// using the GPU and the cache, and leaves `inFlight`, which the caller entered.
-    /// ChatSession's prefill can't be stopped: generation stops at its first token.
+    /// Generates a stock reply off the main actor, passing it on to `sink`, and stops it at the
+    /// first item or prefill chunk after the app stopped being active (or once cancelled, or once
+    /// `sink` is finished). Then waits until generation has really stopped using the GPU and the
+    /// cache, and leaves `inFlight`, which the caller entered.
+    ///
+    /// A cached session answers through `ChatSession`; only the new turn is prefilled there, which
+    /// can't be stopped. A fresh or rebuilt session prefills the whole conversation, so its first
+    /// reply is generated by `generateFresh` instead, whose prefill can be.
     nonisolated private static func relay(
-        _ prompt: String,
-        to box: StockSessionBox,
+        _ source: StockSource,
         into sink: AsyncThrowingStream<Generation, Error>.Continuation
-    ) async {
-        do {
-            // The loop holds the only reference to the session's stream: leaving it drops the
-            // stream, which stops the generation.
-            for try await item in box.session.streamDetails(to: prompt) {
-                guard !Task.isCancelled, gpuAllowed.withLock({ $0 }) else { break }
-                if case .terminated = sink.yield(item) { break }
+    ) async -> StockRelayResult {
+        var result = StockRelayResult()
+        switch source {
+        case .session(let session, let prompt):
+            do {
+                // The loop holds the only reference to the session's stream: leaving it drops the
+                // stream, which stops the generation.
+                for try await item in session.streamDetails(to: prompt) {
+                    guard pass(item, to: sink) else { break }
+                }
+                sink.finish()
+            } catch {
+                sink.finish(throwing: error)
             }
-            sink.finish()
-        } catch {
-            sink.finish(throwing: error)
+            await session.synchronize()
+        case .fresh(let loaded, let messages):
+            do {
+                result = try await generateFresh(messages, with: loaded, into: sink)
+                sink.finish()
+            } catch {
+                sink.finish(throwing: error)
+            }
+            // Whatever ended it, no work of this reply may still be on the GPU.
+            Stream().synchronize()
         }
-        await box.session.synchronize()
         inFlight.leave()
+        return result
+    }
+
+    /// Passes `item` on to `sink`; false once generation should stop instead.
+    nonisolated private static func pass(_ item: Generation, to sink: AsyncThrowingStream<Generation, Error>.Continuation) -> Bool {
+        guard !Task.isCancelled, gpuAllowed.withLock({ $0 }) else { return false }
+        if case .terminated = sink.yield(item) { return false }
+        return true
+    }
+
+    /// The first reply of a fresh or rebuilt stock session, generated as a `ChatSession` built
+    /// from `messages` (system prompt, history, new user turn) would: the same rendering and the
+    /// same `TokenIterator`. All but the last prompt token are prefilled first in `StockPrefill`'s
+    /// chunks, which stop once the app stops being active; the iterator starts from that token.
+    /// The cache then holds what that session's cache would, and is returned with the prefill's
+    /// seconds. Returns no cache when the prefill was stopped.
+    nonisolated private static func generateFresh(
+        _ messages: [Chat.Message],
+        with loaded: LoadedModel,
+        into sink: AsyncThrowingStream<Generation, Error>.Continuation
+    ) async throws -> StockRelayResult {
+        let container = loaded.container
+        let processor = await container.processor
+        let input = try await processor.prepare(input: UserInput(
+            chat: messages, processing: .init(resize: CGSize(width: 512, height: 512)), tools: nil,
+            additionalContext: chatContext))
+        let tokens = input.text.tokens
+        let count = tokens.size
+        guard count > 0 else { throw AssistantError.invalidResponse("There's no question to answer.") }
+        let started = ContinuousClock.now
+        let cache: [KVCache]
+        do {
+            cache = try StockPrefill.run(tokens[..<(count - 1)], model: loaded.model, parameters: parameters) {
+                !Task.isCancelled && gpuAllowed.withLock { $0 }
+            }
+        } catch EngineError.leftForeground {
+            return StockRelayResult()
+        }
+        let prefillTime = seconds(started.duration(to: .now))
+        // `parameters` has no penalties, whose processor would see only this token of the prompt.
+        let iterator = try TokenIterator(
+            input: LMInput(tokens: tokens[(count - 1)...]), model: loaded.model, cache: cache, parameters: parameters)
+        let (items, generation) = MLXLMCommon.generateTask(
+            promptTokenCount: count, modelConfiguration: await container.configuration,
+            tokenizer: await container.tokenizer, iterator: iterator, tools: nil)
+        for await item in items {
+            guard pass(item, to: sink) else { break }
+        }
+        // Stops a generation left early, and waits until it no longer uses the cache.
+        generation.cancel()
+        await generation.value
+        return StockRelayResult(cache: cache, prefillTime: prefillTime)
     }
 
     /// Blocks until the running reply stops, so no GPU work is left when iOS takes the GPU away.
@@ -1320,10 +1435,24 @@ private final class ReportBox: @unchecked Sendable {
     }
 }
 
-/// The stock session of a reply, handed to the task that generates with it (`relay`); nothing
-/// else uses it until that task ends.
-private struct StockSessionBox: @unchecked Sendable {
-    let session: ChatSession
+/// What a stock reply generates from, handed to the task that generates it (`relay`); nothing
+/// else uses it until that task ends: the cached session and the new turn's text, or the
+/// loaded model and the whole conversation for a fresh or rebuilt session.
+private enum StockSource: @unchecked Sendable {
+    case session(ChatSession, prompt: String)
+    case fresh(LoadedModel, messages: [Chat.Message])
+
+    var isCached: Bool {
+        if case .session = self { return true }
+        return false
+    }
+}
+
+/// What `relay` hands back: a fresh session's cache once its reply has been generated (the
+/// caller keeps it only if the reply completed), and how long its prefill took.
+private struct StockRelayResult: @unchecked Sendable {
+    var cache: [KVCache]?
+    var prefillTime: TimeInterval = 0
 }
 
 /// Engine extensions handed to the engine queue. They are prepared and used there only.
