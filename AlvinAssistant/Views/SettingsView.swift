@@ -22,7 +22,9 @@ struct SettingsView: View {
             Form {
                 aboutYouSection
                 modelSection
+                assistantSections
                 voiceSection
+                VoiceLatencySection(store: store)
                 conversationSection
                 infoSection
             }
@@ -39,12 +41,15 @@ struct SettingsView: View {
             compatibleKey = store.secret(.compatible)
             openAIKey = store.secret(.openAI)
         }
-        .onChange(of: store.settings) { store.save() }
+        .onChange(of: store.settings) {
+            store.save()
+            // A different model, draft model or kernel setting unloads the model; the engine's
+            // other options change on the running engine.
+            LocalModelHost.shared.apply(store.settings)
+        }
         .onChange(of: anthropicKey) { store.setSecret(anthropicKey, for: .anthropic) }
         .onChange(of: compatibleKey) { store.setSecret(compatibleKey, for: .compatible) }
         .onChange(of: openAIKey) { store.setSecret(openAIKey, for: .openAI) }
-        .onChange(of: store.settings.localModelID) { LocalModelHost.shared.unload(stopDownload: true) }
-        .onChange(of: store.settings.localSpeculativeDecoding) { LocalModelHost.shared.unload(stopDownload: true) }
         .onChange(of: store.settings.usesQwenListening) {
             if store.settings.usesQwenListening { QwenListener.shared.load() } else { QwenListener.shared.unload(stopDownload: true) }
         }
@@ -87,7 +92,7 @@ struct SettingsView: View {
                     }
                 }
                 LabeledContent("Model ID") {
-                    TextField("claude-opus-5", text: $store.settings.claudeModel)
+                    TextField(ClaudeModelCatalog.defaultModelID, text: $store.settings.claudeModel)
                         .multilineTextAlignment(.trailing)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -133,6 +138,8 @@ struct SettingsView: View {
         }
     }
 
+    /// The on-device model to download and load. Speculative decoding, the self-test and the
+    /// benchmark are in the on-device engine section.
     @ViewBuilder
     private var onDeviceRows: some View {
         let option = LocalModelCatalog.option(for: store.settings.localModelID)
@@ -146,17 +153,54 @@ struct SettingsView: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
-        Toggle("Speculative decoding", isOn: $store.settings.localSpeculativeDecoding)
-            .disabled(option?.supportsSpeculativeDecoding != true)
         Text(localStatus)
             .font(.footnote)
             .foregroundStyle(.secondary)
         if LocalModelHost.shared.status == .off || isLocalFailure {
             Button("Download and load now") { LocalModelHost.shared.prepare(store.settings) }
         }
-        NavigationLink("Benchmark") {
-            LocalBenchmarkView(store: store)
+    }
+
+    /// Routing, the on-device model and engine, tools and deep mode, for the providers that have
+    /// them.
+    @ViewBuilder
+    private var assistantSections: some View {
+        if store.settings.provider == .anthropic {
+            RoutingSettingsSection(store: store)
         }
+        if routesAutomatically {
+            onDeviceModelSection
+        }
+        if usesOnDeviceModel {
+            OnDeviceEngineSection(store: store)
+        }
+        if store.settings.provider != .openAICompatible {
+            ToolsSettingsSection(store: store)
+        }
+        if store.settings.provider == .anthropic {
+            DeepSettingsSection(store: store)
+        }
+    }
+
+    /// The on-device model for automatic routing, which answers when Claude can't or shouldn't.
+    private var onDeviceModelSection: some View {
+        Section {
+            onDeviceRows
+        } header: {
+            Text("On-device model")
+        } footer: {
+            Text("Answers when you're offline, and the requests routing keeps on this iPhone. It downloads over Wi-Fi only; until it's downloaded, Claude answers everything.")
+        }
+    }
+
+    /// Automatic routing is on, with Claude as the provider.
+    private var routesAutomatically: Bool {
+        store.settings.provider == .anthropic && store.settings.routingMode == .automatic
+    }
+
+    /// The on-device model answers some or all replies.
+    private var usesOnDeviceModel: Bool {
+        store.settings.provider == .onDevice || routesAutomatically
     }
 
     private var voiceSection: some View {
@@ -271,15 +315,15 @@ struct SettingsView: View {
 
     private var localStatus: String {
         let host = LocalModelHost.shared
-        let speculation = LocalModelCatalog.option(for: store.settings.localModelID)?.supportsSpeculativeDecoding == true
-            ? "" : " Speculative decoding needs a model with a draft model; this one's hybrid attention can't roll back rejected drafts."
         switch host.status {
         case .off:
-            return "Downloads and loads the first time you use it." + speculation
+            return host.isDownloaded(store.settings.localModelID)
+                ? "Downloaded. Loads when it's first needed."
+                : "Downloads and loads the first time you use it."
         case .loading(let progress):
             return progress < 1 ? "Downloading over Wi-Fi… \(Int(progress * 100))%. Keep the app open." : "Loading…"
         case .ready:
-            return "Ready. Speculative decoding: \(host.speculation)."
+            return "Ready."
         case .failed(let message):
             return message
         }
