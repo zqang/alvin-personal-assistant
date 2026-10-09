@@ -15,6 +15,8 @@ final class ChatController {
     /// The last route of each reply this controller streamed, by message id, for the "On device"
     /// badge. Only replies streamed while this chat is open have one.
     private(set) var routes: [UUID: RouteDecision] = [:]
+    /// Replies this controller streamed for a "Think deeper" request, so a retry asks again.
+    @ObservationIgnored private var deepReplies: Set<UUID> = []
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var cachedPipeline: (store: SettingsStore, pipeline: any ReplyPipeline)?
 
@@ -45,10 +47,15 @@ final class ChatController {
 
     /// Answers again after a failed reply. A failed reply that ran tool rounds stays, as an
     /// interrupted reply without text: its actions happened, so the history keeps them. Any other
-    /// failed reply is removed.
+    /// failed reply is removed. A reply that asked for deep mode, or was routed to it, asks again;
+    /// the router still checks the budget and the connection. Does nothing when `canRetry` is
+    /// false.
     func retry(_ failed: ChatMessage, in conversation: Conversation, store: SettingsStore) {
-        guard !isResponding else { return }
+        guard !isResponding, canRetry(failed) else { return }
+        let deep = deepReplies.contains(failed.id) || routes[failed.id]?.mode == .deep
+        deepReplies.remove(failed.id)
         if failed.toolRounds.isEmpty {
+            routes[failed.id] = nil
             conversation.remove(failed)
         } else {
             // Its partial text never counted in the history (a failed reply's text doesn't), so
@@ -57,7 +64,28 @@ final class ChatController {
             failed.status = .interrupted
             failed.errorText = nil
         }
-        respond(in: conversation, store: store, deep: false)
+        respond(in: conversation, store: store, deep: deep)
+    }
+
+    /// Whether `failed` may be answered again: not when it called a tool that acts, such as
+    /// adding a reminder, an event or a timer. The retry's request ends at the user's message
+    /// without the reply's rounds (`PromptBuilder` drops a trailing reply), so the model would
+    /// act a second time. Tools that only read may run again.
+    func canRetry(_ failed: ChatMessage) -> Bool {
+        let rounds = failed.toolRounds
+        guard !rounds.isEmpty else { return true }
+        let repeatable = Self.repeatableToolNames
+        return rounds.allSatisfy { round in
+            round.calls.allSatisfy { repeatable.contains($0.name) }
+        }
+    }
+
+    /// The tools that change nothing outside the conversation. A name the app doesn't know
+    /// counts as one that acts.
+    private static var repeatableToolNames: Set<String> {
+        var names = Set(DeviceTools.allTools.filter { $0.effect == .readOnly }.map(\.definition.name))
+        names.insert(HandoffTool.name)
+        return names
     }
 
     func stop() {
@@ -82,6 +110,9 @@ final class ChatController {
         let stream = pipeline(for: store).stream(ReplyRequest(conversation: conversation, inputIsVoice: false, deep: deep))
         let reply = ChatMessage(role: .assistant, text: "", isVoice: false, status: .streaming)
         conversation.append(reply)
+        if deep {
+            deepReplies.insert(reply.id)
+        }
         isResponding = true
         activity = nil
         routedEngine = nil

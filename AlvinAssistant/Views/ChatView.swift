@@ -27,6 +27,8 @@ struct ChatView: View {
                             message: message,
                             activity: message.status == .streaming ? controller.activity : nil,
                             routedEngine: controller.engine(for: message),
+                            // Only a failed reply offers Retry; this reads its tool rounds.
+                            canRetry: message.status != .failed || controller.canRetry(message),
                             onRetry: { controller.retry(message, in: conversation, store: store) }
                         )
                         .id(message.id)
@@ -173,6 +175,9 @@ struct MessageRow: View {
     var activity: String?
     /// The engine that answered, when known; "On device" shows for the on-device model.
     var routedEngine: ReplyEngine? = nil
+    /// False for a failed reply that called a tool that acts (a reminder, an event, a timer):
+    /// answering again would repeat the action, so it offers no Retry.
+    var canRetry: Bool = true
     var onRetry: () -> Void
 
     var body: some View {
@@ -229,8 +234,14 @@ struct MessageRow: View {
                 }
                 Label(message.errorText ?? "Something went wrong.", systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.red)
-                Button("Retry") { onRetry() }
-                    .buttonStyle(.bordered)
+                if canRetry {
+                    Button("Retry") { onRetry() }
+                        .buttonStyle(.bordered)
+                } else {
+                    Text("Retrying would repeat the actions above. Send a message to carry on.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             default:
                 if !message.text.isEmpty {
                     MarkdownText(message.text)

@@ -260,7 +260,10 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
 
 /// Measures a reply's time to first text for `LatencyEstimator`: from the latest `.routed` event
 /// (the route, or a fallback's) to the first non-empty text. A reply that loaded the on-device
-/// model first or ran tools before its text measures that, not the engine, so it gives no sample.
+/// model first, or called a tool before its text, measures that, not the engine, so it gives no
+/// sample. Tools include Claude's web search and web fetch, which run on the server and give no
+/// `.toolRound`, only the `.lookingUp` cue: a weather or news reply's search would otherwise read
+/// as a slow cloud and send simple requests on device (`RouteDecider`'s slow-cloud rule).
 struct FirstTextTap {
     private var route: RouteDecision?
     private var since = ContinuousClock.now
@@ -273,7 +276,10 @@ struct FirstTextTap {
             route = decision
             since = now
             counts = true
-        case .cue(.loadingModel), .toolRound:
+        case .cue(.loadingModel), .cue(.lookingUp), .progress(.toolCallStarted), .toolRound:
+            // `.toolCallStarted` marks a client tool call (Claude's or the on-device model's)
+            // before its round finishes; `.lookingUp` a server tool. A handoff's `.toolCallStarted`
+            // doesn't cost the cloud its sample: the cloud's `.routed` comes after it.
             counts = false
         case .reply(.text(let text)) where !text.isEmpty:
             guard !done else { return nil }
