@@ -19,6 +19,7 @@ protocol ReplyObservingDrafter: AnyObject {
 ///   (written to a temporary file, then moved into place).
 ///
 /// The corpus holds token ids, so `url` must be specific to one tokenizer (one model family).
+/// It holds conversation text, so deleting a conversation erases it (`eraseAllCorpora`).
 public final class SuffixDrafter: Drafter, ReplyObservingDrafter {
     public var source: DraftSource { .corpus }
     public var costPerToken: Double { 0 }
@@ -58,6 +59,22 @@ public final class SuffixDrafter: Drafter, ReplyObservingDrafter {
     /// Blocks until every queued load, change and save has finished (tests, shutdown).
     public func waitForBackgroundWork() {
         store.waitUntilIdle()
+    }
+
+    /// Erases every drafting corpus: empties the corpus of every `SuffixDrafter` in the process
+    /// and deletes its file (once the changes queued before it are done), and deletes every
+    /// other corpus file in `directory` (named `corpus-*.bin`, as the app names them). For when
+    /// a conversation is deleted: the corpora hold past replies and tool results, which may be
+    /// its own. Returns without waiting for the drafters' queues.
+    public static func eraseAllCorpora(savedIn directory: URL) {
+        for store in SuffixCorpusStore.liveStores() {
+            store.erase()
+        }
+        let fileManager = FileManager.default
+        let files = (try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        for file in files where file.lastPathComponent.hasPrefix("corpus-") && file.pathExtension == "bin" {
+            SuffixCorpusStore.remove(file)
+        }
     }
 
     public func reset(ledger: [Int], request: EngineRequest) {
@@ -118,6 +135,60 @@ final class SuffixCorpusStore: @unchecked Sendable {
     init(url: URL?, capacityTokens: Int) {
         self.url = url
         self.capacityTokens = max(1, capacityTokens)
+        Self.registry.add(self)
+    }
+
+    /// Every store alive in the process, for `SuffixDrafter.eraseAllCorpora(savedIn:)`.
+    private static let registry = Registry()
+
+    static func liveStores() -> [SuffixCorpusStore] {
+        registry.stores()
+    }
+
+    /// Queues emptying the corpus and deleting its file, after the loads, changes and saves
+    /// queued before.
+    func erase() {
+        queue.async {
+            self.lock.lock()
+            self.corpus = SuffixCorpus(capacityTokens: self.capacityTokens)
+            self.lock.unlock()
+            if let url = self.url {
+                Self.remove(url)
+            }
+        }
+    }
+
+    /// Deletes the corpus file at `url`, if there is one.
+    static func remove(_ url: URL) {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: url.path) else { return }
+        do {
+            try fileManager.removeItem(at: url)
+        } catch {
+            print("LocalEngine: couldn't delete the drafting corpus: \(error)")
+        }
+    }
+
+    /// Weak references to the live stores.
+    private final class Registry: @unchecked Sendable {
+        private struct Entry {
+            weak var store: SuffixCorpusStore?
+        }
+
+        private let lock = NSLock()
+        private var entries: [Entry] = []
+
+        func add(_ store: SuffixCorpusStore) {
+            lock.lock()
+            defer { lock.unlock() }
+            entries = entries.filter { $0.store != nil } + [Entry(store: store)]
+        }
+
+        func stores() -> [SuffixCorpusStore] {
+            lock.lock()
+            defer { lock.unlock() }
+            return entries.compactMap(\.store)
+        }
     }
 
     var current: SuffixCorpus? {

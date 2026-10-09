@@ -15,9 +15,22 @@ public protocol ChatTemplateRendering: Sendable {
     /// The id of `token` when it is a single entry of the vocabulary, else nil (never the
     /// unknown token's id).
     func tokenID(_ token: String) -> Int?
+    /// The strings encoded as one added token wherever they appear in text, such as
+    /// `<|im_start|>` and `<tool_call>`. Defaults to the `AddedTokens.chatFormat` entries of the
+    /// vocabulary.
+    var addedTokenLiterals: [String] { get }
 }
 
 extension ChatTemplateRendering {
+    public var addedTokenLiterals: [String] {
+        chatFormatTokenLiterals
+    }
+
+    /// The `AddedTokens.chatFormat` entries that are single entries of the vocabulary.
+    var chatFormatTokenLiterals: [String] {
+        AddedTokens.chatFormat.filter { tokenID($0) != nil }
+    }
+
     /// The tokens that end a reply: the configuration's EOS ids, the tokenizer's EOS token, and
     /// `<|im_end|>` and `<|endoftext|>` when the vocabulary has them.
     public func stopTokenIDs(eosTokenIds: Set<Int>, eosToken: String?) -> Set<Int> {

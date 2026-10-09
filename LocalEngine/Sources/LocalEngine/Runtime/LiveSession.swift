@@ -81,14 +81,22 @@ public final class LiveSession {
     /// Feeds known tokens without computing logits, in chunks, leaving the cache lazy (each
     /// chunk is evaluated asynchronously).
     public func feedCacheOnly(_ tokens: [Int]) {
+        _ = feedCacheOnly(tokens, isAllowed: { true })
+    }
+
+    /// `feedCacheOnly`, checking `isAllowed` before every chunk. False once it is refused: the
+    /// chunks fed so far are in the cache and the ledger.
+    private func feedCacheOnly(_ tokens: [Int], isAllowed: () -> Bool) -> Bool {
         var start = 0
         let chunk = max(1, prefillChunk)
         while start < tokens.count {
+            guard isAllowed() else { return false }
             let end = min(start + chunk, tokens.count)
             feed(Array(tokens[start ..< end]), rows: .none)
             asyncEval(target.cache)
             start = end
         }
+        return true
     }
 
     // MARK: Rolling back
@@ -110,16 +118,28 @@ public final class LiveSession {
     /// hybrid caches restore the deepest checkpoint ≤ `position` (or start empty) and re-feed
     /// the ledger from there, cache-only. Checkpoints above the restored point are dropped.
     public func rewind(to position: Int) {
+        _ = rewind(to: position, refeedingWhile: { true })
+    }
+
+    /// `rewind(to:)`, checking `isAllowed` before every chunk it re-feeds (plan §4.11). Throws
+    /// `PrefillInterrupted` once it is refused: the ledger then ends between the restored
+    /// checkpoint and `position`, and holds exactly what the cache holds.
+    func rewind(to position: Int, isAllowed: () -> Bool) throws {
+        guard rewind(to: position, refeedingWhile: isAllowed) else { throw PrefillInterrupted() }
+    }
+
+    /// The rewind; false if a chunk of its re-feed was refused.
+    private func rewind(to position: Int, refeedingWhile isAllowed: () -> Bool) -> Bool {
         precondition(pendingCount == 0, "Resolve the pending tokens before rewinding.")
         precondition(position >= 0 && position <= ledger.count, "Can't rewind to \(position) of \(ledger.count).")
-        guard position < ledger.count else { return }
+        guard position < ledger.count else { return true }
         precondition(reusable, "This cache can't be rewound exactly.")
 
         if !layout.isHybrid {
             EngineCacheOps.trimAttention(target.cache, layout: layout, by: ledger.count - position)
             ledger.removeLast(ledger.count - position)
             checkpoints.drop(above: position)
-            return
+            return true
         }
 
         let mark: Int
@@ -133,15 +153,31 @@ public final class LiveSession {
         let refeed = Array(ledger[mark ..< position])
         ledger.removeLast(ledger.count - mark)
         checkpoints.drop(above: mark)
-        if !refeed.isEmpty {
-            feedCacheOnly(refeed)
-        }
+        return feedCacheOnly(refeed, isAllowed: isAllowed)
     }
 
     /// Records a checkpoint at the end of the ledger.
     public func checkpoint(_ label: CheckpointMark) {
         precondition(pendingCount == 0, "Resolve the pending tokens before a checkpoint.")
         checkpoints.record(label, EngineCacheOps.snapshot(target.cache, layout: layout, position: ledger.count))
+    }
+
+    /// Holds a checkpoint at the end of the ledger under no mark until `releaseResumePoint()`
+    /// (or a rewind below it, or `reset`): the start of a prefill. A prefill interrupted part-way
+    /// leaves the cache past it, and the next plan rewinds to it; restoring it spares re-feeding
+    /// from the checkpoint before (for an appended turn, the whole previous reply). Reuses a
+    /// checkpoint already there. Pure-attention caches trim instead, so they hold none.
+    public func holdResumePoint() {
+        precondition(pendingCount == 0, "Resolve the pending tokens before a checkpoint.")
+        guard layout.isHybrid else { return }
+        let position = ledger.count
+        let existing = checkpoints.deepest(atOrBelow: position).flatMap { $0.position == position ? $0 : nil }
+        checkpoints.holdResume(existing ?? EngineCacheOps.snapshot(target.cache, layout: layout, position: position))
+    }
+
+    /// Lets go of the checkpoint `holdResumePoint()` held (its prefill completed).
+    public func releaseResumePoint() {
+        checkpoints.releaseResume()
     }
 
     /// Bytes one checkpoint of the current cache would hold.
