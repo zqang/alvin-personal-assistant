@@ -142,7 +142,14 @@ final class SessionRuntime {
         switch plan.base {
         case .keep(let position):
             let position = min(position, session.ledger.count)
-            session.rewind(to: position)
+            do {
+                try session.rewind(to: position, isAllowed: isAllowed)
+            } catch let interrupted as PrefillInterrupted {
+                // The re-feed stopped short of `position`: keep the deepest cut of the
+                // conversation the ledger still holds.
+                session.snapshot = Self.snapshot(of: live, describingAtMost: session.ledger.count, key: key)
+                throw interrupted
+            }
             systemEnd = min(live?.systemEnd ?? 0, position)
             reused = position
         case .persistedPrefix:
@@ -200,14 +207,23 @@ final class SessionRuntime {
             marks.append((.lastUserStart, userStart))
         }
 
+        // An interrupted prefill keeps what the cache still holds reusable: the base, which the
+        // next plan rewinds to. Hold the state there until the prefill completes, so that rewind
+        // doesn't re-feed from an earlier checkpoint.
+        let resumable = Self.snapshot(of: live, base: base, kept: start, key: key, systemEnd: systemEnd)
+        if resumable != nil {
+            session.holdResumePoint()
+        }
         let logits: MLXArray
         do {
             logits = try prefill(tokens, marks: marks, isAllowed: isAllowed)
         } catch is PrefillInterrupted {
-            // Keep what the cache still holds reusable: the base, which the next plan rewinds to.
-            session.snapshot = Self.snapshot(of: live, base: base, kept: start, key: key, systemEnd: systemEnd)
+            // Checkpoints taken past the start are stale: no plan keeps more than `resumable`.
+            session.checkpoints.drop(above: start)
+            session.snapshot = resumable
             throw PrefillInterrupted()
         }
+        session.releaseResumePoint()
         phases.prefill = lap()
 
         session.snapshot = SessionSnapshot.afterPrefill(
@@ -245,6 +261,22 @@ final class SessionRuntime {
         }
     }
 
+    /// The deepest cut of `live` (`snapshot(of:base:kept:...)` with a `.keep` base) that describes
+    /// at most `limit` tokens: what stays reusable after a rewind stopped short. Nil if none does.
+    static func snapshot(of live: SessionSnapshot?, describingAtMost limit: Int, key: String) -> SessionSnapshot? {
+        guard let live else { return nil }
+        var cuts = [live.tokenCount, live.systemEnd]
+        if let index = live.newestUserTurnIndex {
+            cuts += [live.turns[index].replyStart, live.turns[index].start].compactMap { $0 }
+        }
+        for kept in cuts.filter({ $0 <= limit }).sorted(by: >) {
+            if let cut = snapshot(of: live, base: .keep(kept), kept: kept, key: key, systemEnd: live.systemEnd) {
+                return cut
+            }
+        }
+        return nil
+    }
+
     /// Renders `[system] + window` (+ `extra`, the reply in progress) into an empty cache. The
     /// session then holds no reusable snapshot.
     private func prepareFullRender(_ request: EngineRequest, extra: ChatTurn?, reason: String, isAllowed: () -> Bool) throws -> Prepared {
@@ -277,7 +309,7 @@ final class SessionRuntime {
             guard let last = session.ledger.last else {
                 throw EngineError.renderFailed("nothing to prefill")
             }
-            session.rewind(to: session.ledger.count - 1)
+            try session.rewind(to: session.ledger.count - 1, isAllowed: isAllowed)
             tokens = [last]
         }
         guard let logits = try Prefill.run(

@@ -3,8 +3,8 @@ import Foundation
 import MLX
 import MLXLMCommon
 
-/// Thrown when the GPU stopped being allowed in the middle of a prefill. The ledger is still
-/// exact (it holds every chunk that was fed).
+/// Thrown when the GPU stopped being allowed in the middle of a prefill, or of the re-feed of a
+/// rewind before it. The ledger is still exact (it holds every chunk that was fed).
 struct PrefillInterrupted: Error {}
 
 /// Feeds prompt tokens into a live session (plan §4.6).

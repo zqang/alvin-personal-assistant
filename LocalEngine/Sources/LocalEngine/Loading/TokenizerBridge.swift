@@ -8,7 +8,7 @@ public struct TransformersTokenizerLoader: MLXLMCommon.TokenizerLoader {
     public init() {}
 
     public func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
-        TokenizerBridge(upstream: try await AutoTokenizer.from(modelFolder: directory))
+        TokenizerBridge(upstream: try await AutoTokenizer.from(modelFolder: directory), addedTokens: AddedTokens.read(from: directory))
     }
 }
 
@@ -16,9 +16,13 @@ public struct TransformersTokenizerLoader: MLXLMCommon.TokenizerLoader {
 /// raw-token access the engine needs (`ChatTemplateRendering`).
 public struct TokenizerBridge: MLXLMCommon.Tokenizer, ChatTemplateRendering {
     public let upstream: any Tokenizers.Tokenizer
+    /// The added tokens of the tokenizer's files (`AddedTokens.read(from:)`), when known:
+    /// swift-transformers keeps its own list private.
+    public let addedTokens: [String]?
 
-    public init(upstream: any Tokenizers.Tokenizer) {
+    public init(upstream: any Tokenizers.Tokenizer, addedTokens: [String]? = nil) {
         self.upstream = upstream
+        self.addedTokens = addedTokens
     }
 
     // MARK: MLXLMCommon.Tokenizer
@@ -87,5 +91,10 @@ public struct TokenizerBridge: MLXLMCommon.Tokenizer, ChatTemplateRendering {
             return nil
         }
         return id
+    }
+
+    /// The files' added tokens and the chat-format tokens of the vocabulary.
+    public var addedTokenLiterals: [String] {
+        Set(chatFormatTokenLiterals).union(addedTokens ?? []).sorted()
     }
 }

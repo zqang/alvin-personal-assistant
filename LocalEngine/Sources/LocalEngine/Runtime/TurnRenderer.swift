@@ -19,7 +19,8 @@ import MLXLMCommon
 /// Chat turns become messages with `DefaultMessageGenerator`: a user turn's content is its
 /// context tag and text (`LocalSessionPlan.content(of:)`); an assistant turn with tool rounds is
 /// `assistant("", tool_calls:)` plus one `tool` message per call for each round, then
-/// `assistant(text)` if it has text.
+/// `assistant(text)` if it has text. All of that text goes through `escaper` first, so no text in
+/// the conversation becomes a control token (the system prompt and tools are the app's own).
 public struct TurnRenderer {
     public static let turnStartToken = "<|im_start|>"
     public static let turnEndToken = "<|im_end|>"
@@ -29,6 +30,8 @@ public struct TurnRenderer {
     /// The ids of `<|im_start|>` and `<|im_end|>`.
     public let turnStart: Int
     public let turnEnd: Int
+    /// Escapes `renderer`'s added-token literals in the conversation's text.
+    public let escaper: SpecialTokenEscaper
 
     /// Throws `EngineError.notChatML` when the vocabulary has no ChatML turn markers.
     public init(renderer: any ChatTemplateRendering, chatContext: [String: Bool]) throws {
@@ -39,33 +42,41 @@ public struct TurnRenderer {
         self.context = JSONBridge.context(chatContext)
         self.turnStart = start
         self.turnEnd = end
+        self.escaper = SpecialTokenEscaper(renderer: renderer)
     }
 
     // MARK: Messages
 
-    /// The chat-template messages of `turns`.
-    public static func messages(_ turns: [ChatTurn]) -> [Chat.Message] {
+    /// The chat-template messages of `turns`, escaped with `escaper`.
+    public func messages(_ turns: [ChatTurn]) -> [Chat.Message] {
+        Self.messages(turns, escaper: escaper)
+    }
+
+    /// The chat-template messages of `turns`, every text escaped with `escaper`.
+    public static func messages(_ turns: [ChatTurn], escaper: SpecialTokenEscaper) -> [Chat.Message] {
         var messages: [Chat.Message] = []
         for turn in turns {
             switch turn.role {
             case .user:
-                messages.append(.user(LocalSessionPlan.content(of: turn)))
+                messages.append(.user(escaper.escape(LocalSessionPlan.content(of: turn))))
             case .assistant:
                 for round in turn.toolRounds where !round.calls.isEmpty {
-                    messages += roundMessages(content: "", round: round)
+                    messages += roundMessages(content: "", round: round, escaper: escaper)
                 }
                 if !turn.text.isEmpty || turn.toolRounds.allSatisfy({ $0.calls.isEmpty }) {
-                    messages.append(.assistant(turn.text))
+                    messages.append(.assistant(escaper.escape(turn.text)))
                 }
             }
         }
         return messages
     }
 
-    /// `assistant(content, tool_calls:)` and the round's `tool` result messages.
-    public static func roundMessages(content: String, round: ToolRound) -> [Chat.Message] {
-        [.assistant(content, toolCalls: round.calls.map(JSONBridge.toolCall))]
-            + round.calls.map { Chat.Message.tool($0.result, id: $0.id) }
+    /// `assistant(content, tool_calls:)` and the round's `tool` result messages. The calls and
+    /// results are escaped with `escaper`; `content` is the renderer's own (empty, or the sentinel).
+    public static func roundMessages(content: String, round: ToolRound, escaper: SpecialTokenEscaper) -> [Chat.Message] {
+        let calls = round.calls.map { escaper.escape($0) }
+        return [.assistant(content, toolCalls: calls.map(JSONBridge.toolCall))]
+            + calls.map { Chat.Message.tool($0.result, id: $0.id) }
     }
 
     /// Raw template messages (`[[String: any Sendable]]`) for `system` + `messages`.
@@ -85,7 +96,7 @@ public struct TurnRenderer {
 
     /// `[system] + turns` with the generation prompt.
     public func fullRender(system: String, tools: [ToolDefinition], turns: [ChatTurn]) throws -> [Int] {
-        try render(Self.raw(system: system, Self.messages(turns)), tools: tools, generationPrompt: true)
+        try render(Self.raw(system: system, messages(turns)), tools: tools, generationPrompt: true)
     }
 
     /// `fullRender` minus `ledgerPrefix`, the system prefix the ledger holds (the whole render
@@ -101,21 +112,21 @@ public struct TurnRenderer {
     /// The sentinel delta that follows a cached reply with `turns`; it starts with
     /// `<|im_end|>` and ends with the generation prompt.
     public func continuation(system: String, tools: [ToolDefinition], turns: [ChatTurn]) throws -> [Int] {
-        let messages: [Chat.Message] = [.user(TurnDelta.userSentinel), .assistant(TurnDelta.assistantSentinel)] + Self.messages(turns)
-        return try delta(Self.raw(system: system, messages), tools: tools)
+        let sentinelMessages: [Chat.Message] = [.user(TurnDelta.userSentinel), .assistant(TurnDelta.assistantSentinel)] + messages(turns)
+        return try delta(Self.raw(system: system, sentinelMessages), tools: tools)
     }
 
     /// The sentinel delta that follows a reply that ended with `round`'s tool calls: the turn
     /// end, the tool results and the generation prompt.
     public func toolRoundContinuation(system: String, tools: [ToolDefinition], round: ToolRound) throws -> [Int] {
         let messages: [Chat.Message] = [.user(TurnDelta.userSentinel)]
-            + Self.roundMessages(content: TurnDelta.assistantSentinel, round: round)
+            + Self.roundMessages(content: TurnDelta.assistantSentinel, round: round, escaper: escaper)
         return try delta(Self.raw(system: system, messages), tools: tools)
     }
 
-    /// A replacement reply's text, without a turn end.
+    /// A replacement reply's text (escaped), without a turn end.
     public func assistantText(_ text: String) -> [Int] {
-        renderer.encodeRaw(text)
+        renderer.encodeRaw(escaper.escape(text))
     }
 
     /// `[system] + turns` with the generation prompt, through any template (no ChatML markers
@@ -124,8 +135,9 @@ public struct TurnRenderer {
         renderer: any ChatTemplateRendering, chatContext: [String: Bool], system: String, tools: [ToolDefinition],
         turns: [ChatTurn]
     ) throws -> [Int] {
-        try render(
-            renderer: renderer, context: JSONBridge.context(chatContext), raw(system: system, messages(turns)), tools: tools,
+        let escaped = messages(turns, escaper: SpecialTokenEscaper(renderer: renderer))
+        return try render(
+            renderer: renderer, context: JSONBridge.context(chatContext), raw(system: system, escaped), tools: tools,
             generationPrompt: true)
     }
 
