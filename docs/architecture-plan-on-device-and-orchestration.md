@@ -316,7 +316,8 @@ running on the unloaded model.
   when the app leaves the foreground (`StockPrefill`), generates from the last token with MLX's
   `TokenIterator`, and then keeps the cache in a `ChatSession` for the next turns. With the Qwen3 4B draft
   model, that first reply decodes without it, and later turns draft with a draft cache that starts empty
-  (still lossless). An appended turn's own prefill is short and still runs in one call.
+  (still lossless). An appended turn's prefill still runs in one call that can't be stopped, so a turn
+  longer than one chunk (a pasted text) rebuilds the session through the chunked prefill instead.
 - `QwenListener.finishPasses()` is awaited before every engine GPU job, so the Qwen3-ASR pass and the reply
   model never share the GPU.
 
