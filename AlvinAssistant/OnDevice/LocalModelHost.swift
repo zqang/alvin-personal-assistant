@@ -103,6 +103,9 @@ final class LocalModelHost {
     /// `localSpeculativeDecoding` is on.
     @ObservationIgnored private(set) var draftModel: LoadedModel?
     @ObservationIgnored private var loading: Task<Void, Never>?
+    /// A cancelled load that may still be reading weights or checking its engine; the next load
+    /// waits for it, so two models are never resident at once.
+    @ObservationIgnored private var orphan: Task<Void, Never>?
     @ObservationIgnored private var downloading = false
     /// The settings most recently passed in; a load in progress applies them when it ends.
     @ObservationIgnored private var latest: AssistantSettings?
@@ -145,10 +148,15 @@ final class LocalModelHost {
     nonisolated private static let inFlight = DispatchGroup()
     /// Counts how often the app stopped being active, to tell whether a check ran uninterrupted.
     nonisolated private static let interruptions = OSAllocatedUnfairLock(initialState: 0)
+    /// Whether the app entered the background since it was last active. While it is merely
+    /// inactive, an engine job waits briefly instead of being refused (`beginEngineGPU`).
+    nonisolated private static let inBackground = OSAllocatedUnfairLock(initialState: false)
+    /// Longest an engine job waits for an inactive app to become active again.
+    nonisolated private static let inactiveWait: TimeInterval = 2
 
     /// The engine's GPU guard: the same `gpuAllowed` / `inFlight` pair the stock path uses.
     nonisolated static let engineHooks = EngineHooks(
-        beginGPU: { LocalModelHost.beginGPU() },
+        beginGPU: { LocalModelHost.beginEngineGPU() },
         endGPU: { LocalModelHost.inFlight.leave() },
         isAllowed: { LocalModelHost.gpuAllowed.withLock { $0 } }
     )
@@ -165,6 +173,7 @@ final class LocalModelHost {
             Self.interruptions.withLock { $0 += 1 }
         }
         _ = center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { _ in
+            Self.inBackground.withLock { $0 = true }
             MainActor.assumeIsolated { LocalModelHost.shared.unload() }
             Self.waitForGPU()
         }
@@ -173,6 +182,7 @@ final class LocalModelHost {
         }
         _ = center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
             Self.gpuAllowed.withLock { $0 = true }
+            Self.inBackground.withLock { $0 = false }
         }
     }
 
@@ -201,7 +211,8 @@ final class LocalModelHost {
         #else
         guard UIApplication.shared.applicationState == .active else { return }
         status = .loading(0)
-        loading = Task { await load(option, key: wanted) }
+        let previous = orphan
+        loading = Task { await load(option, key: wanted, after: previous) }
         #endif
     }
 
@@ -220,12 +231,15 @@ final class LocalModelHost {
         prewarming = nil
         live = nil
         guard stopDownload || !downloading else { return }
+        if let loading { orphan = loading }
         loading?.cancel()
         loading = nil
         key = nil
         statusText = nil
         if case .failed = status {} else { status = .off }
-        Memory.clearCache()
+        // Off the main thread: it waits for the MLX evaluation in progress, such as a stock
+        // reply's prefill, which can't be stopped, and the background handler must not.
+        DispatchQueue.global(qos: .userInitiated).async { Memory.clearCache() }
     }
 
     /// Forgets the cached session, so the next reply processes the whole conversation again.
@@ -306,8 +320,15 @@ final class LocalModelHost {
         return snapshot
     }
 
-    private func load(_ option: LocalModelOption, key wanted: Key) async {
+    /// Loads `option` once `previous` (a cancelled load) has ended.
+    private func load(_ option: LocalModelOption, key wanted: Key, after previous: Task<Void, Never>?) async {
         do {
+            if let previous {
+                // It keeps reading weights or checking its engine after being cancelled, and
+                // holds that model until it ends.
+                await previous.value
+                try Task.checkCancellation()
+            }
             let downloader = HubDownloader(client: Self.hubClient())
             downloading = true
             // Most of the bytes are the main model's; the draft model follows.
@@ -322,6 +343,9 @@ final class LocalModelHost {
                 })
             }
             downloading = false
+            // The memory an earlier model held (`previous`'s, or one unloaded meanwhile) may still
+            // be in MLX's cache, which counts against the app.
+            await Task.detached { Memory.clearCache() }.value
             try checkStillWanted()
 
             let needed = option.approximateBytes + (wanted.draft ? option.draftApproximateBytes : 0) + Self.memoryMargin
@@ -367,6 +391,7 @@ final class LocalModelHost {
             // the extensions: the fast kernels, when requested, test and time themselves and stay
             // only when they help.
             await QwenListener.finishPasses()
+            try checkStillWanted()
             do {
                 try await loaded.warmUp()
                 takeKernelReport(loaded)
@@ -548,12 +573,15 @@ final class LocalModelHost {
     /// each only when `needsCheck` says so.
     private func runMissingChecks(_ given: InferenceEngine? = nil) async {
         guard let engine = given ?? engine, let settings = latest, needsCheck(settings) else { return }
-        await exclusively {
-            if settings.localEngineMode == .automatic, selfTest == nil {
+        // Nothing runs when cancelled first (a load that unload() stopped).
+        _ = try? await exclusively {
+            // Each check only while `engine` is still the loaded one: an unloaded engine's results
+            // aren't kept, and checking it would keep it in memory for seconds.
+            if self.engine === engine, settings.localEngineMode == .automatic, selfTest == nil {
                 statusText = "Checking the on-device engine…"
                 _ = await performSelfTest(engine)
             }
-            if settings.localSpeculation != .off, costCurve == nil, usesEngine(settings) {
+            if self.engine === engine, settings.localSpeculation != .off, costCurve == nil, usesEngine(settings) {
                 statusText = "Measuring the on-device engine's speed…"
                 _ = try? await performCostProbe(engine)
             }
@@ -563,11 +591,12 @@ final class LocalModelHost {
     }
 
     /// Runs the engine self-test now (Settings, the benchmark) and stores its result. Nil when no
-    /// model is loaded, or when the app stopped being active during the run (nothing is stored).
+    /// model is loaded, when the caller was cancelled before it started, or when the app stopped
+    /// being active during the run (nothing is stored).
     @discardableResult
     func runSelfTest() async -> EngineSelfTest.Result? {
         guard let engine, status == .ready else { return nil }
-        let result: EngineSelfTest.Result? = await exclusively {
+        let result = try? await exclusively { () async -> EngineSelfTest.Result? in
             statusText = "Checking the on-device engine…"
             defer { statusText = nil }
             return await performSelfTest(engine)
@@ -703,12 +732,14 @@ final class LocalModelHost {
     /// Runs `body` with the engine to itself: it waits for any other check and a pending session
     /// reset, then for replies and prewarms in progress, and keeps new ones (and new resets)
     /// waiting until it returns. A check works in several engine jobs and needs the session
-    /// unchanged between them.
-    private func exclusively<T>(_ body: () async throws -> T) async rethrows -> T {
+    /// unchanged between them. Throws `CancellationError`, without running `body`, when the caller
+    /// is cancelled before `body` starts.
+    private func exclusively<T>(_ body: () async throws -> T) async throws -> T {
         // Claimed right after the last wait, with no suspension in between.
         while let next = blocker {
             await wait(for: next)
         }
+        try Task.checkCancellation()
         let (signal, done) = AsyncStream<Void>.makeStream()
         maintenance = Task {
             for await _ in signal {}
@@ -720,8 +751,10 @@ final class LocalModelHost {
             isChecking = false
         }
         while activeJobs > 0 {
-            try? await Task.sleep(for: .milliseconds(50))
+            // Throws once cancelled; ignoring that would turn this into a busy loop.
+            try await Task.sleep(for: .milliseconds(50))
         }
+        try Task.checkCancellation()
         return try await body()
     }
 
@@ -983,6 +1016,12 @@ final class LocalModelHost {
         guard Self.beginGPU() else { throw Self.leftForeground }
         Memory.peakMemory = 0
         emit(.progress(.responseStarted))
+        // Generated off the main actor, which the background handler blocks while it waits for
+        // `inFlight`: `relay` stops the generation on leaving the foreground and leaves `inFlight`.
+        let (items, sink) = AsyncThrowingStream<Generation, Error>.makeStream()
+        let prompt = LocalSessionPlan.content(of: plan.newTurn)
+        let box = StockSessionBox(session: session)
+        async let relayed: Void = LocalModelHost.relay(prompt, to: box, into: sink)
 
         var stats = LocalGenerationStats(reusedSession: plan.action == .append, engine: "stock")
         var filter = ThinkingFilter()
@@ -997,7 +1036,7 @@ final class LocalModelHost {
             emit(.reply(.text(visible)))
         }
         do {
-            for try await item in session.streamDetails(to: LocalSessionPlan.content(of: plan.newTurn)) {
+            for try await item in items {
                 // Leaving the foreground: stop before iOS takes the GPU away.
                 if Task.isCancelled || !Self.gpuAllowed.withLock({ $0 }) { break }
                 switch item {
@@ -1022,9 +1061,10 @@ final class LocalModelHost {
         } catch {
             failure = error
         }
-        // Wait until generation has really stopped using the GPU and the cache.
-        await session.synchronize()
-        Self.inFlight.leave()
+        // If the loop stopped early, `relay` stops at its next item. Then wait until generation
+        // has really stopped using the GPU and the cache.
+        sink.finish()
+        await relayed
         show(filter.finish())
         stats.peakMemoryBytes = Memory.peakMemory
 
@@ -1212,6 +1252,45 @@ final class LocalModelHost {
         }
     }
 
+    /// `beginGPU` for engine jobs, which ask on the engine queue. While the app is inactive but
+    /// not in the background (a permission alert a tool raised, Control Center), it waits up to
+    /// `inactiveWait` for the app to become active again instead of refusing at once: the job
+    /// after a tool round would otherwise fail although the app never left the screen. The stock
+    /// path asks on the main thread, which delivers `didBecomeActive`, so it can't wait.
+    nonisolated private static func beginEngineGPU() -> Bool {
+        let deadline = DispatchTime.now() + inactiveWait
+        while !beginGPU() {
+            guard !inBackground.withLock({ $0 }), DispatchTime.now() < deadline else { return false }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        return true
+    }
+
+    /// Generates the stock session's reply to `prompt` off the main actor, passing it on to
+    /// `sink`, and stops it at the first item after the app stopped being active (or once
+    /// cancelled, or once `sink` is finished). Then waits until generation has really stopped
+    /// using the GPU and the cache, and leaves `inFlight`, which the caller entered.
+    /// ChatSession's prefill can't be stopped: generation stops at its first token.
+    nonisolated private static func relay(
+        _ prompt: String,
+        to box: StockSessionBox,
+        into sink: AsyncThrowingStream<Generation, Error>.Continuation
+    ) async {
+        do {
+            // The loop holds the only reference to the session's stream: leaving it drops the
+            // stream, which stops the generation.
+            for try await item in box.session.streamDetails(to: prompt) {
+                guard !Task.isCancelled, gpuAllowed.withLock({ $0 }) else { break }
+                if case .terminated = sink.yield(item) { break }
+            }
+            sink.finish()
+        } catch {
+            sink.finish(throwing: error)
+        }
+        await box.session.synchronize()
+        inFlight.leave()
+    }
+
     /// Blocks until the running reply stops, so no GPU work is left when iOS takes the GPU away.
     nonisolated private static func waitForGPU() {
         _ = inFlight.wait(timeout: .now() + 3)
@@ -1239,6 +1318,12 @@ private final class ReportBox: @unchecked Sendable {
         defer { lock.unlock() }
         return report
     }
+}
+
+/// The stock session of a reply, handed to the task that generates with it (`relay`); nothing
+/// else uses it until that task ends.
+private struct StockSessionBox: @unchecked Sendable {
+    let session: ChatSession
 }
 
 /// Engine extensions handed to the engine queue. They are prepared and used there only.
