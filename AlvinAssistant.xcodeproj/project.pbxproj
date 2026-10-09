@@ -15,6 +15,7 @@
 		A10000000000000000000033 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000002D /* MLXLLM */; };
 		A10000000000000000000034 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000002E /* MLXLMCommon */; };
 		A10000000000000000000035 /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000002F /* Tokenizers */; };
+		A10000000000000000000038 /* LocalEngine in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000037 /* LocalEngine */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -43,6 +44,7 @@
 				A10000000000000000000033 /* MLXLLM in Frameworks */,
 				A10000000000000000000034 /* MLXLMCommon in Frameworks */,
 				A10000000000000000000035 /* Tokenizers in Frameworks */,
+				A10000000000000000000038 /* LocalEngine in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -102,6 +104,7 @@
 				A1000000000000000000002D /* MLXLLM */,
 				A1000000000000000000002E /* MLXLMCommon */,
 				A1000000000000000000002F /* Tokenizers */,
+				A10000000000000000000037 /* LocalEngine */,
 			);
 			productName = AlvinAssistant;
 			productReference = A10000000000000000000004 /* AlvinAssistant.app */;
@@ -138,6 +141,7 @@
 				A10000000000000000000022 /* XCRemoteSwiftPackageReference "swift-huggingface" */,
 				A1000000000000000000002B /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
 				A1000000000000000000002C /* XCRemoteSwiftPackageReference "swift-transformers" */,
+				A10000000000000000000036 /* XCLocalSwiftPackageReference "LocalEngine" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000003 /* Products */;
@@ -383,6 +387,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = AssistantKit;
 		};
+		A10000000000000000000036 /* XCLocalSwiftPackageReference "LocalEngine" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = LocalEngine;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -467,6 +475,10 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1000000000000000000002C /* XCRemoteSwiftPackageReference "swift-transformers" */;
 			productName = Tokenizers;
+		};
+		A10000000000000000000037 /* LocalEngine */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LocalEngine;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
