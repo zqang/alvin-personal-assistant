@@ -56,13 +56,14 @@ final class LocalModelHost {
     /// What the host is doing besides downloading and loading, e.g. "Checking the on-device
     /// engine…"; nil otherwise.
     private(set) var statusText: String?
-    /// The stored self-test result for the loaded model and this build.
+    /// The stored self-test result for the loaded (else the selected, downloaded) model and this
+    /// build.
     private(set) var selfTest: EngineSelfTest.Result?
-    /// The stored cost curve for the loaded model on this device, if one was measured.
+    /// The stored cost curve for that model on this device, if one was measured.
     private(set) var costCurve: CostCurve?
-    /// The stored fast-kernel gain for the loaded model on this device (c(8) without ÷ with).
+    /// The stored fast-kernel gain for that model on this device (c(8) without ÷ with).
     private(set) var kernelGain: Double?
-    /// Whether the loaded checkpoint holds multi-token-prediction weights.
+    /// Whether that model's checkpoint holds multi-token-prediction weights.
     private(set) var hasMTPWeights = false
     /// The last reply's measurements.
     private(set) var lastStats: LocalGenerationStats?
@@ -108,6 +109,8 @@ final class LocalModelHost {
     @ObservationIgnored private var targetRollback = false
     /// Whether the stock path may draft with the draft model (its cache can be trimmed).
     @ObservationIgnored private var stockDraftAllowed = false
+    /// The model `selfTest`, `costCurve`, `kernelGain` and `hasMTPWeights` were read for.
+    @ObservationIgnored private var storedResultsModelID: String?
     private let verification = EngineVerificationStore()
 
     /// The stock path's session, whose cache holds `sessionTurns` after `sessionSystem`. Nil
@@ -225,16 +228,15 @@ final class LocalModelHost {
     /// change on the running engine. Turning on automatic mode or speculation runs a missing
     /// self-test or speed measurement.
     func apply(_ settings: AssistantSettings) {
-        guard let key else {
-            // Nothing loaded: show what is stored for the model Settings now selects.
+        guard let key, let option = LocalModelCatalog.option(for: settings.localModelID), Self.key(option, settings) == key else {
+            if key != nil {
+                unload(stopDownload: true)
+            }
+            // Nothing (fitting) is loaded: show what is stored for the model Settings selects.
             latest = settings
-            readStoredResults(modelID: settings.localModelID)
-            return
-        }
-        guard let option = LocalModelCatalog.option(for: settings.localModelID), Self.key(option, settings) == key else {
-            unload(stopDownload: true)
-            latest = settings
-            readStoredResults(modelID: settings.localModelID)
+            if storedResultsModelID != settings.localModelID {
+                readStoredResults(modelID: settings.localModelID)
+            }
             return
         }
         latest = settings
@@ -485,6 +487,7 @@ final class LocalModelHost {
     /// gain) and whether its checkpoint has MTP weights. `snapshot` is the model's snapshot
     /// directory; without it, the downloaded snapshot is looked up (none: no self-test result).
     private func readStoredResults(modelID: String, snapshot: URL? = nil) {
+        storedResultsModelID = modelID
         let directory = snapshot ?? Self.downloadedSnapshot(modelID)
         selfTest = directory.flatMap { verification.selfTest(for: .init(modelID: modelID, snapshot: $0.lastPathComponent)) }
         costCurve = verification.costCurve(for: .init(modelID: modelID))
