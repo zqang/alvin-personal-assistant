@@ -206,8 +206,10 @@ final class SmallMKernelTests: XCTestCase {
 
         let fast = run()
         let kernel = SmallMQuantizedMatmul.canRunOnDefaultDevice
-        func compare(_ label: String, rows: Int, _ candidate: MLXArray, _ reference: MLXArray) {
-            if kernel && SmallMQuantizedMatmul.rows.contains(rows) {
+        /// Bitwise only where nothing so far ran on the kernel: a chunk reads the cache the
+        /// earlier chunks wrote.
+        func compare(_ label: String, rows: [Int], _ candidate: MLXArray, _ reference: MLXArray) {
+            if kernel && rows.contains(where: { SmallMQuantizedMatmul.rows.contains($0) }) {
                 let scale = Double(MLX.abs(reference).max().item(Float.self))
                 XCTAssertTrue(
                     LogitCheck.isClose(candidate, reference, rtol: 1e-3, atol: 1e-3 * scale),
@@ -217,10 +219,10 @@ final class SmallMKernelTests: XCTestCase {
             }
         }
         for (index, length) in lengths.enumerated() {
-            compare("\(length) tokens", rows: length, fast.single[index], stock.single[index])
+            compare("\(length) tokens", rows: [length], fast.single[index], stock.single[index])
         }
         for (index, count) in chunks.enumerated() {
-            compare("chunk \(index) (\(count) tokens)", rows: count, fast.chunked[index], stock.chunked[index])
+            compare("chunk \(index) (\(count) tokens)", rows: Array(chunks[...index]), fast.chunked[index], stock.chunked[index])
         }
 
         FastKernelsExtension.install(candidates.map { ($0.path, $0.layer) }, in: model)
