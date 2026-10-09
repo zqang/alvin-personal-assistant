@@ -11,12 +11,23 @@ import MLXNN
 /// - the layer is 4-bit affine with group size 64 and has biases (`isEligible`);
 /// - x has 2–9 rows, K is a multiple of 512 and N a multiple of 4;
 /// - x, the scales and the biases share one float dtype;
-/// - MLX's default device is the GPU.
+/// - MLX's default device is the GPU;
+/// - its `kernelSwitch` is on (`FastKernelsExtension.kernelsActive`).
 ///
 /// Otherwise it calls `super`, which is bitwise the stock layer.
 public final class FastQuantizedLinear: QuantizedLinear {
-    /// A fast layer over `layer`'s arrays.
-    public init(_ layer: QuantizedLinear) {
+    /// Read at every call: off makes the layer run the stock product. Shared by the layers one
+    /// `FastKernelsExtension` puts in, so flipping it never touches the model's modules.
+    let kernelSwitch: FastKernelSwitch
+
+    /// A fast layer over `layer`'s arrays, with its own switch (on).
+    public convenience init(_ layer: QuantizedLinear) {
+        self.init(layer, kernelSwitch: FastKernelSwitch())
+    }
+
+    /// A fast layer over `layer`'s arrays that uses the kernel while `kernelSwitch` is on.
+    init(_ layer: QuantizedLinear, kernelSwitch: FastKernelSwitch) {
+        self.kernelSwitch = kernelSwitch
         super.init(
             weight: layer.weight, bias: layer.bias, scales: layer.scales, biases: layer.biases,
             groupSize: layer.groupSize, bits: layer.bits, mode: layer.mode)
@@ -46,7 +57,7 @@ public final class FastQuantizedLinear: QuantizedLinear {
 
     /// Whether this call of `x` runs on the kernel.
     func usesKernel(for x: MLXArray) -> Bool {
-        guard x.ndim >= 1, let biases else { return false }
+        guard kernelSwitch.isOn, x.ndim >= 1, let biases else { return false }
         let k = x.dim(-1)
         guard k > 0, weight.ndim == 2, k == weight.dim(1) * 32 / bits else { return false }
         let rows = x.size / k
@@ -71,5 +82,29 @@ public final class FastQuantizedLinear: QuantizedLinear {
             y = y + bias
         }
         return y
+    }
+}
+
+/// An on/off switch that fast layers read at every call; safe to flip from any thread at any
+/// time. A forward being built while it flips may run some layers each way, and both are correct.
+final class FastKernelSwitch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var on: Bool
+
+    init(isOn: Bool = true) {
+        on = isOn
+    }
+
+    var isOn: Bool {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return on
+        }
+        set {
+            lock.lock()
+            on = newValue
+            lock.unlock()
+        }
     }
 }

@@ -10,7 +10,8 @@ import XCTest
 /// The small-M quantized matmul kernel (WP41): it matches `quantizedMM` for every shape, row
 /// count and dtype; ineligible products fall back to the stock path bitwise; fast layers inside
 /// a hybrid model give the stock logits; and `FastKernelsExtension` swaps them in only when asked,
-/// keeps them only with the required gain, and undoes the swap otherwise.
+/// keeps them only with the required gain, undoes the swap otherwise, and can switch them to the
+/// stock product without touching the model.
 ///
 /// The kernel itself runs only on a Metal GPU; elsewhere those tests are skipped and the rest
 /// check the stock fallbacks.
@@ -168,6 +169,46 @@ final class SmallMKernelTests: XCTestCase {
             "the same parameter keys, so weights load into either")
     }
 
+    /// `kernelsActive` is one switch for every fast layer an extension makes: off, they run the
+    /// stock product, bitwise; a layer made on its own has its own switch.
+    func testKernelsActiveSwitchesTheFastLayersToTheStockProduct() {
+        MLXRandom.seed(4117)
+        func layer(_ k: Int) -> QuantizedLinear {
+            QuantizedLinear(weight: MLXRandom.normal([16, k]) * Float(0.05), bias: nil, groupSize: 64, bits: 4, mode: .affine)
+        }
+        let fastKernels = FastKernelsExtension()
+        XCTAssertTrue(fastKernels.kernelsActive, "on by default")
+        let stack = KernelTestStack(blocks: [KernelTestBlock(layer(512)), KernelTestBlock(layer(1024))], heads: [])
+        let pairs = FastKernelsExtension.layerPairs(in: stack, kernelSwitch: fastKernels.kernelSwitch)
+        XCTAssertEqual(pairs.map(\.path), ["blocks.0.proj", "blocks.1.proj"])
+        XCTAssertTrue(pairs.allSatisfy { $0.fast.kernelSwitch === fastKernels.kernelSwitch })
+        XCTAssertEqual(FastKernelsExtension.switches(of: pairs).count, 1)
+
+        let x = MLXRandom.normal([1, 4, 512])
+        let wide = MLXRandom.normal([1, 4, 1024])
+        let kernel = SmallMQuantizedMatmul.canRunOnDefaultDevice
+        XCTAssertEqual(pairs[0].fast.usesKernel(for: x), kernel)
+        XCTAssertEqual(pairs[1].fast.usesKernel(for: wide), kernel)
+
+        fastKernels.kernelsActive = false
+        XCTAssertFalse(pairs[0].fast.usesKernel(for: x))
+        XCTAssertFalse(pairs[1].fast.usesKernel(for: wide))
+        let expected = pairs[0].stock(x)
+        let actual = pairs[0].fast(x)
+        eval(expected, actual)
+        XCTAssertTrue(LogitCheck.isExactlyEqual(actual, expected), "max |Δ| = \(LogitCheck.maxAbsDifference(actual, expected))")
+
+        let own = FastQuantizedLinear(pairs[0].stock)
+        XCTAssertFalse(own.kernelSwitch === fastKernels.kernelSwitch)
+        XCTAssertEqual(own.usesKernel(for: x), kernel)
+        XCTAssertEqual(FastKernelsExtension.switches(of: pairs + [
+            FastKernelsExtension.LayerPair(path: "own", stock: pairs[0].stock, fast: own, startsFast: true),
+        ]).count, 2)
+
+        fastKernels.kernelsActive = true
+        XCTAssertEqual(pairs[0].fast.usesKernel(for: x), kernel)
+    }
+
     // MARK: Inside a model
 
     /// Every eligible layer of a hybrid model swapped for `FastQuantizedLinear`: logits allClose
@@ -270,6 +311,39 @@ final class SmallMKernelTests: XCTestCase {
 
     // MARK: The extension
 
+    /// `gain` (the fraction of c(8) saved) and `speedup` (c(8) before ÷ after, the value the app
+    /// stores) describe one comparison: the default rule is a 25% gain, a 1.33× speed-up.
+    func testGainAndSpeedupDescribeTheSameComparison() {
+        XCTAssertEqual(FastKernelsExtension.defaultRequiredGain, 0.25)
+        XCTAssertEqual(FastKernelsExtension.defaultRequiredSpeedup, 4.0 / 3.0, accuracy: 1e-12)
+        XCTAssertEqual(FastKernelsExtension().requiredGain, FastKernelsExtension.defaultRequiredGain)
+        XCTAssertEqual(FastKernelsExtension.speedup(forGain: 0), 1)
+
+        let before = CostCurve(seconds: [1: 0.010, 8: 0.030])
+        let cases: [(c8: Double, gain: Double, speedup: Double)] = [
+            (2.0, 1.0 / 3.0, 1.5), (2.2, 4.0 / 15.0, 15.0 / 11.0), (2.3, 7.0 / 30.0, 30.0 / 23.0), (2.4, 0.2, 1.25),
+            (3.0, 0, 1), (3.6, -0.2, 3.0 / 3.6),
+        ]
+        for (c8, gain, speedup) in cases {
+            let after = CostCurve(seconds: [1: 0.010, 8: 0.010 * c8])
+            let measuredGain = FastKernelsExtension.gain(before: before, after: after)
+            let measuredSpeedup = FastKernelsExtension.speedup(before: before, after: after)
+            XCTAssertEqual(measuredGain, gain, accuracy: 1e-9, "c(8) \(c8)")
+            XCTAssertEqual(measuredSpeedup, speedup, accuracy: 1e-9, "c(8) \(c8)")
+            XCTAssertEqual(
+                measuredGain >= FastKernelsExtension.defaultRequiredGain,
+                measuredSpeedup >= FastKernelsExtension.defaultRequiredSpeedup, "c(8) \(c8): one verdict")
+        }
+
+        let report = FastKernelsReport(
+            outcome: .faster, modelID: "tiny", layers: 3, kernelsInstalled: true, measuredOnly: false, selfTest: nil,
+            before: before, after: CostCurve(seconds: [1: 0.010, 8: 0.020]), gain: 1.0 / 3.0, speedup: 1.5,
+            requiredGain: 0.25, detail: "")
+        XCTAssertEqual(report.requiredSpeedup, 4.0 / 3.0, accuracy: 1e-12)
+        XCTAssertEqual(
+            report.summary, "Fast kernels on (3 layers): c(8) 3.00× → 2.00× one row (-33%, 1.50× as fast; needs -25%, 1.33×)")
+    }
+
     func testTheRequestFlagIsAValueOfTheConfiguration() {
         var configuration = EngineConfiguration()
         XCTAssertFalse(configuration.fastKernelsRequested)
@@ -299,6 +373,19 @@ final class SmallMKernelTests: XCTestCase {
         XCTAssertEqual(Self.fastLayerCount(model), 0)
     }
 
+    /// With the trigger `.presence`, being in `extensions` is the request: no flag needed.
+    func testThePresenceTriggerNeedsNoFlag() async throws {
+        XCTAssertEqual(FastKernelsExtension().trigger, .flag, "the flag is the default")
+        let fastKernels = FastKernelsExtension(requiredGain: .infinity, trigger: .presence)
+        fastKernels.selfTestShapes = [KernelSelfTest.Shape(512, 12, bias: true)]
+        let (engine, model) = try Self.makeEngine(seed: 4116, fastKernels: fastKernels, requested: false)
+        let identities = Self.layerIdentities(model)
+        try await engine.warmUp()
+        let report = try XCTUnwrap(fastKernels.report)
+        XCTAssertEqual(report.outcome, SmallMQuantizedMatmul.canRunOnDefaultDevice ? .notFaster : .unavailable, report.summary)
+        XCTAssertEqual(Self.layerIdentities(model), identities, "no gain: the stock layers stay")
+    }
+
     /// Without the required gain the probe's verdict undoes the swap: the stock layers (the
     /// same objects) are back and the logits are bitwise the stock ones.
     func testTheExtensionUndoesTheSwapWithoutTheGain() async throws {
@@ -325,6 +412,7 @@ final class SmallMKernelTests: XCTestCase {
         XCTAssertEqual(Set(try XCTUnwrap(report.before).seconds.keys), [1, 2, 3, 4, 6, 8])
         XCTAssertEqual(Set(try XCTUnwrap(report.after).seconds.keys), [1, 2, 3, 4, 6, 8])
         XCTAssertNotNil(report.gain)
+        XCTAssertNotNil(report.speedup)
         XCTAssertTrue(report.summary.hasPrefix("Fast kernels off: c(8) "), report.summary)
         EngineReport.append("- Fast kernels on the kernel-sized tiny hybrid (gain required: impossible): \(report.summary)")
     }
@@ -337,6 +425,7 @@ final class SmallMKernelTests: XCTestCase {
         let fastKernels = FastKernelsExtension(requiredGain: -.infinity)
         fastKernels.selfTestShapes = [KernelSelfTest.Shape(512, 12, bias: true)]
         let (engine, model) = try Self.makeEngine(seed: 4112, fastKernels: fastKernels, requested: true)
+        let stockLogitsBefore = try await Self.nextLogits(engine)
         try await engine.warmUp()
 
         let report = try XCTUnwrap(fastKernels.report)
@@ -365,6 +454,19 @@ final class SmallMKernelTests: XCTestCase {
         XCTAssertTrue(
             LogitCheck.isClose(fastLogits, stockLogits, rtol: 1e-3, atol: 1e-3 * scale),
             "max |Δ| = \(LogitCheck.maxAbsDifference(fastLogits, stockLogits)) of \(scale)")
+
+        // Switched off, the same fast layers give this engine's stock logits bitwise, and a dry
+        // run still times the kernel and leaves the switch off.
+        fastKernels.kernelsActive = false
+        let switchedOff = try await Self.nextLogits(engine)
+        XCTAssertTrue(
+            LogitCheck.isExactlyEqual(switchedOff, stockLogitsBefore),
+            "max |Δ| = \(LogitCheck.maxAbsDifference(switchedOff, stockLogitsBefore))")
+        let measuredOff = try await fastKernels.measure(engine)
+        XCTAssertEqual(measuredOff.outcome, .faster, measuredOff.summary)
+        XCTAssertFalse(fastKernels.kernelsActive)
+        XCTAssertEqual(Self.layerIdentities(model), identities)
+        fastKernels.kernelsActive = true
 
         let request = EngineRequest(
             system: "You are Alvin.", turns: [ChatTurn(role: .user, text: "Copy this: the quick brown fox.")], maxTokens: 24)
@@ -418,6 +520,7 @@ final class SmallMKernelTests: XCTestCase {
         XCTAssertTrue(measured.measuredOnly)
         XCTAssertFalse(measured.kernelsInstalled)
         XCTAssertEqual(Self.layerIdentities(model), identities)
+        XCTAssertTrue(fastKernels.kernelsActive, "the switch is as it was")
         XCTAssertEqual(fastKernels.report?.outcome, .notRequested, "a dry run doesn't change the report")
         guard SmallMQuantizedMatmul.canRunOnDefaultDevice else {
             XCTAssertEqual(measured.outcome, .unavailable)

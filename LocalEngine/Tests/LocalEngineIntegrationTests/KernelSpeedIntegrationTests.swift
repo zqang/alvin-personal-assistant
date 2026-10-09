@@ -115,6 +115,7 @@ final class KernelSpeedIntegrationTests: XCTestCase {
         let before = try XCTUnwrap(report.before)
         let after = try XCTUnwrap(report.after)
         let gain = try XCTUnwrap(report.gain)
+        let speedup = try XCTUnwrap(report.speedup)
         let widths = before.seconds.keys.sorted()
         EngineReport.appendTable(
             title: "Fast kernels, \(repo): CostProbe before and after the swap (\(report.layers) layers)",
@@ -125,10 +126,13 @@ final class KernelSpeedIntegrationTests: XCTestCase {
                 ["stock c(S)"] + widths.map { String(format: "%.2f", before.relative($0)) },
                 ["fast c(S)"] + widths.map { String(format: "%.2f", after.relative($0)) },
             ])
-        let verdict = gain >= 0.25 ? "would be enabled" : "would stay off"
+        let verdict = gain >= FastKernelsExtension.defaultRequiredGain ? "would be enabled" : "would stay off"
+        let comparison = String(
+            format: "c(8) gain %.0f%% (%.2f× as fast, the value the app stores), so the default 25%% rule (%.2f×)",
+            gain * 100, speedup, FastKernelsExtension.defaultRequiredSpeedup)
+        let selfTestTime = String(format: "%.2f s", report.selfTest?.seconds ?? 0)
         EngineReport.append(
-            "- Fast kernels, \(repo): c(8) gain \(String(format: "%.0f%%", gain * 100)), so the default 25% rule \(verdict). "
-                + "Self-test: \(report.selfTest?.detail ?? "–"), " + String(format: "%.2f s", report.selfTest?.seconds ?? 0))
+            "- Fast kernels, \(repo): \(comparison) \(verdict). Self-test: \(report.selfTest?.detail ?? "–"), \(selfTestTime)")
 
         // Speculation with the kernel against the stock layers.
         let fastLayers = model.leafModules().flattened().compactMap { (path, module) -> (String, QuantizedLinear)? in
