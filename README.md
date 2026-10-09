@@ -16,7 +16,7 @@ service, such as **Doubao on Volcengine Ark**, DeepSeek, or OpenAI.
   - The end of your turn is detected from recognizer silence plus an adaptive noise-floor voice detector.
   - It waits longer after words like "and…" or "然后…" and less after a finished question.
   - If you keep talking before the answer starts, it takes your turn back instead of answering half a
-    sentence.
+    sentence. Once the answer has used a tool (to set a timer, say), your words start the next turn instead.
 - **Interrupt by talking (barge-in).** Speech is played through the same audio engine as the microphone, so
   Apple's echo cancellation removes it. A second filter ignores words that match what the assistant is saying,
   so it doesn't interrupt itself.
