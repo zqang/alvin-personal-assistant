@@ -81,7 +81,7 @@ What became of Husky's public claims:
 | Block verification ("eight tokens at once") | **Built**, lossless, with exact hybrid rollback (capture/replay). Up to 4 drafts per round on stock kernels; 8 only with the fast kernels on and a cost curve measured with them that allows it (D3). |
 | Cheap wide verifies (small-M quantized matmul) | **Built, gated, off.** Correct, but 11–23 % slower than stock at 8 rows on the CI GPU. Enabled only after "Test fast kernels" measures a ≥ 25 % gain on the phone. |
 | Big gains when the output repeats the prompt | **Built.** Prompt lookup, a cross-session suffix corpus and tool-call skeletons. |
-| "Flash" trained drafter | **Partly.** A Qwen3-0.6B draft model for Qwen3 4B. MTP skipped (no weights). DFlash for Woof is deferred until the lab measures it ([§12](#12-skipped-and-deferred)). |
+| "Flash" trained drafter | **Partly.** A Qwen3-0.6B draft model for Qwen3 4B. MTP skipped (no weights). DFlash for Woof measured 5.0 tokens per round in the lab but was not faster or verified lossless in dflash-mlx, so its Swift port is a follow-up ([§12](#12-skipped-and-deferred)). |
 | Engine built for Woof | **Built.** The `HybridQwen35` fork serves Woof 4B and Qwen3.5; other models run through the stock adapter. |
 | Model-shaped kernels, weight repacking, compiled decode | **Skipped.** Specialist work with gains measured only on Mac. |
 | "Same answers" | **Built, further:** exact rejection sampling at the app's T 0.7 / top-p 0.8 / top-k 20, proven statistically in CI. |
@@ -606,15 +606,15 @@ What only a run on an iPhone can settle. Run the benchmark from a **Release** bu
 **Already settled in CI** (no device needed): `mtp.*` presence (none: WP42 skipped, and today's app does not
 load Woof as garbage); template behaviour and EOS ids; quantization layout; prompt-lookup acceptance and tool
 accuracy ([Drafter lab](drafter-lab.md)); fork parity; rollback exactness; lossless speculation; session reuse
-exactness; that the macOS runner's GPU runs MLX ([Model facts](model-facts.md)). Still open in CI: **DFlash
-tokens per round** on Woof, which waits for the next drafter-lab run after the draft-config fix.
+exactness; that the macOS runner's GPU runs MLX ([Model facts](model-facts.md)). DFlash on Woof was measured
+too: 5.03 tokens per round, but not faster or lossless in dflash-mlx ([Drafter lab](drafter-lab.md#dflash)).
 
 ## 12. Skipped and deferred
 
 | Item | Decision | Reason |
 |---|---|---|
 | MTP drafter (WP42) | Skipped | No catalog checkpoint keeps `mtp.*` weights, although some configs declare a layer. |
-| Swift DFlash port | Deferred | Scheduled only if the lab measures ≥ 2.5 accepted tokens per round on Woof; needs hidden-state taps from several layers and 0.3–1 GB more memory, and the MLX ports are greedy-only. |
+| Swift DFlash port | Deferred (threshold met) | The lab measured 5.03 tokens and 4.03 accepted draft tokens per round on Woof (run 37786174712), above the 2.5 threshold, but dflash-mlx was slower than plain greedy on the CI GPU and not lossless against it. A port needs hidden-state taps from several layers and 0.3–1 GB more memory, and must prove lossless and faster on an iPhone. |
 | Two-step tool selector and filler | Deferred | Woof called 12/12 tools correctly; revisit only if D10 shows < 85 % on the phone. |
 | Fast kernels on by default | Deferred | Slower than stock at 8 rows on the CI GPU; enabled per device after a measured ≥ 25 % gain. |
 | Model-shaped kernels, weight repacking, compiled decode | Skipped | Months of specialist work; upstream's compiled decode gave +1.7–3.5 % on a dense 4B. Revisit through a 3.32.x upgrade. |

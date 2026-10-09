@@ -17,7 +17,7 @@ accuracy and the template results do not depend on the device.
 | Does mlx-lm load Woof 4B? | If not, the fallback model's numbers stand in | **Yes**, in 37.0 s. No fallback was needed; all numbers below are Woof 4B's. |
 | Prompt-lookup acceptance | Sets WP11/WP30 defaults (Kmax, `toolsOnly`, match-length priors) | Prompt lookup alone: 1.23x pooled (K=2). By match length (K=4): length 2 accepts the first draft 43 % of the time (1.12 accepted drafts per round), length 3 94 % (2.34), length 4+ 90 % (2.53). Per set, see [Speculation policy](#what-this-means-for-the-speculation-policy). |
 | Woof single-shot tool accuracy (`tools`, arguments) | Below 85 % → build the deferred selector/filler (plan section 3) | **12/12 (100 %)** names and arguments with all ten schemas. On-device subset (`tools_local`): names 11/12, arguments 10/12. **The selector/filler harness is not needed.** |
-| DFlash tokens per round, and accepted draft tokens per round | At least 2.5 → schedule the deferred Swift DFlash port | **Not measured yet.** All 6 DFlash runs exited at draft load (dflash-mlx 0.1.8 could not read the draft's config, see [DFlash](#dflash)). `scripts/drafter_lab.py` now patches the config; the decision waits for the next lab run. |
+| DFlash tokens per round, and accepted draft tokens per round | At least 2.5 → schedule the deferred Swift DFlash port | **5.03 tokens and 4.03 accepted draft tokens per round** (acceptance 0.72; 7.5–9.5 per round on copy-heavy prompts), run 37786174712. The threshold is met, but in this runtime DFlash was slower than plain greedy decoding (0.07–0.76×) and its text differed from mlx-lm greedy, so the Swift port stays a follow-up that needs its own on-device speed and losslessness check. See [DFlash](#dflash). |
 | As-generated history versus re-render | Size of the plan 4.5 quality caveat (empty think block kept) | For both models, all 20 past replies differ from their re-render by the 4-token empty think block. Apart from that, 19 of 20 (Woof 4B) and 17 of 20 (Qwen3.5-0.8B) are token-identical; the rest re-tokenize differently. See [Template comparison](#template-comparison). |
 
 ## Greedy outputs
@@ -256,8 +256,22 @@ window), since dflash-mlx rejects sliding layers without a positive window. The 
 `dflash.json` (`draft_config_patch`) and in the summary. The wrapper's error capture and the plain-CLI fallback
 are unchanged.
 
-**Status:** DFlash tokens per round, and with them the Swift DFlash port decision, wait for the next run of the
-lab (push a change to the lab files, or a commit whose message contains `[ci lab]`).
+**Result (run 37786174712, job 113341451934, after the config fix):**
+
+| Prompt | Tokens | Rounds | Tokens per round | Accepted per round | Acceptance | Copy-spec rounds / tokens | tok/s | vs mlx-lm greedy | Same text |
+|---|---|---|---|---|---|---|---|---|---|
+| chat-01 | 46 | 19 | 2.42 | 1.42 | 0.59 | 0 / 0 | 2.3 | 0.14 | no |
+| chat-05 | 23 | 12 | 1.92 | 0.92 | 0.48 | 0 / 0 | 1.1 | 0.07 | no |
+| copy-01 | 45 | 6 | 7.50 | 6.50 | 0.87 | 2 / 30 | 3.2 | 0.22 | no |
+| copy-03 | 142 | 15 | 9.47 | 8.47 | 0.89 | 4 / 60 | 9.4 | 0.76 | no |
+| copy-06 | 29 | 5 | 5.80 | 4.80 | 0.83 | 1 / 15 | 2.8 | 0.19 | no |
+| tool-01 | 55 | 18 | 3.06 | 2.06 | 0.67 | 5 / 15 | 2.8 | 0.19 | no |
+
+Mean 5.03 tokens per round (4.03 accepted draft tokens plus the target's own), acceptance 0.72. Both port
+thresholds are met. However, on the CI virtual M1 every DFlash run was slower than plain mlx-lm greedy decoding
+(0.07–0.76×, short runs dominated by start-up), and no output matched the greedy text, so dflash-mlx 0.1.8 is not
+verified lossless here. Decision: the draft quality justifies a Swift port as a follow-up, to be accepted only if
+it is lossless against the engine's own greedy path and faster on an iPhone; it is not part of this change.
 
 ## Method
 
