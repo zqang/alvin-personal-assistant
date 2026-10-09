@@ -189,7 +189,7 @@ struct SettingsView: View {
         } header: {
             Text("On-device model")
         } footer: {
-            Text("Answers when you're offline, and the requests routing keeps on this iPhone. It downloads over Wi-Fi only; until it's downloaded, Claude answers everything.")
+            Text("Answers when you're offline, and the requests routing sends to this iPhone while it's loaded. It downloads over Wi-Fi only; until it's downloaded, Claude answers everything.")
         }
     }
 

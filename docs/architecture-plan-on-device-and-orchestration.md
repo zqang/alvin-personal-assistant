@@ -133,7 +133,7 @@ What became of Husky's public claims:
 | `HybridQwen35` fork | `LocalEngine/Models` | An MIT-attributed copy of the 3.31.4 Qwen3.5 text model with the same module keys, plus row-selective logits and capture/replay of the recurrent (Gated DeltaNet) layers. |
 | `HybridTarget`, `StockTarget` | `LocalEngine/Runtime` | One interface over the fork and over stock models (forward with selected logit rows, commit a verified round, reset, adopt a cache). |
 | `SessionPlanner`, `TurnDelta`, `CheckpointPolicy`, `PrefixKey` | `AssistantKit/Engine/Session` | Pure planning of what the cache can keep and what must be fed. |
-| `LiveSession`, `CheckpointStore`, `SessionRuntime`, `TurnRenderer`, `Prefill` | `LocalEngine/Runtime` | The token ledger, rewind checkpoints, rendering of turn deltas, chunked prefill. |
+| `LiveSession`, `CheckpointStore`, `SessionRuntime`, `TurnRenderer`, `SpecialTokenEscaper`, `Prefill`, `StockPrefill` | `LocalEngine/Runtime` | The token ledger, rewind checkpoints, rendering of turn deltas, escaping of conversation text, chunked prefill (for the stock path too). |
 | `FastSampler`, `DecodeLoop`, `TextStreamer` | `LocalEngine/Runtime` | Sampling, pipelined decode, tool-call and thinking filtering of the visible text. |
 | `PrefixCacheStore` | `LocalEngine/Runtime` | The system prefix on disk. |
 | `InferenceEngine` | `LocalEngine/Runtime` | The public API: load, warm up, prewarm, reply, continue after tools, invalidate. All MLX work runs on its serial queue. |
@@ -152,6 +152,11 @@ What became of Husky's public claims:
    Woof 4B that is `[248044, 248046]`. There are no stop strings: a text-level stop would leave tokens in the
    cache that the ledger does not know about.
 5. Weights load on the CPU inside a detached task; `warmUp()` then runs small GPU forwards in the foreground.
+
+Before it checks free memory for a new model, the host waits until the model it unloaded is no longer used by
+a cancelled load, a check or a reply still running, or a check or prewarm still waiting for its turn, so two
+models are never resident at once. A pending check is cancelled, and a waiting check or prewarm returns without
+running on the unloaded model.
 
 ### 4.3 The `HybridQwen35` fork
 
@@ -183,7 +188,14 @@ What became of Husky's public claims:
 - **Checkpoints** (hybrid models only; pure-attention models just trim): `systemEnd` (always kept),
   `lastUserStart` and `replyStart`. Each is a reference snapshot of the recurrent slots, about 49 MiB for
   Woof 4B, under a 160 MiB budget; `replyStart` is dropped first. Rewinding to any position restores the
-  deepest checkpoint at or below it and re-feeds the gap cache-only.
+  deepest checkpoint at or below it and re-feeds the gap cache-only. The re-feed checks the GPU guard before
+  every chunk and stops when the app leaves the foreground ([§4.10](#410-threading-and-the-gpu-guard)). A
+  hybrid prefill also holds a checkpoint at its start until it completes, so the retry of an interrupted
+  append re-feeds nothing.
+- **Escaping.** Text in the conversation (user turns, replies, tool calls and results) cannot add control
+  tokens: a zero-width space goes after the first character of every added-token literal, such as
+  `<|im_start|>` or `<tool_call>`, on the engine and the stock path. The system prompt and tools are the
+  app's own and are not escaped. The escape depends only on the text, so reuse stays token-exact.
 - **Planner.** `SessionPlanner.plan` is pure; the first matching rule wins:
 
 | # | Condition | Keeps | Feeds | Reason |
@@ -222,7 +234,8 @@ What became of Husky's public claims:
   so speculation never changes the output distribution.
 - **Drafters**, asked in this order: tool-call skeletons while inside a tool call; prompt lookup (n-grams
   2–4 over the whole ledger: system, tools, history, tool results, the current reply); a suffix corpus of
-  past replies and tool results (64k tokens, persisted per model in `Application Support/EngineCache`); the
+  past replies and tool results (64k tokens, persisted per model in `Application Support/EngineCache`, and
+  erased, in memory and on disk, whenever a conversation is deleted); the
   Qwen3-0.6B draft model for Qwen3 4B (when "Draft model" is on). Special tokens are never drafted outside
   the skeletons.
 - **`DraftPolicy`** picks K to maximize expected tokens per unit of cost, `E(K) / (c(K+1) + K·draftCost +
@@ -293,8 +306,18 @@ What became of Husky's public claims:
 
 - All MLX work runs on one serial `DispatchQueue` owned by `InferenceEngine`; async APIs bridge to it.
 - `EngineHooks` carry the app's existing guard: `beginGPU` (GPU allowed, then `inFlight.enter()`), `endGPU`,
-  and `isAllowed`, checked every decode step and prefill chunk. On `willResignActive` the app stops new GPU
-  work; on `didEnterBackground` it unloads the model and waits up to 3 s for work in flight, as before.
+  and `isAllowed`, checked every decode step, prefill chunk and re-fed rewind chunk. On `willResignActive`
+  the app stops new GPU work; on `didEnterBackground` it unloads the model and waits up to 3 s for work in
+  flight, as before. While the app is only inactive (a permission alert, Control Center), an engine job
+  waits up to 2 s for it to become active again instead of failing; in the background it is refused at once.
+- The stock path generates off the main thread, which the background handler blocks, and stops at its next
+  token once the app stops being active. A fresh or rebuilt stock session renders the messages a
+  `ChatSession` built from that history would, prefills all but the last token in 512-token chunks that stop
+  when the app leaves the foreground (`StockPrefill`), generates from the last token with MLX's
+  `TokenIterator`, and then keeps the cache in a `ChatSession` for the next turns. With the Qwen3 4B draft
+  model, that first reply decodes without it, and later turns draft with a draft cache that starts empty
+  (still lossless). An appended turn's prefill still runs in one call that can't be stopped, so a turn
+  longer than one chunk (a pasted text) rebuilds the session through the chunked prefill instead.
 - `QwenListener.finishPasses()` is awaited before every engine GPU job, so the Qwen3-ASR pass and the reply
   model never share the GPU.
 
@@ -392,7 +415,10 @@ its subset natively, deep mode's merger has the full set. The router only picks 
 interrupted, **or ran tool rounds**, so the next request replays them:
 
 - to Claude, as `tool_use` / `tool_result` blocks (ids the local model generated are remapped
-  deterministically to `toolu_…`, so the cached prefix stays byte-identical);
+  deterministically to `toolu_…`, so the cached prefix stays byte-identical). Names are replayed as
+  `claudeToolName` maps them: characters outside `[A-Za-z0-9_-]` become `_`, a name is cut to 64 characters,
+  an empty one becomes `unknown_tool`, and a server tool's name such as `web_search` gets the prefix `local_`.
+  The request declares each replayed name once;
 - to the engine, as an assistant turn with `tool_calls` plus `tool` messages, which the session planner
   compares like any other turn;
 - to the OpenAI-compatible service, as the rounds' summary lines when the reply has no text.
@@ -427,14 +453,18 @@ offset, such as `2026-10-07T17:00`.
   key changes and its next reply starts a new session (`prefixChanged`, [§4.4](#44-session-reuse)).
 - Read-only calls run concurrently; side-effect calls run one at a time in the model's order, each first
   waiting on the request's `CommitGate`, so a reply started early acts only once the user's turn is final.
-  Each call has a 10 s timeout and a 2,000-character result.
+  Each call has a 10 s timeout and a 2,000-character result. A permission prompt comes before the timed run
+  and outside the timeout: the runner awaits the tool's `authorize(_:context:)` (for side effects, after the
+  commit gate opens) with no time limit. Cancelling the round stops that wait at once, and a refusal is the
+  call's result.
 - Read-only tools cue "Let me check."; side-effect tools give no cue; Claude's web search cues "Let me look
   that up."
 - Claude: tools are sent with `strict: true` (and `eager_input_streaming` only for `api.anthropic.com`);
   `tool_choice` stays automatic; all results of a round go back in one message; at most 6 rounds per reply;
   `max_tokens` or a refusal never runs that turn's tools.
-- Reminders and calendar use EventKit full access, asked only when a tool first runs after the commit gate
-  opens; timers are local notifications that also show while the app is open.
+- Reminders and calendar use EventKit full access, asked in the tools' `authorize` step, only after the
+  commit gate opens; timers are local notifications that also show while the app is open, with their
+  permission asked the same way.
 
 ## 7. Deep mode
 
@@ -469,8 +499,14 @@ offset, such as `2026-10-07T17:00`.
   between adopting the stream (the commit gate opens and the buffered events replay) and cancelling it and
   starting fresh. A tuner moves the delay within 0.25–0.6 s from the discard rate of the last 20 turns. Early
   start is off for the local route while Qwen3-ASR listening is on (both need the GPU), for deep replies, and
-  with the legacy pipeline; "On-device only" limits it to on-device replies, so it costs no extra cloud
-  requests.
+  with the legacy pipeline. "On-device only" limits it to on-device replies, so it costs no extra cloud
+  requests: an early reply that routing does not send to the phone fails at once without a request, and the
+  reply starts when the turn commits; an on-device early reply that hands off reaches Claude only after the
+  turn commits.
+- **Taking a turn back.** Words heard before any of the reply has been spoken take the user's turn back: the
+  turn and its reply are dropped, and the session listens on. Once the reply has started a tool call other
+  than `handoff_to_cloud`, or finished a tool round, the turn stands instead (`TurnReopenPolicy`): the words
+  interrupt the reply and start the next turn, so the action stays in the conversation and is not repeated.
 - **Cues.** At most one short spoken cue before the answer is heard ("Let me check.", "Let me look that up.",
   "One moment.", in English or Chinese); deep mode may add "Still thinking, almost there.". Never for typed
   input, never after any text. The filler "One moment." plays after `fillerDelay` (1.8 s), or at 0.6 s when
