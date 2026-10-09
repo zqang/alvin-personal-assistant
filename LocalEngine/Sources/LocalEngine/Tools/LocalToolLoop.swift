@@ -31,10 +31,10 @@ import Foundation
 /// a reply that showed text or ran tools never throws it.
 ///
 /// **Plausibility guard.** Before a round runs, `callGuard` checks each call against the user's
-/// words (`CallGuard.userText(of:)`): an on-device model sometimes reaches for the wrong tool (asked how long a timer
-/// has left, Woof started a one-second timer). A call the guard objects to never runs: the
-/// request is handed off when it still can be, else the call gets an error result that tells the
-/// model to ask the user.
+/// words (`CallGuard.userText(of:)`): an on-device model sometimes reaches for the wrong tool
+/// (asked how long a timer had left, Woof started a one-second timer). A call the guard objects
+/// to never runs: the request is handed off when it still can be, else the call gets an error
+/// result that tells the model to ask the user.
 ///
 /// The engine's cache stays exact whatever happens (plan §4.4): an aborted reply is recorded as
 /// unanswered, so the next request rewinds past it (`replaceLastUserTurn` or `diverged`).
@@ -207,20 +207,92 @@ public struct LocalToolLoop: Sendable {
         /// Lets every call run.
         public static let none = CallGuard { _, _ in nil }
 
-        /// `set_timer` runs only when the user stated an amount (`statesAnAmount`). Without one
-        /// the model invented the duration, typically for a question about a running timer that
-        /// the on-device tools can't read. English and Chinese amounts are recognised; digits in
-        /// any script count too, which is how speech recognition writes most numbers.
+        /// Stops the measured failure (plan §9): asked how long a timer had left, Woof started a
+        /// one-second timer. A `set_timer` call runs when the user stated an amount the guard can
+        /// read (`statesAnAmount`). Without one, it doesn't run when the user's words ask about a
+        /// timer that is already running (`asksAboutRunningTimer`), or when `seconds` is under
+        /// `shortestUnstatedSeconds`, a duration nobody wants without saying so (in any
+        /// language).
+        ///
+        /// Any other call runs. Amounts are read only in English, Chinese and digits, and the
+        /// app takes typed and spoken requests in every language speech recognition offers:
+        /// objecting to every call without a readable amount would refuse "pon un temporizador
+        /// de diez minutos" every time, and offline it could never be set at all.
         public static let standard = CallGuard { call, userText in
             switch call.name {
             case CallGuard.setTimerName:
-                return CallGuard.statesAnAmount(userText) ? nil : "the user didn't say how long the timer should run"
+                return CallGuard.timerObjection(seconds: CallGuard.seconds(of: call), userText: userText)
             default:
                 return nil
             }
         }
 
         static let setTimerName = "set_timer"
+        /// A timer shorter than this (in seconds) runs only when the user stated an amount.
+        public static let shortestUnstatedSeconds = 5
+
+        /// Why a `set_timer` call for `seconds` (nil when unreadable) doesn't fit `userText`.
+        static func timerObjection(seconds: Int?, userText: String) -> String? {
+            if statesAnAmount(userText) {
+                return nil
+            }
+            if asksAboutRunningTimer(userText) {
+                return "the user asked about a timer that is already running, and set_timer only starts a new one"
+            }
+            if let seconds, seconds < shortestUnstatedSeconds {
+                return "the user didn't say how long the timer should run"
+            }
+            return nil
+        }
+
+        /// The call's `seconds` as a whole number, also when the model wrote it as a string
+        /// ("600"), as on-device models do.
+        static func seconds(of call: PendingToolCall) -> Int? {
+            guard let value = call.input?["seconds"] else { return nil }
+            if let whole = value.intValue {
+                return whole
+            }
+            guard let text = value.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+            if let whole = Int(text) {
+                return whole
+            }
+            guard let number = Double(text), number.isFinite, abs(number) < 9e15 else { return nil }
+            return Int(number.rounded(.down))
+        }
+
+        /// Whether `text` asks about a timer that is already running: in English "left",
+        /// "remaining", "how long", "how much"; in Chinese 剩 ("还剩", "剩下"), 多久, 多长时间,
+        /// 多少时间 or 几 before a unit of time ("还有几分钟"). Other languages aren't recognised.
+        public static func asksAboutRunningTimer(_ text: String) -> Bool {
+            let words = text.lowercased().split { !$0.isLetter }.map(String.init)
+            if words.contains(where: { runningTimerWords.contains($0) }) {
+                return true
+            }
+            for (index, word) in words.enumerated().dropLast() {
+                if word == "how", runningTimerFollowers.contains(words[index + 1]) {
+                    return true
+                }
+            }
+            if runningTimerChinese.contains(where: { text.contains($0) }) {
+                return true
+            }
+            let characters = Array(text)
+            for (index, character) in characters.enumerated() where character == "几" || character == "幾" {
+                var next = index + 1
+                while next < characters.count, chineseBetween.contains(characters[next]) {
+                    next += 1
+                }
+                if next < characters.count, chineseTimeUnits.contains(characters[next]) {
+                    return true
+                }
+            }
+            return false
+        }
+
+        private static let runningTimerWords: Set<String> = ["left", "remaining", "remain", "remains", "elapsed"]
+        /// Words after "how" that ask for a duration: "how long", "how much (time)".
+        private static let runningTimerFollowers: Set<String> = ["long", "much"]
+        private static let runningTimerChinese = ["剩", "多久", "多长", "多長", "多少时间", "多少時間"]
 
         /// The user's words a call should fit: the newest user turn's text and, when the reply
         /// before it asked the user something ("What should I call it?"), the user turn that

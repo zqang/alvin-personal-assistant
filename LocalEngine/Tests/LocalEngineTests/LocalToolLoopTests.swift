@@ -269,7 +269,7 @@ final class LocalToolLoopTests: XCTestCase {
         let record = try XCTUnwrap(rounds(refused.events).first?.calls.first)
         XCTAssertEqual(record.name, "set_timer")
         XCTAssertTrue(record.isError)
-        XCTAssertTrue(record.result.contains("didn't say how long"), record.result)
+        XCTAssertTrue(record.result.contains("already running"), record.result)
         XCTAssertTrue(offlineLog.runs.isEmpty)
         try await assertConsistent(offline, "guard refusal")
 
@@ -280,6 +280,34 @@ final class LocalToolLoopTests: XCTestCase {
         let ran = await collect(permissive.loop.run(request(question, permissive.runner)))
         XCTAssertNil(ran.error)
         XCTAssertEqual(unguardedLog.runs.map(\.name), ["set_timer"])
+    }
+
+    /// A duration typed in words of a language the guard can't read still sets the timer, also
+    /// offline and also when the amount came in the answer to the model's question.
+    func testGuardLetsATimerInAnotherLanguageRun() async throws {
+        let timer = call("set_timer", "{\"seconds\": \"600\", \"label\": \"pasta\"}")
+        let conversations: [[ChatTurn]] = [
+            [ChatTurn(role: .user, text: "Pon un temporizador de diez minutos para la pasta.")],
+            [
+                ChatTurn(role: .user, text: "Pon un temporizador para la pasta."),
+                ChatTurn(role: .assistant, text: "¿Cuánto tiempo?"),
+                ChatTurn(role: .user, text: "Diez minutos."),
+            ],
+            [ChatTurn(role: .user, text: "Tolong set timer sepuluh minit untuk pasta.")],
+        ]
+        for turns in conversations {
+            let (engine, _) = try scriptedEngine(tiny: .hybrid, scripts: scripts([timer, "Listo."]))
+            let log = LoopToolLog()
+            let fixture = makeLoop(engine, log: log, isOnline: { false })
+            let outcome = await collect(fixture.loop.run(EngineRequest(system: system, tools: fixture.runner.definitions, turns: turns)))
+            let label = turns.last?.text ?? ""
+            XCTAssertNil(outcome.error, label)
+            XCTAssertEqual(log.runs.map(\.name), ["set_timer"], label)
+            XCTAssertEqual(log.runs.first?.input["seconds"], 600, label)
+            XCTAssertEqual(rounds(outcome.events).first?.calls.first?.isError, false, label)
+            XCTAssertEqual(text(outcome.events), "Listo.", label)
+            try await assertConsistent(engine, label)
+        }
     }
 
     // MARK: Limits and endings
@@ -334,17 +362,27 @@ final class LocalToolLoopTests: XCTestCase {
         }
     }
 
-    /// Ending the loop's stream mid-reply stops the engine; its cache stays exact.
+    /// Ending the loop's stream mid-reply stops the engine (the termination reaches it through
+    /// the loop's task and the engine's stream) well before the reply's end; its cache stays exact.
     func testTerminatingTheStreamStopsTheEngine() async throws {
         for tiny in EngineTestHarness.Tiny.allCases {
+            let script = tokenizer.encodeRaw(String(repeating: "word ", count: 80))
             let (engine, _) = try scriptedEngine(
-                tiny: tiny, scripts: scripts([String(repeating: "word ", count: 40)]),
-                configuration: EngineTestHarness.testConfiguration(maxTokens: 512))
+                tiny: tiny, scripts: [script], configuration: EngineTestHarness.testConfiguration(maxTokens: 512))
             let fixture = makeLoop(engine, log: LoopToolLog())
+            var texts = 0
             for try await event in fixture.loop.run(request("Say many words.", fixture.runner)) {
-                if case .reply(.text) = event { break }
+                if case .reply(.text) = event {
+                    texts += 1
+                    break
+                }
             }
+            XCTAssertEqual(texts, 1, "\(tiny)")
             await engine.waitUntilIdle()
+
+            let (fed, replyStart) = try await engine.withSession { ($0.ledger.count, $0.snapshot?.turns.first?.replyStart) }
+            let start = try XCTUnwrap(replyStart, "\(tiny)")
+            XCTAssertLessThan(fed - start, script.count, "\(tiny): the engine stopped before the end of the reply")
             try await assertConsistent(engine, "\(tiny) terminated")
         }
     }
@@ -504,6 +542,68 @@ final class LocalToolLoopLogicTests: XCTestCase {
         XCTAssertNil(LocalToolLoop.CallGuard.standard.check(timer, "Set a timer for five minutes."))
         XCTAssertNil(LocalToolLoop.CallGuard.standard.check(reminder, question))
         XCTAssertNil(LocalToolLoop.CallGuard.none.check(timer, question))
+    }
+
+    /// The standard guard objects to a timer only when the user's words ask about a running
+    /// timer or the duration is too short to go unsaid; an amount it can't read lets the call run.
+    func testStandardGuardObjectsOnlyToTheMeasuredFailure() {
+        func timer(_ seconds: JSONValue) -> PendingToolCall {
+            PendingToolCall(id: "call_1", name: "set_timer", input: ["seconds": seconds])
+        }
+        let guardCheck = LocalToolLoop.CallGuard.standard.check
+
+        // Asked about a running timer: refused whatever the duration (the lab's case: "1").
+        for question in ["How long is left on my timer?", "我的计时器还剩多少时间？", "计时器还剩几分钟？", "How much time on the pasta timer?"] {
+            for seconds: JSONValue in [1, "1", 600, "600"] {
+                let objection = guardCheck(timer(seconds), question)
+                XCTAssertTrue(objection?.contains("already running") == true, "\(question) \(seconds): \(String(describing: objection))")
+            }
+        }
+
+        // A tiny duration nobody stated, in any language.
+        for text in ["¿Cuánto le queda a mi temporizador?", "Wie lange läuft mein Timer noch?", "Set a timer"] {
+            for seconds: JSONValue in [1, "1", "4", 0, -3, "2.5"] {
+                let objection = guardCheck(timer(seconds), text)
+                XCTAssertTrue(objection?.contains("didn't say how long") == true, "\(text) \(seconds): \(String(describing: objection))")
+            }
+        }
+
+        // Amounts in words of other languages, typed: the timer runs.
+        let typed: [(String, JSONValue)] = [
+            ("Pon un temporizador de diez minutos", 600), ("¿Puedes poner un temporizador de diez minutos?", "600"),
+            ("Tolong set timer sepuluh minit", "600"), ("Stell einen Timer auf zwanzig Minuten", 1_200),
+            ("Mets un minuteur de trente secondes", 30), ("タイマーを五分にセットして", 300), ("타이머 십 분 맞춰 줘", 600),
+        ]
+        for (text, seconds) in typed {
+            XCTAssertNil(guardCheck(timer(seconds), text), text)
+        }
+
+        // An amount the guard reads lets even a one-second timer run.
+        XCTAssertNil(guardCheck(timer(1), "Set a timer for 1 second."))
+        XCTAssertNil(guardCheck(timer("1"), "Set a timer for one second."))
+        // Without an amount or a question, a plausible duration runs: the guard can't tell an
+        // invented duration from one stated in a language it doesn't read.
+        XCTAssertNil(guardCheck(timer(300), "Set a timer"))
+        // Unreadable `seconds` is left to input validation.
+        XCTAssertNil(guardCheck(timer("soon"), "Set a timer"))
+        XCTAssertNil(guardCheck(PendingToolCall(id: "call_2", name: "set_timer", input: ["label": "Tea"]), "Set a timer"))
+    }
+
+    func testAsksAboutRunningTimer() {
+        let questions = [
+            "How long is left on my timer?", "how much time remaining", "What's left on the pasta timer", "How long until the timer ends?",
+            "我的计时器还剩多少时间？", "计时器还剩几分钟？", "还有多久？", "計時器還有幾分鐘", "倒计时还有几个小时", "计时器剩下的时间",
+        ]
+        for text in questions {
+            XCTAssertTrue(LocalToolLoop.CallGuard.asksAboutRunningTimer(text), text)
+        }
+        let requests = [
+            "Set a timer for ten minutes", "Set a timer", "Timer for half an hour", "", "设一个计时器", "帮我设一个二十分钟的计时器",
+            "Pon un temporizador de diez minutos", "Show me how to cook rice", "几乎完成了",
+        ]
+        for text in requests {
+            XCTAssertFalse(LocalToolLoop.CallGuard.asksAboutRunningTimer(text), text)
+        }
     }
 
     func testCombinedStatistics() {

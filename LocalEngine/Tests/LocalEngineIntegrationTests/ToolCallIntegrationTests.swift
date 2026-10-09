@@ -52,6 +52,8 @@ final class ToolCallIntegrationTests: XCTestCase {
 
         var rows: [[String]] = []
         var parsedReminders = 0
+        var ranReminders = 0
+        var matchingReminders = 0
         for prompt in prompts {
             let turn = ChatTurn(role: .user, text: prompt.text, context: "<context>time: \(lab.contextTime); input: \(prompt.input)</context>")
             let request = EngineRequest(system: system, tools: runner.definitions, turns: [turn], greedy: true)
@@ -74,10 +76,25 @@ final class ToolCallIntegrationTests: XCTestCase {
                 if case .toolRound(let round) = event { return round.calls }
                 return []
             }
-            let runs = Array(log.runs.dropFirst(runsBefore))
-            let reminder = runs.first { $0.name == "create_reminder" }
-            if reminder != nil { parsedReminders += 1 }
-            let matches = reminder.map { Self.matches($0.input, prompt.expectedArguments) } ?? false
+            // Parsed: the model's create_reminder call reached a round, whether or not its input
+            // then passed validation. Ran: the tool itself ran (with the coerced input).
+            let parsed = records.filter { $0.name == "create_reminder" }
+            let ran = Array(log.runs.dropFirst(runsBefore)).first { $0.name == "create_reminder" }
+            let matches = ran.map { Self.matches($0.input, prompt.expectedArguments) } ?? false
+            if !parsed.isEmpty { parsedReminders += 1 }
+            if ran != nil { ranReminders += 1 }
+            if matches { matchingReminders += 1 }
+            let started = events.contains(.progress(.toolCallStarted(name: "create_reminder")))
+            let parsedCell: String
+            if ran != nil {
+                parsedCell = matches ? "yes, ran" : "yes, ran, args differ"
+            } else if let rejected = parsed.first {
+                parsedCell = Self.cell("yes, rejected: \(rejected.result)")
+            } else if started {
+                parsedCell = "started, no call"
+            } else {
+                parsedCell = "no call"
+            }
 
             let (report, ledger) = try await engine.withSession { ($0.assertConsistent(), $0.ledger.count) }
             XCTAssertTrue(report.agrees(margin: NearTieTally.quantizedTolerance), "\(repo) \(prompt.id): \(report)")
@@ -102,7 +119,7 @@ final class ToolCallIntegrationTests: XCTestCase {
                 prompt.id,
                 Self.cell(records.map { "\($0.name)(\(Self.json($0.input)))\($0.isError ? " → error \($0.result)" : "")" }.joined(separator: "; ")),
                 Self.cell("create_reminder(\(Self.json(prompt.expectedArguments)))"),
-                reminder == nil ? "no call" : (matches ? "yes" : "args differ"),
+                parsedCell,
                 Self.cell(String(text.prefix(60))),
                 Self.cell(outcome),
                 "\(reports.all.first?.rounds ?? 0)",
@@ -115,7 +132,9 @@ final class ToolCallIntegrationTests: XCTestCase {
             title: "Local tool loop, \(repo) (greedy, \(engine.info.toolCallFormat), \(lab.tools.count) tools)",
             header: ["Prompt", "Calls", "Expected", "Parsed create_reminder", "Reply", "Outcome", "Rounds", "TTFT ms", "Tokens", "Ledger"],
             rows: rows)
-        EngineReport.append("- Parsed create_reminder calls (\(repo)): \(parsedReminders)/\(prompts.count) (report only)")
+        EngineReport.append(
+            "- create_reminder (\(repo)), report only: parsed \(parsedReminders)/\(prompts.count), ran \(ranReminders)/\(prompts.count), "
+                + "expected arguments \(matchingReminders)/\(prompts.count)")
     }
 
     // MARK: Helpers
