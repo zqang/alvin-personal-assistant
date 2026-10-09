@@ -154,8 +154,9 @@ What became of Husky's public claims:
 5. Weights load on the CPU inside a detached task; `warmUp()` then runs small GPU forwards in the foreground.
 
 Before it checks free memory for a new model, the host waits until the model it unloaded is no longer used by
-a cancelled load, a check or a reply still running (a pending check is cancelled), so two models are never
-resident at once.
+a cancelled load, a check or a reply still running, or a check or prewarm still waiting for its turn, so two
+models are never resident at once. A pending check is cancelled, and a waiting check or prewarm returns without
+running on the unloaded model.
 
 ### 4.3 The `HybridQwen35` fork
 

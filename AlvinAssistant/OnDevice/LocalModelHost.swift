@@ -107,9 +107,10 @@ final class LocalModelHost {
     /// waits for it before downloading.
     @ObservationIgnored private var orphan: Task<Void, Never>?
     /// Ends once nothing uses the engine `unload()` let go of: its pending check (cancelled),
-    /// the checks, replies and prewarms in progress, and the jobs on its queue. The next load
-    /// waits for it, and for `orphan`, before its memory check, so two models are never resident
-    /// at once.
+    /// the checks, replies and prewarms in progress, the checks and the prewarm still waiting for
+    /// their turn (they return without running), and the jobs on its queue. The next load waits
+    /// for it, and for `orphan`, before its memory check, so two models are never resident at
+    /// once.
     @ObservationIgnored private var retired: Task<Void, Never>?
     @ObservationIgnored private var downloading = false
     /// The settings most recently passed in; a load in progress applies them when it ends.
@@ -123,6 +124,8 @@ final class LocalModelHost {
     @ObservationIgnored private var prewarmJob: Task<Void, Never>?
     /// Set while a check (self-test, cost probe, kernel comparison) has the engine to itself.
     @ObservationIgnored private var maintenance: Task<Void, Never>?
+    /// Checks in `exclusively`, waiting for their turn or running. Each holds its engine.
+    @ObservationIgnored private var checks = 0
     @ObservationIgnored private var pendingCheck: Task<Void, Never>?
     /// Replies and prewarms in progress; a check waits for them. Only `beginJob` and
     /// `beginPrewarmJob` add to it.
@@ -253,18 +256,22 @@ final class LocalModelHost {
 
     /// Sets `retired` for the loaded engine, which is about to be let go of. Its pending check is
     /// cancelled; a check, reply or prewarm in progress ends on its own (a reply when it is done
-    /// or the app leaves the screen), and the next load waits for that.
+    /// or the app leaves the screen), a check or prewarm still waiting for its turn returns
+    /// without running once it gets it, and the next load waits for all of them.
     private func retire() {
         guard let engine else { return }
         let previous = retired
         let check = pendingCheck
         check?.cancel()
+        // unload() cancels it, but while it waits for its turn it still holds the engine.
+        let prewarm = prewarming
         let reset = invalidating
         retired = Task {
             await previous?.value
             await check?.value
-            await waitForChecks()
-            while activeJobs > 0 {
+            await prewarm?.value
+            // A check waiting behind another one has captured the engine too.
+            while checks > 0 || activeJobs > 0 {
                 try? await Task.sleep(for: .milliseconds(50))
             }
             await reset?.value
@@ -607,7 +614,7 @@ final class LocalModelHost {
     private func runMissingChecks(_ given: InferenceEngine? = nil) async {
         guard let engine = given ?? engine, let settings = latest, needsCheck(settings) else { return }
         // Nothing runs when cancelled first (a load that unload() stopped).
-        _ = try? await exclusively {
+        _ = try? await exclusively(engine) {
             // Each check only while `engine` is still the loaded one: an unloaded engine's results
             // aren't kept, and checking it would keep it in memory for seconds.
             if self.engine === engine, settings.localEngineMode == .automatic, selfTest == nil {
@@ -624,12 +631,13 @@ final class LocalModelHost {
     }
 
     /// Runs the engine self-test now (Settings, the benchmark) and stores its result. Nil when no
-    /// model is loaded, when the caller was cancelled before it started, or when the app stopped
-    /// being active during the run (nothing is stored).
+    /// model is loaded (also when it was unloaded before the test's turn came), when the caller was
+    /// cancelled before it started, or when the app stopped being active during the run (nothing
+    /// is stored).
     @discardableResult
     func runSelfTest() async -> EngineSelfTest.Result? {
         guard let engine, status == .ready else { return nil }
-        let result = try? await exclusively { () async -> EngineSelfTest.Result? in
+        let result = try? await exclusively(engine) { () async -> EngineSelfTest.Result? in
             statusText = "Checking the on-device engine…"
             defer { statusText = nil }
             return await performSelfTest(engine)
@@ -642,10 +650,8 @@ final class LocalModelHost {
     /// and drafts with it from the next reply.
     @discardableResult
     func measureSpeed() async throws -> CostCurve {
-        guard let engine, status == .ready else {
-            throw AssistantError.missingConfiguration("Load the on-device model first.")
-        }
-        return try await exclusively {
+        guard let engine, status == .ready else { throw Self.notLoaded }
+        return try await exclusively(engine) {
             statusText = "Measuring the on-device engine's speed…"
             defer { statusText = nil }
             guard let curve = try await performCostProbe(engine) else { throw Self.leftForeground }
@@ -675,10 +681,8 @@ final class LocalModelHost {
         guard let kernels = EngineSetup.fastKernels else {
             throw AssistantError.missingConfiguration("This build has no fast kernels.")
         }
-        guard let engine, status == .ready else {
-            throw AssistantError.missingConfiguration("Load the on-device model first.")
-        }
-        return try await exclusively {
+        guard let engine, status == .ready else { throw Self.notLoaded }
+        return try await exclusively(engine) {
             statusText = "Testing the fast kernels…"
             defer { statusText = nil }
             let before = Self.interruptions.withLock { $0 }
@@ -762,17 +766,22 @@ final class LocalModelHost {
         return curve
     }
 
-    /// Runs `body` with the engine to itself: it waits for any other check and a pending session
+    /// Runs `body` with `engine` to itself: it waits for any other check and a pending session
     /// reset, then for replies and prewarms in progress, and keeps new ones (and new resets)
     /// waiting until it returns. A check works in several engine jobs and needs the session
-    /// unchanged between them. Throws `CancellationError`, without running `body`, when the caller
-    /// is cancelled before `body` starts.
-    private func exclusively<T>(_ body: () async throws -> T) async throws -> T {
+    /// unchanged between them. Throws, without running `body`, `CancellationError` when the caller
+    /// is cancelled before `body` starts and `notLoaded` when `engine` was unloaded meanwhile.
+    private func exclusively<T>(_ engine: InferenceEngine, _ body: () async throws -> T) async throws -> T {
+        // Counted from here: a check waiting for its turn holds `engine` too, and `retire()`
+        // waits for it.
+        checks += 1
+        defer { checks -= 1 }
         // Claimed right after the last wait, with no suspension in between.
         while let next = blocker {
             await wait(for: next)
         }
         try Task.checkCancellation()
+        guard self.engine === engine else { throw Self.notLoaded }
         let (signal, done) = AsyncStream<Void>.makeStream()
         maintenance = Task {
             for await _ in signal {}
@@ -788,6 +797,7 @@ final class LocalModelHost {
             try await Task.sleep(for: .milliseconds(50))
         }
         try Task.checkCancellation()
+        guard self.engine === engine else { throw Self.notLoaded }
         return try await body()
     }
 
@@ -1234,6 +1244,7 @@ final class LocalModelHost {
     // MARK: - Helpers
 
     private static let leftForeground = AssistantError.stream(type: "background", message: "the app left the screen.")
+    private static let notLoaded = AssistantError.missingConfiguration("Load the on-device model first.")
 
     /// Qwen-family chat templates: answer directly, without a reasoning block.
     nonisolated private static let chatContext: [String: any Sendable] = ["enable_thinking": false]
