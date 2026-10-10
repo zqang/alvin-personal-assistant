@@ -11,11 +11,14 @@ public struct ChatTurn: Equatable, Sendable {
     public var text: String
     /// Per-turn metadata (local time, spoken or typed) sent ahead of a user turn's text.
     public var context: String?
+    /// Client tool rounds an assistant turn ran before (or instead of) its text, in order.
+    public var toolRounds: [ToolRound]
 
-    public init(role: ChatRole, text: String, context: String? = nil) {
+    public init(role: ChatRole, text: String, context: String? = nil, toolRounds: [ToolRound] = []) {
         self.role = role
         self.text = text
         self.context = context
+        self.toolRounds = toolRounds
     }
 }
 

@@ -1,0 +1,169 @@
+name: Local engine
+
+on:
+  push:
+    paths: ["LocalEngine/**", "AssistantKit/**", ".github/workflows/local-engine.yml"]
+  schedule:
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+    inputs:
+      woof:
+        description: "Also run integration suites on Underdog Woof 4B (about 2.5 GB)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    name: LocalEngine on the Metal GPU
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      DD: ${{ github.workspace }}/build/DD
+      SPM: ${{ github.workspace }}/build/SourcePackages
+      REPORT: ${{ github.workspace }}/build/engine-report.md
+      WOOF: ${{ (github.event_name == 'workflow_dispatch' && inputs.woof) || contains(github.event.head_commit.message, '[ci woof]') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select the newest stable Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode_[0-9]*.app | grep -viE 'beta|rc' | sort -V | tail -1)
+          sudo xcode-select -s "$latest"
+          xcodebuild -version
+
+      - name: Metal Toolchain
+        run: |
+          xcodebuild -showComponent MetalToolchain | grep -q "Status: installed" \
+            || xcodebuild -downloadComponent MetalToolchain
+
+      - name: GPU
+        run: system_profiler SPDisplaysDataType SPHardwareDataType | grep -E "Chip|Chipset|Metal|Memory|Model" || true
+
+      - name: Cache SwiftPM checkouts
+        uses: actions/cache@v4
+        with:
+          path: build/SourcePackages
+          key: le-spm-${{ hashFiles('LocalEngine/Package.swift', 'LocalEngine/Package.resolved') }}
+
+      - name: Build for testing (macOS, Release, testable)
+        working-directory: LocalEngine
+        run: |
+          set -o pipefail
+          mkdir -p ../build
+          xcodebuild build-for-testing -scheme LocalEngine-Package \
+            -destination 'platform=macOS,arch=arm64' -configuration Release ENABLE_TESTABILITY=YES \
+            -derivedDataPath "$DD" -clonedSourcePackagesDirPath "$SPM" \
+            -skipMacroValidation -skipPackagePluginValidation -quiet
+          echo "=== BEGIN PACKAGE RESOLVED ==="; cat Package.resolved 2>/dev/null || echo "(none)"; echo "=== END PACKAGE RESOLVED ==="
+
+      # Not -quiet: a crashing test's stderr (Metal validation assertions, MLX errors) only
+      # reaches the log this way.
+      - name: Unit tests (tiny models, no network)
+        working-directory: LocalEngine
+        env:
+          # Metal API validation. It caught a real lifetime bug in run 37791524986: MLX released
+          # a gated-delta pipeline state that encoded commands still used (see TinyModels).
+          TEST_RUNNER_METAL_DEVICE_WRAPPER_TYPE: "1"
+          TEST_RUNNER_LOCAL_ENGINE_REPORT: ${{ github.workspace }}/build/engine-report.md
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building -scheme LocalEngine-Package \
+            -destination 'platform=macOS,arch=arm64' -configuration Release -derivedDataPath "$DD" \
+            -skip-testing:LocalEngineIntegrationTests -parallel-testing-enabled NO \
+            -resultBundlePath ../build/unit.xcresult
+
+      - name: Compile for iOS
+        working-directory: LocalEngine
+        run: |
+          set -o pipefail
+          xcodebuild build -scheme LocalEngine -destination 'generic/platform=iOS' -configuration Debug \
+            -derivedDataPath ../build/DDiOS -clonedSourcePackagesDirPath "$SPM" \
+            -skipMacroValidation -skipPackagePluginValidation -quiet CODE_SIGNING_ALLOWED=NO
+
+      - name: Restore model cache
+        id: models
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/huggingface/hub
+          key: hf-${{ hashFiles('LocalEngine/ci-models.txt') }}-${{ env.WOOF == 'true' && 'woof' || 'core' }}
+
+      - name: Prefetch models (retried)
+        if: steps.models.outputs.cache-hit != 'true'
+        env:
+          HF_TOKEN_SECRET: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -n "$HF_TOKEN_SECRET" ]; then export HF_TOKEN="$HF_TOKEN_SECRET"; fi
+          pipx install "huggingface_hub[hf_xet]"
+          specs=$(grep -vE '^[[:space:]]*(#|$)' LocalEngine/ci-models.txt)
+          if [ "$WOOF" = "true" ]; then specs="$specs ConwayResearch/Underdog-Woof-4B-1.1"; fi
+          for spec in $specs; do
+            repo="${spec%@*}"; rev=main
+            if [ "$spec" != "$repo" ]; then rev="${spec##*@}"; fi
+            for attempt in 1 2 3; do
+              hf download "$repo" --revision "$rev" && break
+              if [ "$attempt" = 3 ]; then echo "::error::could not download $repo"; exit 1; fi
+              sleep $((attempt * 20))
+            done
+          done
+          if find ~/.cache/huggingface/hub -name '*.incomplete' | grep -q .; then echo "::error::partial download"; exit 1; fi
+          echo "=== BEGIN MODEL SNAPSHOTS ==="
+          for d in ~/.cache/huggingface/hub/models--*; do echo "$(basename "$d") $(cat "$d"/refs/* 2>/dev/null | head -1) $(du -sh "$d" | cut -f1)"; done
+          echo "=== END MODEL SNAPSHOTS ==="
+
+      - name: Save model cache
+        if: steps.models.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/huggingface/hub
+          key: ${{ steps.models.outputs.cache-primary-key }}
+
+      - name: Integration tests (real models)
+        working-directory: LocalEngine
+        run: |
+          set -o pipefail
+          export TEST_RUNNER_LOCAL_ENGINE_INTEGRATION=1
+          export TEST_RUNNER_LOCAL_ENGINE_OFFLINE=1
+          export TEST_RUNNER_HF_HUB_CACHE="$HOME/.cache/huggingface/hub"
+          export TEST_RUNNER_LOCAL_ENGINE_REPORT="$REPORT"
+          if [ "$WOOF" = "true" ]; then export TEST_RUNNER_LOCAL_ENGINE_WOOF=1; fi
+          xcodebuild test-without-building -scheme LocalEngine-Package \
+            -destination 'platform=macOS,arch=arm64' -configuration Release -derivedDataPath "$DD" \
+            -only-testing:LocalEngineIntegrationTests -parallel-testing-enabled NO \
+            -test-timeouts-enabled YES -maximum-test-execution-time-allowance 1200 \
+            -resultBundlePath ../build/integration.xcresult
+
+      - name: Engine report
+        if: always()
+        run: |
+          echo "=== BEGIN ENGINE REPORT ==="; cat build/engine-report.md 2>/dev/null || echo "(none)"; echo "=== END ENGINE REPORT ==="
+
+      - name: Failure summary
+        if: failure()
+        run: |
+          for r in build/unit.xcresult build/integration.xcresult; do
+            [ -d "$r" ] || continue
+            echo "=== SUMMARY $r ==="
+            xcrun xcresulttool get test-results summary --path "$r" || true
+            echo "=== FAILED TESTS $r ==="
+            xcrun xcresulttool get test-results tests --path "$r" > "$r.tests.json" || true
+            # Failed test cases with their failure messages; the whole tree if jq can't filter it.
+            jq -e '[.. | objects | select(.nodeType? == "Test Case" and .result? == "Failed")] | select(length > 0)' "$r.tests.json" \
+              || head -c 200000 "$r.tests.json"
+          done
+          echo "=== CRASH REPORTS ==="
+          ls -t ~/Library/Logs/DiagnosticReports/*.ips 2>/dev/null | head -5 | xargs -I{} sh -c 'echo "=== CRASH {} ==="; head -c 20000 "{}"'
+
+      - name: Upload results on failure (for humans)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-engine-xcresult
+          path: build/*.xcresult
+          retention-days: 7

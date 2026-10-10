@@ -16,7 +16,7 @@ service, such as **Doubao on Volcengine Ark**, DeepSeek, or OpenAI.
   - The end of your turn is detected from recognizer silence plus an adaptive noise-floor voice detector.
   - It waits longer after words like "and…" or "然后…" and less after a finished question.
   - If you keep talking before the answer starts, it takes your turn back instead of answering half a
-    sentence.
+    sentence. Once the answer has used a tool (to set a timer, say), your words start the next turn instead.
 - **Interrupt by talking (barge-in).** Speech is played through the same audio engine as the microphone, so
   Apple's echo cancellation removes it. A second filter ignores words that match what the assistant is saying,
   so it doesn't interrupt itself.
@@ -32,10 +32,39 @@ service, such as **Doubao on Volcengine Ark**, DeepSeek, or OpenAI.
 - **Sharper listening (optional).** Turn on **Qwen3-ASR listening** and each finished turn is transcribed again
   on the iPhone by [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-0.6B) before it's sent, for English and
   Chinese (China mainland). Apple's recognizer still drives the live captions and turn-taking.
+- **On-device replies (optional).** Choose **Provider › On this iPhone** and replies come from a model running
+  on the phone with MLX, offline once downloaded:
+  - [Underdog Woof 4B](https://huggingface.co/ConwayResearch/Underdog-Woof-4B-1.1)
+  - Underdog Woof 2B
+  - Qwen3.5 2B
+  - Qwen3 4B with a 0.6B draft model for speculative decoding
+
+  The model keeps its cache between turns, so each reply only reads the new message. **Settings › On-device
+  engine › Benchmark** measures it on your phone.
 - **Web search.** "What's the weather tomorrow?" and "Any news on…?" work, because Claude searches the web
   server-side.
 - **Private by default.** Speech is transcribed on the iPhone. API keys live in the iOS Keychain. There's no
   backend.
+
+## On-device engine and new settings
+
+On-device replies run on the **Alvin engine** (`LocalEngine/`), a Swift inference engine on MLX built for
+Woof and Qwen. It keeps the conversation's tokens in the model's cache and feeds only what changed, with exact
+rewind points for the hybrid Qwen3.5 layers; it keeps the processed system prompt on disk, so a new session
+starts warm; it checks drafted tokens in blocks (lossless speculative decoding, which pays most in tool calls
+and replies that repeat the prompt); and it lets the model use the device tools. The first time a model loads,
+a self-test of a few seconds checks the engine on your iPhone. With **Settings › On-device engine › Engine ›
+Automatic** (the default) the engine answers only once that test has passed, and MLX's stock session answers
+until then; the same section sets speculative decoding (off, tool calls only, automatic) and the system prompt
+on disk, measures the phone's speed and opens a benchmark that compares the two engines. The other new
+settings are **Routing** (off by default: automatic routing sends each request to Claude or to the iPhone by
+connection, content and recent speed, with "Prefer on-device" and "Answer small talk on device"), **Tools**
+(reminders, calendar and timers, for Claude and for the on-device model), **Deep thinking** ("Think deeper" in
+the chat and in voice mode: one careful answer, or three perspectives merged into one, with a daily limit) and
+**Voice responsiveness** (start answering early, short spoken cues such as "Let me check.", a turn chime,
+lowering the voice when you talk over it, and a latency report). The design, the CI checks and what still
+needs testing on a device are in
+[docs/architecture-plan-on-device-and-orchestration.md](docs/architecture-plan-on-device-and-orchestration.md).
 
 ## Requirements
 
@@ -66,6 +95,9 @@ Tips:
 - **Voice engine › OpenAI** gives the most natural speech. It needs an OpenAI API key and costs a little per
   minute of audio. If it fails, the app falls back to the built-in voice.
 - The simulator can run the app, but voice mode needs a real iPhone for the microphone and echo cancellation.
+- **On-device replies** download 1.5–2.7 GB the first time (Wi-Fi only) and run only while the app is open. Run
+  the benchmark from a **Release** build and copy the results. Qwen3-ASR listening loads after the reply model
+  and gives way to it if memory is short.
 - **Qwen3-ASR listening** downloads about 1 GB the first time (use Wi-Fi), needs a recent iPhone (iPhone 15 Pro
   or newer is best), and works only while the app is open; with the screen locked, turns use Apple's text.
   Build with the **Release** configuration for realistic speed.
@@ -102,15 +134,18 @@ Web search is only available with Claude.
           └──────────── AVAudioPlayerNode ◀┘ ─▶ speaker
 ```
 
-The code is split in two:
+The code is split in three:
 
 - **`AssistantKit/`** is a Swift package with everything that isn't iOS-specific, all covered by unit tests:
-  - the Claude streaming client and the OpenAI-compatible client
+  - the Claude streaming client with its tool loop, and the OpenAI-compatible client
   - SSE parsing
   - the sentence chunker and the speech text cleaner
   - turn detection and barge-in echo filtering
   - prompt and history building
   - the settings model
+  - routing, tools, deep mode and voice-latency logic, and the on-device engine's session planning and
+    drafting
+- **`LocalEngine/`** is the on-device inference engine (MLX), tested on a Mac GPU in CI.
 - **`AlvinAssistant/`** is the iOS app:
   - SwiftUI views
   - SwiftData storage
@@ -121,14 +156,15 @@ The code is split in two:
 
 Swift has no official Anthropic SDK, so `ClaudeProvider` calls the Messages API over HTTP with streaming.
 
-- **Model:** `claude-opus-5` by default, with `output_config.effort: "low"` for fast spoken replies. Change the
-  model and effort in Settings; Claude Sonnet 5 and Haiku 4.5 are faster and cheaper.
+- **Model:** the catalog's newest Opus model by default (`ClaudeModelCatalog.defaultModelID`), with
+  `output_config.effort: "low"` for fast spoken replies. Change the model and effort in Settings; the Sonnet
+  and Haiku models are faster and cheaper.
 - **Web search:** the server-side `web_search` tool. When a long search pauses the turn (`pause_turn`), the
   client resumes it automatically.
-- **Refusal fallbacks are on** for Opus 5 and Fable 5.1 (`fallbacks: "default"` with the
-  `server-side-fallback-2026-07-01` beta header). If Claude's safety classifiers decline a request, the API
-  retries it on a fallback model instead of failing. Remove `fallbacks` in `ClaudeRequest.swift` if you'd rather
-  not use it.
+- **Refusal fallbacks are on** for the models that support them (`ClaudeModelCapabilities`), with
+  `fallbacks: "default"` and the `server-side-fallback-2026-07-01` beta header. If Claude's safety classifiers
+  decline a request, the API retries it on a fallback model instead of failing. Remove `fallbacks` in
+  `ClaudeRequest.swift` if you'd rather not use it.
 - **Prompt caching:** the system prompt is static, and each turn's local time is stored with the message rather
   than injected fresh. Every request's history is therefore an exact prefix of the next, and the conversation
   stays cached.
@@ -140,6 +176,9 @@ swift test --package-path AssistantKit
 ```
 
 `.github/workflows/ios.yml` runs these tests and builds the app with Xcode on every push.
+`.github/workflows/local-engine.yml` tests the on-device engine on a Mac GPU, and `model-facts.yml` and
+`drafter-lab.yml` measure the models; see
+[the CI section of the architecture doc](docs/architecture-plan-on-device-and-orchestration.md#10-ci-workflows-and-how-to-read-them).
 
 ## Security note
 
@@ -152,6 +191,6 @@ have the app authenticate to that instead.
 - **Speech-to-speech mode** (the OpenAI Realtime API or Doubao's realtime voice model) for the lowest possible
   latency and more expressive voices
 - **Camera mode:** show the assistant what you're looking at (Claude supports images)
-- **Personal tools:** reminders, calendar, and contacts through EventKit, exposed as Claude tools
+- **More personal tools:** contacts and messages, next to the reminders, calendar and timer tools
 - **iOS 26 `SpeechAnalyzer`** for faster, more accurate on-device recognition
 - **Shortcuts, the Action button, or a widget** to jump straight into voice mode

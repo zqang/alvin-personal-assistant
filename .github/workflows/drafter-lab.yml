@@ -1,0 +1,128 @@
+name: Drafter lab
+
+# Greedy outputs, drafting acceptance simulation and tool-call accuracy for Woof with mlx-lm on the
+# runner's Metal GPU, plus an optional DFlash measurement. Results are printed into the log.
+#
+# The lab runs when its script, prompts, model list or this file change, when the head commit message
+# contains [ci lab], or when started by hand. A path filter on `push` would make the [ci lab] tag
+# impossible, so every push starts the small gate job and only the gate decides whether the macOS job runs.
+#
+# Which files a push changed:
+# - an ordinary push (the old tip is an ancestor of the new one): the diff between the two tips, as a
+#   `paths:` filter would see it;
+# - a new branch, or a force push after a rebase (the old tip is zero, unfetched or not an ancestor):
+#   the files of the commits this push introduced, from the event payload. Only commits marked `distinct`
+#   (never pushed before) count, so commits the branch merely carries from the integration branch, or picks
+#   up by rebasing onto it, do not start the lab. There is deliberately no fallback to the default branch:
+#   it is behind the integration branch, so every new branch would look as if it changed the lab files.
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Decide whether the lab runs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          lab_files='scripts/(drafter_lab\.py|lab_prompts\.json|lab_models\.txt)|\.github/workflows/drafter-lab\.yml'
+          run=false
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            run=true; why="started by hand"
+          elif [[ "$MESSAGE" == *"[ci lab]"* ]]; then
+            run=true; why="[ci lab] in the head commit message"
+          else
+            if [ -n "$BEFORE" ] && ! [[ "$BEFORE" =~ ^0+$ ]] \
+              && git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
+              && git merge-base --is-ancestor "$BEFORE" HEAD; then
+              how="changed since $BEFORE"
+              changed=$(git diff --name-only "$BEFORE" HEAD)
+            else
+              how="changed by the commits this push introduced"
+              changed=$(jq -r '[.commits[]? | select(.distinct == true)
+                                | ((.added // []) + (.modified // []) + (.removed // []))[]] | unique | .[]' \
+                        "$GITHUB_EVENT_PATH")
+            fi
+            hits=$(printf '%s\n' "$changed" | grep -xE "$lab_files" || true)
+            if [ -n "$hits" ]; then
+              run=true; why="lab files $how: $(printf '%s' "$hits" | tr '\n' ' ')"
+            else
+              why="no lab file $how"
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "Drafter lab runs: $run ($why)"
+
+  lab:
+    name: Drafter lab on the Metal GPU
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: macos-26
+    timeout-minutes: 90
+    # Queue rather than cancel: a later push to the same branch must not kill a lab run in progress.
+    concurrency:
+      group: drafter-lab-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      TRANSFORMERS_VERBOSITY: error
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: GPU
+        run: system_profiler SPDisplaysDataType SPHardwareDataType | grep -E "Chip|Chipset|Metal|Memory|Model" || true
+
+      - name: Install
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install mlx mlx-lm "huggingface_hub[hf_xet]"
+          .venv/bin/pip list | grep -iE '^(mlx|transformers|huggingface)' || true
+
+      - name: Lab
+        env:
+          HF_TOKEN_SECRET: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -n "$HF_TOKEN_SECRET" ]; then export HF_TOKEN="$HF_TOKEN_SECRET"; fi
+          .venv/bin/python -I scripts/drafter_lab.py --prompts scripts/lab_prompts.json --out lab.json
+
+      - name: Print lab
+        if: always()
+        run: |
+          echo "=== BEGIN DRAFTER LAB ==="; cat lab.json 2>/dev/null || echo "(none)"; echo "=== END ==="
+          echo "=== BEGIN DRAFTER LAB SUMMARY ==="; cat lab.md 2>/dev/null || echo "(none)"; echo "=== END ==="
+
+      - name: DFlash (optional)
+        continue-on-error: true
+        env:
+          HF_TOKEN_SECRET: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -n "$HF_TOKEN_SECRET" ]; then export HF_TOKEN="$HF_TOKEN_SECRET"; fi
+          .venv/bin/pip install dflash-mlx
+          .venv/bin/pip list | grep -iE '^(dflash|mlx)' || true
+          .venv/bin/python -I scripts/drafter_lab.py --dflash --prompts scripts/lab_prompts.json --out dflash.json --baseline lab.json
+
+      - name: Print DFlash
+        if: always()
+        run: |
+          echo "=== BEGIN DFLASH ==="; cat dflash.json 2>/dev/null || echo "(none)"; echo "=== END ==="
+          echo "=== BEGIN DFLASH SUMMARY ==="; cat dflash.md 2>/dev/null || echo "(none)"; echo "=== END ==="

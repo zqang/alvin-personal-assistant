@@ -151,6 +151,12 @@ final class QwenListener {
         min(16 + Int(10 * seconds), Int(tokenRate.withLock { $0 } * 1.5))
     }
 
+    /// Returns once the passes already queued have run, so another model doesn't share the GPU
+    /// with a pass that outlived its turn.
+    nonisolated static func finishPasses() async {
+        await withCheckedContinuation { continuation in passes.async { continuation.resume() } }
+    }
+
     nonisolated private static func beginGPU() -> Bool {
         gpuAllowed.withLock { allowed in
             if allowed { inFlight.enter() }

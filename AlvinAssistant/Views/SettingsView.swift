@@ -22,7 +22,9 @@ struct SettingsView: View {
             Form {
                 aboutYouSection
                 modelSection
+                assistantSections
                 voiceSection
+                VoiceLatencySection(store: store)
                 conversationSection
                 infoSection
             }
@@ -39,7 +41,12 @@ struct SettingsView: View {
             compatibleKey = store.secret(.compatible)
             openAIKey = store.secret(.openAI)
         }
-        .onChange(of: store.settings) { store.save() }
+        .onChange(of: store.settings) {
+            store.save()
+            // A different model, draft model or kernel setting unloads the model; the engine's
+            // other options change on the running engine.
+            LocalModelHost.shared.apply(store.settings)
+        }
         .onChange(of: anthropicKey) { store.setSecret(anthropicKey, for: .anthropic) }
         .onChange(of: compatibleKey) { store.setSecret(compatibleKey, for: .compatible) }
         .onChange(of: openAIKey) { store.setSecret(openAIKey, for: .openAI) }
@@ -68,8 +75,8 @@ struct SettingsView: View {
             Picker("Provider", selection: $store.settings.provider) {
                 Text("Claude").tag(AssistantSettings.Provider.anthropic)
                 Text("OpenAI-compatible").tag(AssistantSettings.Provider.openAICompatible)
+                Text("On this iPhone").tag(AssistantSettings.Provider.onDevice)
             }
-            .pickerStyle(.segmented)
 
             switch store.settings.provider {
             case .anthropic:
@@ -85,7 +92,7 @@ struct SettingsView: View {
                     }
                 }
                 LabeledContent("Model ID") {
-                    TextField("claude-opus-5", text: $store.settings.claudeModel)
+                    TextField(ClaudeModelCatalog.defaultModelID, text: $store.settings.claudeModel)
                         .multilineTextAlignment(.trailing)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -114,6 +121,8 @@ struct SettingsView: View {
                 SecureField("API key", text: $compatibleKey)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+            case .onDevice:
+                onDeviceRows
             }
         } header: {
             Text("Model")
@@ -123,8 +132,75 @@ struct SettingsView: View {
                 Text("Get a key at console.anthropic.com. Low effort answers fastest, which suits voice. Keys are stored in the iOS Keychain on this device.")
             case .openAICompatible:
                 Text("Works with any service that offers an OpenAI-style chat completions API, such as Doubao on Volcengine Ark, DeepSeek, or OpenAI. Web search is available with Claude only.")
+            case .onDevice:
+                Text("Replies are generated on this iPhone and work offline once the model is downloaded (Wi-Fi only). There's no web search, and answers are simpler than Claude's. Best on iPhone 15 Pro or newer.")
             }
         }
+    }
+
+    /// The on-device model to download and load. Speculative decoding, the self-test and the
+    /// benchmark are in the on-device engine section.
+    @ViewBuilder
+    private var onDeviceRows: some View {
+        let option = LocalModelCatalog.option(for: store.settings.localModelID)
+        Picker("Model", selection: $store.settings.localModelID) {
+            ForEach(LocalModelCatalog.options) { option in
+                Text(option.displayName).tag(option.id)
+            }
+        }
+        if let option {
+            Text(option.note)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        Text(localStatus)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        if LocalModelHost.shared.status == .off || isLocalFailure {
+            Button("Download and load now") { LocalModelHost.shared.prepare(store.settings) }
+        }
+    }
+
+    /// Routing, the on-device model and engine, tools and deep mode, for the providers that have
+    /// them.
+    @ViewBuilder
+    private var assistantSections: some View {
+        if store.settings.provider == .anthropic {
+            RoutingSettingsSection(store: store)
+        }
+        if routesAutomatically {
+            onDeviceModelSection
+        }
+        if usesOnDeviceModel {
+            OnDeviceEngineSection(store: store)
+        }
+        if store.settings.provider != .openAICompatible {
+            ToolsSettingsSection(store: store)
+        }
+        if store.settings.provider == .anthropic {
+            DeepSettingsSection(store: store)
+        }
+    }
+
+    /// The on-device model for automatic routing, which answers when Claude can't or shouldn't.
+    private var onDeviceModelSection: some View {
+        Section {
+            onDeviceRows
+        } header: {
+            Text("On-device model")
+        } footer: {
+            Text("Answers when you're offline, and the requests routing sends to this iPhone while it's loaded. It downloads over Wi-Fi only; until it's downloaded, Claude answers everything.")
+        }
+    }
+
+    /// Automatic routing is on, with Claude as the provider.
+    private var routesAutomatically: Bool {
+        store.settings.provider == .anthropic && store.settings.routingMode == .automatic
+    }
+
+    /// The on-device model answers some or all replies.
+    private var usesOnDeviceModel: Bool {
+        store.settings.provider == .onDevice || routesAutomatically
     }
 
     private var voiceSection: some View {
@@ -225,6 +301,27 @@ struct SettingsView: View {
             return "Transcribes each finished turn again on this iPhone for better accuracy, while the app is open. Loads when you start voice mode."
         case .loading(let progress):
             return progress < 1 ? "Downloading about 1 GB over Wi-Fi… \(Int(progress * 100))%. Keep the app open." : "Loading…"
+        case .ready:
+            return "Ready."
+        case .failed(let message):
+            return message
+        }
+    }
+
+    private var isLocalFailure: Bool {
+        if case .failed = LocalModelHost.shared.status { return true }
+        return false
+    }
+
+    private var localStatus: String {
+        let host = LocalModelHost.shared
+        switch host.status {
+        case .off:
+            return host.isDownloaded(store.settings.localModelID)
+                ? "Downloaded. Loads when it's first needed."
+                : "Downloads and loads the first time you use it."
+        case .loading(let progress):
+            return progress < 1 ? "Downloading over Wi-Fi… \(Int(progress * 100))%. Keep the app open." : "Loading…"
         case .ready:
             return "Ready."
         case .failed(let message):

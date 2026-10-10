@@ -67,11 +67,39 @@ final class ClaudeRequestTests: XCTestCase {
     func testModelCapabilities() {
         XCTAssertTrue(ClaudeModelCatalog.capabilities(for: "claude-opus-5").supportsDefaultFallbacks)
         XCTAssertTrue(ClaudeModelCatalog.capabilities(for: "claude-fable-5-1").supportsDefaultFallbacks)
+        XCTAssertTrue(ClaudeModelCatalog.capabilities(for: "claude-opus-5-5").supportsDefaultFallbacks)
+        XCTAssertTrue(ClaudeModelCatalog.capabilities(for: "claude-sonnet-5-5").supportsDefaultFallbacks)
         XCTAssertFalse(ClaudeModelCatalog.capabilities(for: "claude-sonnet-5").supportsDefaultFallbacks)
         XCTAssertFalse(ClaudeModelCatalog.capabilities(for: "claude-haiku-4-5").supportsEffort)
         XCTAssertEqual(ClaudeModelCatalog.capabilities(for: "claude-fable-5-1").webSearchToolType, "web_search_20260209")
+        XCTAssertEqual(ClaudeModelCatalog.capabilities(for: "claude-sonnet-5-5").webSearchToolType, "web_search_20260209")
         XCTAssertEqual(ClaudeModelCatalog.displayName(for: "claude-opus-5"), "Claude Opus 5")
         XCTAssertEqual(ClaudeModelCatalog.displayName(for: "custom-model"), "custom-model")
+    }
+
+    func testOpus55IsTheDefaultAndSonnet55IsListed() {
+        XCTAssertEqual(ClaudeModelCatalog.defaultModelID, "claude-opus-5-5")
+        XCTAssertEqual(ClaudeModelCatalog.displayName(for: "claude-opus-5-5"), "Claude Opus 5.5")
+        XCTAssertEqual(ClaudeModelCatalog.displayName(for: "claude-sonnet-5-5"), "Claude Sonnet 5.5")
+        XCTAssertEqual(ClaudeConfiguration(apiKey: "k").model, "claude-opus-5-5")
+        XCTAssertEqual(Set(ClaudeModelCatalog.options.map(\.id)).count, ClaudeModelCatalog.options.count)
+    }
+
+    func testMidConversationSystemAndPerMessageEffortSupport() {
+        let midConversation = ["claude-opus-5", "claude-opus-5-5", "claude-opus-4-8", "claude-fable-5", "claude-fable-5-1", "claude-sonnet-5-5"]
+        for model in midConversation {
+            XCTAssertTrue(ClaudeModelCatalog.capabilities(for: model).supportsMidConversationSystem, model)
+        }
+        for model in ["claude-sonnet-5", "claude-haiku-4-5", "custom-model"] {
+            XCTAssertFalse(ClaudeModelCatalog.capabilities(for: model).supportsMidConversationSystem, model)
+        }
+        let perMessage = ["claude-opus-5", "claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"]
+        for model in perMessage {
+            XCTAssertTrue(ClaudeModelCatalog.capabilities(for: model).supportsPerMessageEffort, model)
+        }
+        for model in ["claude-opus-4-8", "claude-fable-5", "claude-sonnet-5", "claude-haiku-4-5"] {
+            XCTAssertFalse(ClaudeModelCatalog.capabilities(for: model).supportsPerMessageEffort, model)
+        }
     }
 }
 
@@ -93,16 +121,18 @@ final class ClaudeStreamDecoderTests: XCTestCase {
             #"{"type":"message_stop"}"#,
         ]
         var decoder = ClaudeStreamDecoder()
-        var output: [ReplyEvent] = []
+        var output: [AssistantEvent] = []
         for event in events {
             output += try decoder.handle(JSONValue.parse(event))
         }
         XCTAssertEqual(output, [
-            .activity("Searching the web"),
-            .activity("Searching the web for “weather Singapore”"),
-            .activity(nil),
-            .text("It's sunny"),
-            .text(" today."),
+            .progress(.responseStarted),
+            .cue(.lookingUp),
+            .reply(.activity("Searching the web")),
+            .reply(.activity("Searching the web for “weather Singapore”")),
+            .reply(.activity(nil)),
+            .reply(.text("It's sunny")),
+            .reply(.text(" today.")),
         ])
         XCTAssertEqual(decoder.stopReason, "end_turn")
         XCTAssertEqual(decoder.model, "claude-opus-5")
@@ -121,9 +151,15 @@ final class ClaudeStreamDecoderTests: XCTestCase {
             #"{"type":"message_delta","delta":{"stop_reason":"pause_turn"}}"#,
         ]
         var decoder = ClaudeStreamDecoder()
+        var output: [AssistantEvent] = []
         for event in events {
-            _ = try decoder.handle(JSONValue.parse(event))
+            output += try decoder.handle(JSONValue.parse(event))
         }
+        XCTAssertEqual(output, [
+            .cue(.lookingUp),
+            .reply(.activity("Searching the web")),
+            .reply(.activity("Searching the web for “news”")),
+        ])
         let blocks = decoder.continuationBlocks()
         XCTAssertEqual(blocks.count, 2, "the empty text block is dropped")
         XCTAssertEqual(blocks[0]["type"]?.stringValue, "thinking")
@@ -142,11 +178,11 @@ final class ClaudeStreamDecoderTests: XCTestCase {
             #"{"type":"content_block_start","index":3,"content_block":{"type":"text","text":"answer."}}"#,
         ]
         var decoder = ClaudeStreamDecoder()
-        var output: [ReplyEvent] = []
+        var output: [AssistantEvent] = []
         for event in events {
             output += try decoder.handle(JSONValue.parse(event))
         }
-        XCTAssertEqual(output, [.text("Partial "), .text("answer.")])
+        XCTAssertEqual(output, [.reply(.text("Partial ")), .reply(.text("answer."))])
         XCTAssertEqual(decoder.continuationBlocks().compactMap { $0["type"]?.stringValue }, ["text", "fallback", "text"])
     }
 
@@ -163,6 +199,73 @@ final class ClaudeStreamDecoderTests: XCTestCase {
         let block = try XCTUnwrap(decoder.continuationBlocks().first)
         XCTAssertEqual(block["text"]?.stringValue, "Cited.")
         XCTAssertEqual(block["citations"]?.arrayValue?.count, 1)
+    }
+
+    func testClientToolUseEmitsProgressCueAndActivity() throws {
+        let presentations = ["list_events": ToolPresentation(activity: "Checking your calendar", cue: .checking)]
+        var decoder = ClaudeStreamDecoder(clientTools: presentations)
+        var output: [AssistantEvent] = []
+        let events = MockTransport.toolUse(index: 0, id: "toolu_1", name: "list_events", json: #"{"start":"a","end":"b"}"#)
+            + MockTransport.toolUse(index: 1, id: "toolu_2", name: "mystery", json: "{}")
+            + ClaudeSSE.text(index: 2, "Done")
+        for event in events {
+            output += try decoder.handle(JSONValue.parse(event))
+        }
+        XCTAssertEqual(output, [
+            .progress(.toolCallStarted(name: "list_events")),
+            .cue(.checking),
+            .reply(.activity("Checking your calendar")),
+            .progress(.toolCallStarted(name: "mystery")),
+            .cue(.working),
+            .reply(.activity("Working on it")),
+            .reply(.activity(nil)),
+            .reply(.text("Done")),
+        ])
+        XCTAssertEqual(decoder.clientToolCalls(), [
+            PendingToolCall(id: "toolu_1", name: "list_events", input: ["start": "a", "end": "b"]),
+            PendingToolCall(id: "toolu_2", name: "mystery", input: .object([:])),
+        ])
+    }
+
+    func testUnparseableClientToolInputIsKeptRawAndSentBackEmpty() throws {
+        var decoder = ClaudeStreamDecoder()
+        let events = MockTransport.toolUse(index: 0, id: "toolu_1", name: "create_reminder", json: #"{"title": "Call"#)
+            + MockTransport.toolUse(index: 1, id: "toolu_2", name: "create_reminder", json: #"["not an object"]"#)
+            + Array(MockTransport.toolUse(index: 2, id: "toolu_3", name: "create_reminder", json: #"{"title":"x"}"#).prefix(2))
+        for event in events {
+            _ = try decoder.handle(JSONValue.parse(event))
+        }
+        XCTAssertEqual(decoder.clientToolCalls(), [
+            PendingToolCall(id: "toolu_1", name: "create_reminder", input: nil, rawInput: #"{"title": "Call"#),
+            PendingToolCall(id: "toolu_2", name: "create_reminder", input: nil, rawInput: #"["not an object"]"#),
+            PendingToolCall(id: "toolu_3", name: "create_reminder", input: nil, rawInput: #"{"titl"#),
+        ])
+        let inputs = decoder.continuationBlocks().compactMap { $0["input"] }
+        XCTAssertEqual(inputs, [.object([:]), .object([:]), .object([:])])
+    }
+
+    func testClientToolCallsBeforeAFallbackAreDropped() throws {
+        let events = MockTransport.toolUse(index: 0, id: "toolu_old", name: "list_events", json: "{}") + [
+            #"{"type":"content_block_start","index":1,"content_block":{"type":"fallback","from":{"model":"claude-opus-5-5"},"to":{"model":"claude-opus-5"}}}"#,
+        ] + MockTransport.toolUse(index: 2, id: "toolu_new", name: "list_events", json: "{}")
+        var decoder = ClaudeStreamDecoder()
+        for event in events {
+            _ = try decoder.handle(JSONValue.parse(event))
+        }
+        XCTAssertEqual(decoder.clientToolCalls().map(\.id), ["toolu_new"])
+        XCTAssertEqual(decoder.continuationBlocks().compactMap { $0["type"]?.stringValue }, ["fallback", "tool_use"])
+    }
+
+    func testResponseStartIsReportedOnce() throws {
+        var decoder = ClaudeStreamDecoder()
+        let start = try JSONValue.parse(ClaudeSSE.messageStart())
+        XCTAssertEqual(try decoder.handle(start), [.progress(.responseStarted)])
+        XCTAssertEqual(try decoder.handle(start), [])
+
+        var resumed = ClaudeStreamDecoder()
+        resumed.responseStartReported = true
+        XCTAssertEqual(try resumed.handle(start), [])
+        XCTAssertEqual(resumed.model, "claude-opus-5-5")
     }
 
     func testErrorEventThrows() {

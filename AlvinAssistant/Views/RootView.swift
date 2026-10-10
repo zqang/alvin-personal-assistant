@@ -1,3 +1,4 @@
+import LocalEngine
 import SwiftData
 import SwiftUI
 
@@ -80,6 +81,9 @@ struct RootView: View {
         }
         modelContext.delete(target)
         try? modelContext.save()
+        // The on-device drafting corpus keeps past replies and tool results on disk, maybe this
+        // conversation's: forget it too.
+        SuffixDrafter.eraseAllCorpora(savedIn: EngineSetup.cacheDirectory())
     }
 
     /// New chats are created eagerly; drop the ones that were never used.

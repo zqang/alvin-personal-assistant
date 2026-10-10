@@ -166,6 +166,20 @@ final class TurnDetectorTests: XCTestCase {
         XCTAssertTrue(detector.shouldEndTurn(at: 0.85))
     }
 
+    func testLastChangeIsWhenTheTranscriptLastChanged() {
+        var detector = TurnDetector()
+        XCTAssertNil(detector.lastChange)
+        detector.transcriptChanged("hello", at: 1)
+        detector.transcriptChanged("hello there", at: 2)
+        detector.transcriptChanged("hello there", at: 3)
+        detector.audioLevel(-20, at: 4)
+        XCTAssertEqual(detector.lastChange, 2)
+        detector.reset()
+        XCTAssertNil(detector.lastChange)
+        detector.reset(transcript: "carried over", at: 7)
+        XCTAssertEqual(detector.lastChange, 7)
+    }
+
     func testResetCanContinueFromEarlierSpeech() {
         var detector = TurnDetector(silenceTimeout: 1.0)
         detector.reset(transcript: "hello", at: 5)

@@ -2,9 +2,15 @@ import AssistantKit
 import Foundation
 
 /// Builds the configured model provider and streams replies for a conversation.
+///
+/// `stream(for:store:)` and `missingSetup(settings:store:)` are today's single-provider behaviour,
+/// which `LegacyReplyPipeline` keeps. `OrchestratedReplyPipeline` builds its engines from the same
+/// configuration helpers and sends through the same transport.
 @MainActor
 enum ReplyService {
-    private static let transport = URLSessionStreamingTransport()
+    /// The transport every cloud request uses, so a connection prewarm (`ConnectionPrewarmer`)
+    /// warms the very connection the next reply reads.
+    static let transport = URLSessionStreamingTransport()
 
     static func stream(for conversation: Conversation, store: SettingsStore) -> AsyncThrowingStream<ReplyEvent, Error> {
         let settings = store.settings
@@ -28,32 +34,45 @@ enum ReplyService {
             if store.secret(.compatible).isEmpty { return "Add an API key for your model service in Settings." }
             if settings.compatibleModel.trimmed.isEmpty { return "Enter a model ID in Settings." }
             return nil
+        case .onDevice:
+            return LocalModelCatalog.option(for: settings.localModelID) == nil ? "Choose an on-device model in Settings." : nil
         }
+    }
+
+    /// The Claude configuration of `settings`, with the stored Anthropic key.
+    static func claudeConfiguration(settings: AssistantSettings, store: SettingsStore) -> ClaudeConfiguration {
+        ClaudeConfiguration(
+            apiKey: store.secret(.anthropic),
+            model: settings.claudeModel.trimmed,
+            effort: settings.effort,
+            webSearchEnabled: settings.webSearchEnabled,
+            timeZoneIdentifier: TimeZone.current.identifier
+        )
+    }
+
+    /// The OpenAI-compatible service of `settings`. Throws when its base URL isn't a web address.
+    static func compatibleProvider(settings: AssistantSettings, store: SettingsStore) throws -> OpenAICompatibleProvider {
+        let base = settings.compatibleBaseURL.trimmed
+        guard let url = URL(string: base), url.scheme == "https" || url.scheme == "http" else {
+            throw AssistantError.missingConfiguration("Enter a valid base URL for your model service in Settings.")
+        }
+        let configuration = OpenAICompatibleConfiguration(
+            serviceName: CompatibleServices.serviceName(forBaseURL: base),
+            baseURL: url,
+            apiKey: store.secret(.compatible),
+            model: settings.compatibleModel.trimmed
+        )
+        return OpenAICompatibleProvider(configuration: configuration, transport: transport)
     }
 
     private static func provider(settings: AssistantSettings, store: SettingsStore) throws -> ChatProvider {
         switch settings.provider {
         case .anthropic:
-            let configuration = ClaudeConfiguration(
-                apiKey: store.secret(.anthropic),
-                model: settings.claudeModel.trimmed,
-                effort: settings.effort,
-                webSearchEnabled: settings.webSearchEnabled,
-                timeZoneIdentifier: TimeZone.current.identifier
-            )
-            return ClaudeProvider(configuration: configuration, transport: transport)
+            return ClaudeProvider(configuration: claudeConfiguration(settings: settings, store: store), transport: transport)
         case .openAICompatible:
-            let base = settings.compatibleBaseURL.trimmed
-            guard let url = URL(string: base), url.scheme == "https" || url.scheme == "http" else {
-                throw AssistantError.missingConfiguration("Enter a valid base URL for your model service in Settings.")
-            }
-            let configuration = OpenAICompatibleConfiguration(
-                serviceName: CompatibleServices.serviceName(forBaseURL: base),
-                baseURL: url,
-                apiKey: store.secret(.compatible),
-                model: settings.compatibleModel.trimmed
-            )
-            return OpenAICompatibleProvider(configuration: configuration, transport: transport)
+            return try compatibleProvider(settings: settings, store: store)
+        case .onDevice:
+            return LocalProvider(settings: settings)
         }
     }
 }
@@ -73,11 +92,13 @@ enum ReplyOutcome {
         }
     }
 
-    /// Keeps a stopped reply's text, or removes the reply if nothing arrived. Returns false if removed.
+    /// Keeps a stopped reply's text, or removes the reply if nothing arrived. A reply that ran
+    /// tool rounds is kept even without text: its actions happened, so the history must show
+    /// them. Returns false if removed.
     @discardableResult
     static func keepStopped(_ reply: ChatMessage, text: String? = nil, in conversation: Conversation) -> Bool {
         let kept = (text ?? reply.text).trimmed
-        guard !kept.isEmpty else {
+        guard !kept.isEmpty || !reply.toolRounds.isEmpty else {
             conversation.remove(reply)
             return false
         }

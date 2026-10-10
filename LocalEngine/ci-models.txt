@@ -1,0 +1,6 @@
+# Models the integration tests use. One Hugging Face repo per line, optionally pinned as repo@sha.
+# Pinned to the snapshots of local-engine run 37705247676 (MODEL SNAPSHOTS block, 2026-10-08).
+mlx-community/Qwen3-0.6B-4bit@73e3e38d981303bc594367cd910ea6eb48349da8
+mlx-community/Qwen3-1.7B-4bit@3b1b1768f8f8cf8351c712464f906e86c2b8269e
+mlx-community/Qwen3.5-0.8B-MLX-4bit@5d894f8cc4ef3e6c88537bf3746ed262f549da6a
+mlx-community/Qwen3.5-2B-4bit@674aaa7240b91e8012fcad5d791b7dfe5ba90207

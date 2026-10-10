@@ -1,0 +1,480 @@
+{
+  "_about": [
+    "Prompts for scripts/drafter_lab.py, and the tool schemas the app shares (plan section 5.3; WP22 builds the same tools in Swift).",
+    "Each prompt is sent as [system, user] with the generation prompt and enable_thinking=false, as LocalModelHost does.",
+    "The user message is user_template filled with context_time, the prompt's input (spoken or typed) and its text: PromptBuilder's <context> tag, a blank line, then the text (LocalSessionPlan.content).",
+    "system is PromptBuilder.systemPrompt(userName: \"\", customInstructions: \"\"). The day is Wednesday 7 October 2026, so 'tomorrow' is 2026-10-08, 'Friday' is 2026-10-09 and 'next Monday' is 2026-10-12."
+  ],
+  "system": "You are a warm, capable personal assistant, running as an iPhone app. The user talks to you by voice or types.\n\nEach user message starts with a <context> tag giving the local time it was sent and whether it was spoken or typed. Use the time when it matters, and never mention the tag.\n\nWhen the input is spoken, your reply is read aloud by a text-to-speech voice:\n- Talk like a thoughtful person in conversation: natural, warm, and to the point. Usually one to three short sentences; go longer only when asked for detail, a story, or step-by-step help.\n- Write plain spoken sentences only: no Markdown, lists, headings, tables, code, emoji, or URLs. Say numbers, dates, units, and symbols the way you would read them aloud.\n- The words come from speech recognition and may contain errors. Infer the likely meaning, and ask a short clarifying question only when it really matters.\n- If the user interrupted your previous reply, respond to what they said rather than repeating yourself.\n\nWhen the input is typed, you may use light Markdown and go into more detail when it helps.\n\nReply in the language the user is using. When you search the web, answer in your own words; don't read out links or source names unless asked.\n\nKeep responses focused, brief, and concise to avoid overwhelming the person. Latency-sensitive; begin your visible answer immediately.",
+  "context_time": "Wednesday 7 October 2026, 16:05 Asia/Singapore",
+  "user_template": "<context>time: {time}; input: {input}</context>\n\n{text}",
+  "chat": [
+    {
+      "id": "chat-01",
+      "input": "spoken",
+      "text": "Hi! What can you help me with?"
+    },
+    {
+      "id": "chat-02",
+      "input": "spoken",
+      "text": "Give me one tip for sleeping better."
+    },
+    {
+      "id": "chat-03",
+      "input": "spoken",
+      "text": "Why is the sky blue? Keep it short."
+    },
+    {
+      "id": "chat-04",
+      "input": "spoken",
+      "text": "And why are sunsets red then?"
+    },
+    {
+      "id": "chat-05",
+      "input": "spoken",
+      "text": "用一句话介绍一下新加坡。"
+    },
+    {
+      "id": "chat-06",
+      "input": "spoken",
+      "text": "我明天早上要早起，有什么建议吗？"
+    },
+    {
+      "id": "chat-07",
+      "input": "spoken",
+      "text": "Write a two-line poem about coffee."
+    },
+    {
+      "id": "chat-08",
+      "input": "spoken",
+      "text": "Thanks, that's all for now."
+    },
+    {
+      "id": "chat-09",
+      "input": "spoken",
+      "text": "What's a quick dinner I can make with eggs and tomatoes?"
+    },
+    {
+      "id": "chat-10",
+      "input": "spoken",
+      "text": "我明天要面试，有点紧张，怎么办？"
+    },
+    {
+      "id": "chat-11",
+      "input": "spoken",
+      "text": "How far away is the moon, roughly?"
+    },
+    {
+      "id": "chat-12",
+      "input": "spoken",
+      "text": "给我讲一个很短的笑话。"
+    }
+  ],
+  "copy": [
+    {
+      "id": "copy-01",
+      "input": "spoken",
+      "text": "Read my shopping list back to me: eggs, two cartons of oat milk, sourdough bread, three avocados, cherry tomatoes, Greek yoghurt, and a five kilo bag of jasmine rice."
+    },
+    {
+      "id": "copy-02",
+      "input": "typed",
+      "text": "Fix the typos in this and give me only the corrected text: \"Hi Sarah, thanks for you're email. I'll definately send the quarterly report by tomorow morning, and we can dicuss the budget at the meeting on thursday.\""
+    },
+    {
+      "id": "copy-03",
+      "input": "typed",
+      "text": "Turn this into a JSON array of objects with name, phone and city: Alice Tan 9123 4567 Singapore, Ben Lim 8234 5678 Kuala Lumpur, Chloe Ng 9345 6789 Singapore."
+    },
+    {
+      "id": "copy-04",
+      "input": "typed",
+      "text": "Rewrite this message to sound more polite, keeping every detail: \"Send me the invoice for order 4471 by Friday. The amount was 1,250 dollars and it has to go to accounts@example.com, not my personal email.\""
+    },
+    {
+      "id": "copy-05",
+      "input": "spoken",
+      "text": "把我的购物清单再读一遍：鸡蛋、两盒燕麦奶、全麦面包、三个牛油果、小番茄、希腊酸奶，还有一袋五公斤的茉莉香米。"
+    },
+    {
+      "id": "copy-06",
+      "input": "typed",
+      "text": "帮我改正这段话里的错别字，只输出改好的内容：“我明天下午三点在公司门口等你，记得带上合同和身分证，不要迟倒，我们要在四点前把资料交给王经里。”"
+    },
+    {
+      "id": "copy-07",
+      "input": "typed",
+      "text": "把下面的信息转换成 JSON 数组，字段为 name、phone 和 city：张伟 13800138000 北京，李娜 13912345678 上海，王芳 13798765432 广州。"
+    },
+    {
+      "id": "copy-08",
+      "input": "typed",
+      "text": "把这段话改写得更礼貌一些，保留所有细节：“订单 4471 的发票周五前发给我，金额是 1250 元，发到 accounts@example.com，别发到我的私人邮箱。”"
+    }
+  ],
+  "tools": [
+    {
+      "id": "tool-01",
+      "input": "spoken",
+      "text": "Remind me at 5 to call mum.",
+      "expect": {
+        "name": "create_reminder",
+        "args": {
+          "title": "call mum",
+          "due": "2026-10-07T17:00"
+        }
+      }
+    },
+    {
+      "id": "tool-02",
+      "input": "spoken",
+      "text": "Set a timer for ten minutes for the pasta.",
+      "expect": {
+        "name": "set_timer",
+        "args": {
+          "seconds": 600
+        }
+      }
+    },
+    {
+      "id": "tool-03",
+      "input": "spoken",
+      "text": "What's on my calendar tomorrow?",
+      "expect": {
+        "name": "list_events",
+        "args": {
+          "start": "2026-10-08"
+        }
+      }
+    },
+    {
+      "id": "tool-04",
+      "input": "spoken",
+      "text": "Put a dentist appointment in my calendar for Friday at 3pm.",
+      "expect": {
+        "name": "create_event",
+        "args": {
+          "title": "dentist",
+          "start": "2026-10-09T15:00"
+        }
+      }
+    },
+    {
+      "id": "tool-05",
+      "input": "spoken",
+      "text": "Which of my reminders are due today?",
+      "expect": {
+        "name": "list_reminders",
+        "args": {
+          "scope": "today"
+        }
+      }
+    },
+    {
+      "id": "tool-06",
+      "input": "spoken",
+      "text": "Add buy milk to my to-do list.",
+      "expect": {
+        "name": "create_reminder",
+        "args": {
+          "title": "buy milk"
+        }
+      }
+    },
+    {
+      "id": "tool-07",
+      "input": "spoken",
+      "text": "提醒我明天早上八点去取快递。",
+      "expect": {
+        "name": "create_reminder",
+        "args": {
+          "title": "快递",
+          "due": "2026-10-08T08:00"
+        }
+      }
+    },
+    {
+      "id": "tool-08",
+      "input": "spoken",
+      "text": "帮我设一个二十分钟的计时器。",
+      "expect": {
+        "name": "set_timer",
+        "args": {
+          "seconds": 1200
+        }
+      }
+    },
+    {
+      "id": "tool-09",
+      "input": "spoken",
+      "text": "我今天下午有什么安排？",
+      "expect": {
+        "name": "list_events",
+        "args": {
+          "start": "2026-10-07"
+        }
+      }
+    },
+    {
+      "id": "tool-10",
+      "input": "spoken",
+      "text": "下周一上午十点和王经理开会，帮我加到日历里。",
+      "expect": {
+        "name": "create_event",
+        "args": {
+          "title": "王经理",
+          "start": "2026-10-12T10:00"
+        }
+      }
+    },
+    {
+      "id": "tool-11",
+      "input": "spoken",
+      "text": "有哪些提醒已经过期了？",
+      "expect": {
+        "name": "list_reminders",
+        "args": {
+          "scope": "overdue"
+        }
+      }
+    },
+    {
+      "id": "tool-12",
+      "input": "spoken",
+      "text": "我的计时器还剩多少时间？",
+      "expect": {
+        "name": "list_timers",
+        "args": {}
+      }
+    }
+  ],
+  "expect_matching": [
+    "name: the first parsed tool call's name must equal expect.name.",
+    "args: every listed argument must match; arguments not listed are not scored.",
+    "A value of the form YYYY-MM-DD matches any local time on that date.",
+    "A value of the form YYYY-MM-DDTHH:MM matches that local date, hour and minute; seconds and any offset are ignored.",
+    "An integer matches the same number, also when given as a string.",
+    "Any other string matches when each of its space-separated words appears in the value, ignoring case and punctuation.",
+    "A list matches when any of its items matches.",
+    "tools_local offers only local_tools. A prompt whose expected tool is outside it expects handoff_to_cloud instead, with any reason."
+  ],
+  "local_tools": [
+    "create_event",
+    "create_reminder",
+    "get_current_time",
+    "handoff_to_cloud",
+    "list_events",
+    "list_reminders",
+    "set_timer"
+  ],
+  "tool_schemas": [
+    {
+      "name": "cancel_timer",
+      "description": "Cancel a running timer. Get the id from list_timers first.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The timer's id, from list_timers."
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "complete_reminder",
+      "description": "Mark one of the user's reminders as done. Call this when the user says they finished something on their list. Get the id from list_reminders first.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The reminder's id, from list_reminders."
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "create_event",
+      "description": "Add an event to the user's calendar. Call this whenever the user asks to schedule, book or put something in their calendar. Times are the user's local time.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "A short title, e.g. \"Dentist\"."
+          },
+          "start": {
+            "type": "string",
+            "description": "When it starts, as a local time in ISO 8601 without an offset, e.g. 2026-10-09T15:00."
+          },
+          "end": {
+            "type": "string",
+            "description": "When it ends, in the same format. Leave it out to use duration_minutes or the default of one hour."
+          },
+          "duration_minutes": {
+            "type": "integer",
+            "description": "How long it lasts in minutes, if the user said and gave no end time."
+          },
+          "location": {
+            "type": "string",
+            "description": "Where it is, only if the user said."
+          },
+          "notes": {
+            "type": "string",
+            "description": "Extra details, only if the user gave any."
+          },
+          "all_day": {
+            "type": "boolean",
+            "description": "True for an all-day event."
+          }
+        },
+        "required": [
+          "title",
+          "start"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "create_reminder",
+      "description": "Add a reminder to the user's Reminders app. Call this whenever the user asks to be reminded of something or to add a to-do, even without a time. Times are the user's local time.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "What to be reminded of, in the user's words, e.g. \"Call mum\"."
+          },
+          "due": {
+            "type": "string",
+            "description": "When it is due, as a local time in ISO 8601 without an offset, e.g. 2026-10-07T17:00. Leave it out when the user gave no time."
+          },
+          "notes": {
+            "type": "string",
+            "description": "Extra details, only if the user gave any."
+          },
+          "list": {
+            "type": "string",
+            "description": "The name of a reminders list, only if the user named one."
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_current_time",
+      "description": "Get the current local date, time and time zone of the user's phone. Call this when you need the exact time right now.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "handoff_to_cloud",
+      "description": "Hand this request to the more capable cloud assistant, which sees the whole conversation. Call this when the request needs current information from the web, long or careful reasoning, or anything you cannot do well yourself.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "One short sentence on why the cloud assistant is needed."
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_events",
+      "description": "Read events from the user's calendars between two local times. Call this for any question about their schedule, meetings or free time.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "start": {
+            "type": "string",
+            "description": "Start of the range, as a local time in ISO 8601 without an offset, e.g. 2026-10-08T00:00."
+          },
+          "end": {
+            "type": "string",
+            "description": "End of the range, in the same format, e.g. 2026-10-09T00:00."
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_reminders",
+      "description": "Read the user's open reminders. Call this whenever the user asks what is on their to-do list or which reminders they have.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "description": "Which reminders to read: due today, upcoming, overdue, or all open ones.",
+            "enum": [
+              "today",
+              "upcoming",
+              "overdue",
+              "all"
+            ]
+          }
+        },
+        "required": [
+          "scope"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_timers",
+      "description": "List the timers that are running, with the time left on each. Call this when the user asks about their timers, and before cancelling one.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_timer",
+      "description": "Start a countdown timer on the phone. Call this whenever the user asks for a timer or to be alerted after a length of time.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "seconds": {
+            "type": "integer",
+            "description": "How long the timer runs, in seconds, from 1 to 86400. For example, ten minutes is 600."
+          },
+          "label": {
+            "type": "string",
+            "description": "What the timer is for, e.g. \"Pasta\", only if the user said."
+          }
+        },
+        "required": [
+          "seconds"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ]
+}
