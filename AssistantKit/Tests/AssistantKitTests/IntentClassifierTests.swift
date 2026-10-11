@@ -43,7 +43,15 @@ final class IntentClassifierTests: XCTestCase {
             ("明天早上提醒我开会", .deviceAction),
             ("设一个十分钟的计时", .deviceAction),
             ("帮我定一个闹钟", .deviceAction),
+            ("下午三点和小李开会", .deviceAction),
+            ("把买牛奶加到待办里", .deviceAction),
         ])
+    }
+
+    func testBenchmarkToolPromptsAreDeviceActions() {
+        for (prompt, _) in LocalBenchmark.toolPrompts {
+            XCTAssertTrue(classifier.classify(prompt).contains(.deviceAction), "\"\(prompt)\"")
+        }
     }
 
     func testExplicitDepth() {

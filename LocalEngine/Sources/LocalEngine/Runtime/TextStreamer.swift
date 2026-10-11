@@ -26,7 +26,8 @@ public final class TextStreamer {
     private var thinking = ThinkingFilter()
     private let startTag: String?
     private let endTag: String?
-    private let startToken: Int?
+    /// The id of the tool-call start tag (`<tool_call>`), when it is one token.
+    let startToken: Int?
     private let endToken: Int?
 
     /// Raw text of the tool call being written, for reading its name.

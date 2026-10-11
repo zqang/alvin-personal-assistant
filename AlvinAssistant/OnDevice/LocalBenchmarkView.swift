@@ -6,7 +6,8 @@ import UIKit
 /// Plays a scripted scenario (`LocalBenchmark.scenarios`) through the on-device model and reports
 /// time to first text, prefill and generation speed, cache reuse, speculative decoding, tool-call
 /// accuracy and peak memory. "Compare engines" plays the scenario with the Alvin engine, then with
-/// MLX's stock session over the same loaded model.
+/// MLX's stock session over the same loaded model. "Compare tool modes" plays it on the Alvin
+/// engine in each `LocalModelHost.ToolMode`.
 struct LocalBenchmarkView: View {
     @Bindable var store: SettingsStore
     @State private var runner = LocalBenchmarkRunner()
@@ -26,11 +27,15 @@ struct LocalBenchmarkView: View {
                 }
                 .disabled(runner.isRunning)
                 Button(runner.isRunning ? "Running…" : "Run") {
-                    runner.run(scenario, settings: store.settings, compareEngines: false)
+                    runner.run(scenario, settings: store.settings, comparing: .nothing)
                 }
                 .disabled(runner.isRunning)
                 Button("Compare engines") {
-                    runner.run(scenario, settings: store.settings, compareEngines: true)
+                    runner.run(scenario, settings: store.settings, comparing: .engines)
+                }
+                .disabled(runner.isRunning)
+                Button("Compare tool modes") {
+                    runner.run(scenario, settings: store.settings, comparing: .toolModes)
                 }
                 .disabled(runner.isRunning)
                 if let progress = runner.progress {
@@ -39,7 +44,7 @@ struct LocalBenchmarkView: View {
                         .foregroundStyle(.secondary)
                 }
             } footer: {
-                Text("Loads \(LocalModelCatalog.option(for: store.settings.localModelID)?.displayName ?? "the model") fresh, then plays “\(scenario.title)” (\(scenario.turnCount) turns). Tool calls are recorded, never carried out. Keep the app open; use a Release build for realistic speed.")
+                Text("Loads \(LocalModelCatalog.option(for: store.settings.localModelID)?.displayName ?? "the model") fresh, then plays “\(scenario.title)” (\(scenario.turnCount) turns). Tool calls are recorded and answered with stand-in results, never carried out. Compare tool modes plays it guided (as the app does), then native (the model alone). Keep the app open; use a Release build for realistic speed.")
             }
 
             Section {
@@ -87,11 +92,20 @@ final class LocalBenchmarkRunner {
     private(set) var report = ""
     @ObservationIgnored private var task: Task<Void, Never>?
 
-    /// Plays `scenario` with the engine `settings` choose, or, with `compareEngines`, with the
-    /// Alvin engine and then the stock session.
-    func run(_ scenario: LocalBenchmark.Scenario, settings: AssistantSettings, compareEngines: Bool) {
+    /// What a run plays the scenario with, section by section.
+    enum Comparison {
+        /// The engine `settings` choose.
+        case nothing
+        /// The Alvin engine, then the stock session.
+        case engines
+        /// The Alvin engine in each `LocalModelHost.ToolMode`.
+        case toolModes
+    }
+
+    /// Plays `scenario` once per section of `comparing`.
+    func run(_ scenario: LocalBenchmark.Scenario, settings: AssistantSettings, comparing: Comparison) {
         start { [self] in
-            await benchmark(scenario, settings: settings, compareEngines: compareEngines)
+            await benchmark(scenario, settings: settings, comparing: comparing)
         }
     }
 
@@ -154,10 +168,13 @@ final class LocalBenchmarkRunner {
         isRunning = true
         report = ""
         progress = nil
+        // A run takes minutes, and Auto-Lock (30 s in Low Power Mode) would stop it.
+        UIApplication.shared.isIdleTimerDisabled = true
         task = Task {
             let text = await work()
             report = text
             isRunning = false
+            UIApplication.shared.isIdleTimerDisabled = false
         }
     }
 
@@ -181,22 +198,35 @@ final class LocalBenchmarkRunner {
 
     // MARK: Scenarios
 
-    private func benchmark(_ scenario: LocalBenchmark.Scenario, settings: AssistantSettings, compareEngines: Bool) async -> String {
+    private func benchmark(_ scenario: LocalBenchmark.Scenario, settings: AssistantSettings, comparing: Comparison) async -> String {
         let host = LocalModelHost.shared
         // A fresh load, so its time is measured and no earlier session is reused.
         host.unload(stopDownload: true)
         guard await ensureLoaded(settings) else { return "" }
         let loadTime = host.lastLoadTime
 
-        let modes: [LocalEngineMode] = compareEngines ? [.alvin, .stock] : [settings.localEngineMode]
+        let sections: [(engine: LocalEngineMode, toolMode: LocalModelHost.ToolMode, label: String?)]
+        switch comparing {
+        case .nothing:
+            sections = [(settings.localEngineMode, .guided, nil)]
+        case .engines:
+            sections = [(.alvin, .guided, "Alvin engine"), (.stock, .guided, "MLX stock session")]
+        case .toolModes:
+            sections = LocalModelHost.ToolMode.allCases.map { (.alvin, $0, $0.rawValue) }
+        }
         var reports: [String] = []
-        for mode in modes {
+        for section in sections {
             var runSettings = settings
-            runSettings.localEngineMode = mode
-            let label: String? = compareEngines ? (mode == .alvin ? "Alvin engine" : "MLX stock session") : nil
-            let (rows, stopped) = await play(scenario, settings: runSettings, label: label)
+            runSettings.localEngineMode = section.engine
+            if comparing == .toolModes {
+                // The model stays loaded; each mode starts from an empty session (or from its
+                // prompt's system prefix, if one is saved on disk).
+                host.resetSession()
+            }
+            let (rows, stopped) = await play(scenario, settings: runSettings, toolMode: section.toolMode, label: section.label)
             var title = scenario.title
-            if let label { title += " · " + label }
+            if let label = section.label { title += " · " + label }
+            if comparing == .toolModes { title += ": " + Self.detail(section.toolMode) }
             if let stopped { title += " (\(stopped))" }
             reports.append(LocalBenchmark.report(
                 model: Self.modelName(settings),
@@ -212,12 +242,23 @@ final class LocalBenchmarkRunner {
         return reports.joined(separator: "\n\n" + String(repeating: "─", count: 32) + "\n\n")
     }
 
+    /// What a tool mode changes, for its section's header.
+    private static func detail(_ mode: LocalModelHost.ToolMode) -> String {
+        switch mode {
+        case .guided: return "forced call openings, name selector, claim guard"
+        case .native: return "the model alone (no forcing, no name selector, no claim guard), same prompt"
+        }
+    }
+
     /// Plays the scenario's actions; returns the rows and, if it stopped early, why.
-    private func play(_ scenario: LocalBenchmark.Scenario, settings: AssistantSettings, label: String?) async -> (rows: [LocalBenchmark.Row], stopped: String?) {
+    private func play(
+        _ scenario: LocalBenchmark.Scenario, settings: AssistantSettings, toolMode: LocalModelHost.ToolMode, label: String?
+    ) async -> (rows: [LocalBenchmark.Row], stopped: String?) {
         let host = LocalModelHost.shared
         var settings = settings
         let system = PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: "")
-        let tools = BenchmarkToolExecutor(definitions: DeviceTools.localRegistry(settings: settings, handoff: false).definitions)
+        let definitions = DeviceTools.localRegistry(settings: settings, handoff: false).definitions
+        let effects = Dictionary(uniqueKeysWithValues: DeviceTools.allTools.map { ($0.definition.name, $0.effect) })
         // The continued chat ends with its last turn played again without the cache.
         let replayLast = scenario.id == LocalBenchmark.continued.id
         let total = scenario.turnCount + (replayLast ? 1 : 0)
@@ -233,7 +274,9 @@ final class LocalBenchmarkRunner {
                     number += 1
                     progress = "\(prefix)turn \(number) of \(total)"
                     turns.append(ChatTurn(role: .user, text: turn.prompt, context: turn.context))
-                    let outcome = try await reply(turns: turns, system: system, settings: settings, tools: tools, cancelAfter: turn.cancelAfterTokens)
+                    let tools = BenchmarkToolExecutor(definitions: definitions, effects: effects, contextTag: turn.context)
+                    let outcome = try await reply(
+                        turns: turns, system: system, settings: settings, tools: tools, toolMode: toolMode, cancelAfter: turn.cancelAfterTokens)
                     // What the app would keep: after a barge-in, only the words spoken so far.
                     let kept = turn.storedWords.map { LocalBenchmark.spokenPrefix(of: outcome.text, words: $0) } ?? outcome.text
                     if !kept.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !outcome.rounds.isEmpty {
@@ -243,9 +286,12 @@ final class LocalBenchmarkRunner {
                     if outcome.cutOff, let tokens = turn.cancelAfterTokens {
                         prompt += " (cut off after \(tokens) tokens)"
                     }
-                    let call = outcome.rounds.first?.calls.first
-                    let score = turn.expectation.map { $0.score(name: call?.name, arguments: call?.input) }
-                    rows.append(LocalBenchmark.Row(prompt: prompt, reply: kept, stats: outcome.stats, toolScore: score))
+                    let calls = outcome.rounds.flatMap(\.calls)
+                    let score = turn.expectation.map { $0.score(calls: calls) }
+                    let device = SpeculativeLoop.currentDeviceState()
+                    rows.append(LocalBenchmark.Row(
+                        prompt: prompt, reply: kept, stats: outcome.stats, toolScore: score, calls: calls, thermal: device.thermal,
+                        lowPowerMode: device.lowPower))
                 case .reloadModel(let usePrefixCache):
                     progress = "\(prefix)reloading the model…"
                     settings.localPrefixCache = usePrefixCache
@@ -262,8 +308,12 @@ final class LocalBenchmarkRunner {
                 progress = "\(prefix)turn \(number) of \(total)"
                 turns.removeLast()
                 host.resetSession()
-                let outcome = try await reply(turns: turns, system: system, settings: settings, tools: tools, cancelAfter: nil)
-                rows.append(LocalBenchmark.Row(prompt: "(last turn again, without the cache)", reply: outcome.text, stats: outcome.stats))
+                let tools = BenchmarkToolExecutor(definitions: definitions, effects: effects, contextTag: turns.last?.context)
+                let outcome = try await reply(turns: turns, system: system, settings: settings, tools: tools, toolMode: toolMode, cancelAfter: nil)
+                let device = SpeculativeLoop.currentDeviceState()
+                rows.append(LocalBenchmark.Row(
+                    prompt: "(last turn again, without the cache)", reply: outcome.text, stats: outcome.stats,
+                    calls: outcome.rounds.flatMap(\.calls), thermal: device.thermal, lowPowerMode: device.lowPower))
             }
             return (rows, nil)
         } catch {
@@ -281,11 +331,14 @@ final class LocalBenchmarkRunner {
 
     /// One reply; with `cancelAfter`, cancelled once its text reaches that many tokens, as a
     /// barge-in would.
-    private func reply(turns: [ChatTurn], system: String, settings: AssistantSettings, tools: BenchmarkToolExecutor, cancelAfter: Int?) async throws -> Outcome {
+    private func reply(
+        turns: [ChatTurn], system: String, settings: AssistantSettings, tools: BenchmarkToolExecutor, toolMode: LocalModelHost.ToolMode,
+        cancelAfter: Int?
+    ) async throws -> Outcome {
         let host = LocalModelHost.shared
         let recorder = ReplyRecorder()
         let reply = Task { @MainActor in
-            try await host.respond(system: system, turns: turns, settings: settings, tools: tools) { event in
+            try await host.respond(system: system, turns: turns, settings: settings, tools: tools, toolMode: toolMode) { event in
                 recorder.record(event)
                 if let cancelAfter, !recorder.cutOff, (host.tokenCount(recorder.text) ?? recorder.chunks) >= cancelAfter {
                     recorder.cutOff = true
@@ -375,18 +428,39 @@ private final class ReplyRecorder {
     }
 }
 
-/// Offers the on-device tools but carries none out: every call gets a neutral result, so a
-/// benchmark never changes the user's reminders, calendar or timers.
+/// Offers the on-device tools but carries none out, so a benchmark never changes the user's
+/// reminders, calendar or timers: each call gets a stand-in result in its tool's shape
+/// (`LocalBenchmark.toolResult`) at the time the turn's context tag gives, and the model carries
+/// on as after a real call. `get_current_time` runs the real tool, which only reads that time.
 struct BenchmarkToolExecutor: ToolExecutor {
     let definitions: [ToolDefinition]
+    /// Each tool's real effect, so the claim guard takes a stand-in action for one that was done.
+    let effects: [String: ToolEffect]
+    /// The turn's context tag (`ChatTurn.context`); without a time in it, the tools see now.
+    let contextTag: String?
 
     func presentation(for name: String) -> ToolPresentation {
         .generic
     }
 
+    func effect(of name: String) -> ToolEffect {
+        effects[name] ?? .sideEffect
+    }
+
     func run(_ calls: [PendingToolCall], context: ToolContext) async -> ToolRound {
-        ToolRound(calls: calls.map { call in
-            ToolCallRecord(call: call, output: .ok(.object(["ok": .bool(true)])))
-        })
+        var context = context
+        if let time = contextTag.flatMap(LocalBenchmark.time(ofContext:)) {
+            context.now = time.date
+            context.timeZone = time.timeZone
+        }
+        var records: [ToolCallRecord] = []
+        for call in calls {
+            var output = LocalBenchmark.toolResult(for: call, now: context.now, timeZone: context.timeZone)
+            if call.name == CurrentTimeTool.name, let real = try? await CurrentTimeTool().run(call.input?.objectValue ?? [:], context: context) {
+                output = real
+            }
+            records.append(ToolCallRecord(call: call, output: output))
+        }
+        return ToolRound(calls: records)
     }
 }

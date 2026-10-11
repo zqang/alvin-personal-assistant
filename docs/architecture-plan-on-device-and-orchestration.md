@@ -53,7 +53,7 @@ GitHub Actions runs whose logs hold the numbers quoted in this document.
 | 8. Voice latency | early reply start, spoken cues, ducking, latency traces | WP15, WP23 | Built. Tuning needs a device (D7, D8) |
 | 9. App integration | the engine in the app with its self-test gate and fallback, the engine settings, benchmark scenarios, the orchestrated reply pipeline | WP40, WP50 | Built |
 | 10. Kernels and MTP | small-M quantized matmul kernel; MTP drafter | WP41, WP42 | Kernel built and **off by default** (slower than stock on the CI GPU). MTP **skipped**: no catalog checkpoint keeps `mtp.*` weights |
-| 11. Device validation | the [device checklist](#11-device-checklist) | — | Not started; needs an iPhone |
+| 11. Device validation | the [device checklist](#11-device-checklist) | — | Done on an iPhone 17 Pro Max except D12–D13; see [results](#results-on-an-iphone-17-pro-max-a19-pro-12-gb-ios-2661-1011-october-2026) |
 | 12. Later | Swift DFlash port, mlx-swift-lm 3.32.x upgrade, background session save, two-step tool selector | — | Deferred; see [§12](#12-skipped-and-deferred) |
 
 ## 2. Reference systems
@@ -85,7 +85,7 @@ What became of Husky's public claims:
 | Engine built for Woof | **Built.** The `HybridQwen35` fork serves Woof 4B and Qwen3.5; other models run through the stock adapter. |
 | Model-shaped kernels, weight repacking, compiled decode | **Skipped.** Specialist work with gains measured only on Mac. |
 | "Same answers" | **Built, further:** exact rejection sampling at the app's T 0.7 / top-p 0.8 / top-k 20, proven statistically in CI. |
-| Selector + text-filler harness | **Not needed.** Woof 4B called 12/12 tools correctly in the lab. Native tool calls with a plausibility guard instead. |
+| Selector + text-filler harness | **Built after the phone run.** Woof 4B called 12/12 tools correctly in the lab (greedy), but 19/24 on the phone (sampled). Device actions now force the call opening when the model gives it ≥ 5 %, the name is constrained to the declared tools, and the arguments decode freely; plus a claim guard (§4.8, D10). |
 | iOS SDK, Underdog 27B, ternary models | **Skipped.** No SDK; not phone-sized. |
 
 ## 3. Architecture
@@ -281,6 +281,18 @@ running on the unloaded model.
   every other call runs, so "pon un temporizador de diez minutos" with `seconds` 600 sets the timer though
   the guard cannot read Spanish. A refused call is handed off when it still can be, else answered with an
   error that tells the model to ask the user.
+- **Claim guard.** On the phone, Woof answered "提醒我明天早上八点去取快递。" with "已经为你设置好了明天的提醒"
+  and no tool call. For a device action (`IntentClassifier`) with tools, the first reply opens with a call
+  when the model gives one at least 5% at its first token, and its text is held back until the first
+  sentence ends. Held text that claims the action was done (`SuccessClaim`) is dropped, and the request is
+  asked again once with a required call. If that still writes no readable call, the request is handed off
+  when it can be, else the reply says the action couldn't be done. Woof also looked up the time for "next
+  Monday", then said the meeting was in the calendar: until a side-effect call has succeeded, the
+  continuation after a time lookup (`LocalToolLoop.contextLookups`; not after a list lookup, whose true answer
+  can read as a claim) opens the same way while a round is left, and, if the run hasn't retried, its
+  claim is dropped and the continuation decoded again from the end of the round's results with a required
+  call (`InferenceEngine.retryContinuation` rewinds the cache there), so the cache and the stored reply stay
+  equal and the next turn appends. `ToolChoice.native` turns the guard off.
 
 ### 4.9 Self-test, fallback, telemetry
 
@@ -440,7 +452,7 @@ offset, such as `2026-10-07T17:00`.
 | `list_events` | read | **start**, **end** | yes |
 | `create_event` | side effect | **title**, **start**, end, duration_minutes, location, notes, all_day | yes |
 | `set_timer` | side effect | **seconds** (1–86,400, checked by the app), label | yes |
-| `list_timers` | read | — | no |
+| `list_timers` | read | — | yes |
 | `cancel_timer` | side effect | **id** | no |
 | `get_current_time` | read | — | yes |
 | `handoff_to_cloud` | intercepted | **reason** | on device only, with automatic routing and a key |
@@ -552,7 +564,10 @@ these defaults. The On-device engine section also shows the self-test result, th
 reply's drafting and the engine's session, with "Run self-test", "Measure speed", "Test fast kernels" and the
 Benchmark (scenarios: continued chat, barge-in, cold start with and without the disk prefix, a 30-turn chat,
 copy-heavy prompts, tool prompts; "Compare engines" plays one on the Alvin engine and then on MLX stock over
-the same loaded model).
+the same loaded model; "Compare tool modes" plays one on the Alvin engine guided (claim guard, forced call
+openings, name selector) and native (`ToolChoice.native`, no claim guard), over the same system prompt).
+Tool calls get stand-in results in their tools' shapes at the scenario's time and
+never run; a tool turn passes when its expected tool is called in any round.
 
 ## 10. CI workflows and how to read them
 
@@ -639,6 +654,29 @@ What only a run on an iPhone can settle. Run the benchmark from a **Release** bu
 | D12 | Whether Claude accepts remapped on-device `tool_use` ids in history, and `strict` together with `eager_input_streaming` | The first cloud turn after an on-device tool round (also testable on a Mac with an API key) | Keep or remove the id remap; the eager streaming flag |
 | D13 | Whether to turn on automatic routing by default | Latency report p50/p90 per engine plus subjective quality | The `routingMode` default |
 
+### Results on an iPhone 17 Pro Max (A19 Pro, 12 GB, iOS 26.6.1), 10–11 October 2026
+
+Woof 4B, Release build, free Personal Team signing. Medians unless stated.
+
+| # | Result | Decision |
+|---|---|---|
+| D1 | Alvin engine vs stock, time to first text: first turn 0.23 vs 0.91 s (system prefix from disk); after a barge-in 0.34 vs 0.93 s; copy-heavy 0.29 vs 1.21 s; continued turns 0.22 vs 0.19 s; turns 13–30 of a long chat 0.24–0.35 vs 1.4–1.85 s (stock rebuilt every turn past 24 messages; fixed in `LocalSessionPlan`, now about 0.19 s with a rebuild every 7 turns). Decode about 23–24 tok/s on both for plain chat; 34–38 tok/s on tool calls with speculation. Cold start without the disk prefix 2.7 s (about 1,650 prefix tokens), hidden by prewarm. Peak memory 2.6–2.9 GB vs 2.8–3.4 GB. | `.automatic` stays the default. Open: the engine's ~30–40 ms extra on plain continued turns. |
+| D2 | Self-test passes: Woof 4B in 4.4–4.6 s, Woof 2B in 1.9 s (11.7 s in Low Power Mode). | Engine available on A19 Pro. |
+| D3 | Cost curve c(2) 1.00×, c(4) 1.43×, c(8) 2.75×. Fast kernels: an 8-token check takes 27 % more time. | 4 drafts per round; fast kernels stay off. |
+| D4 | Without the increased-memory-limit entitlement `os_proc_available_memory()` left between 2.05 and 3.1 GB, so Woof 4B (needs 3.1 GB with the margin) didn't load; Woof 2B did. With it (a free Personal Team can sign it) 4B loads. | `Config/AlvinAssistant.entitlements` requests it. The failure message now shows the needed and available memory. |
+| D5 | Started cool, a 30-turn chat stayed `nominal` on the Alvin engine; plain decode slows about 10–15 % from 1.6k to 2.9k context tokens. After an hour of back-to-back runs: `serious`, and with Low Power Mode on, 8.6 tok/s with speculation off (by design). | Margins unchanged. The benchmark now records the thermal state per turn and Low Power Mode, and keeps the screen awake while it runs. |
+| D6 | No sign that as-generated history hurts; both engines make Woof-sized factual slips. Both sometimes reply in the conversation's earlier language rather than the latest message's, and read-backs of a list sometimes drop quantities. | No exact re-render policy. |
+| D7 | 2 of 2 local early starts adopted (few voice turns). Qwen3-ASR not tested. | Defaults unchanged. |
+| D8 | Barge-in stops speech quickly; no false ducks noticed. Local speech end → first audio 1.52 s p50, of which about 0.96 s is end-of-turn detection; request → first text 0.26 s. | Defaults unchanged. |
+| D9 | Reminder and timer creation, permission prompts and background firing work. Not tested: a timer finishing during voice mode. | — |
+| D10 | Before: right tool 19/24, arguments 18/24. Chinese device actions answered in words claiming success ("已经为你设置好了…"), with P(tool) 0.66–0.86 and as low as 0.11 at the first token; "how long is left on my timer" couldn't pass (`list_timers` wasn't offered on device). After the claim guard, forced call openings with the name selector, and `list_timers`: 12/12 and 12/12. A Chinese tool-guidance block in the system prompt was tried and removed: it raised P(tool) but broke English times ("Remind me at 5" → 16:05) and dates ("Compare tool modes": 21–22/24 arguments with it, 24/24 without). | Selector/filler built (§4.8, §12). |
+| D11 | Locking or switching apps mid-reply stops the reply; no GPU abort or crash. | Background session save stays off. |
+| D12, D13 | Not run (needs Claude as the provider). | — |
+
+The benchmark's tool executor answers calls with stand-in results in the real tools' shapes, and a tool turn
+passes when its expected tool is called in any round, so the numbers after the change aren't strictly
+comparable with the first two runs, which scored the first call against `{"ok": true}` results.
+
 **Already settled in CI** (no device needed): `mtp.*` presence (none: WP42 skipped, and today's app does not
 load Woof as garbage); template behaviour and EOS ids; quantization layout; prompt-lookup acceptance and tool
 accuracy ([Drafter lab](drafter-lab.md)); fork parity; rollback exactness; lossless speculation; session reuse
@@ -651,7 +689,7 @@ too: 5.03 tokens per round, but not faster or lossless in dflash-mlx ([Drafter l
 |---|---|---|
 | MTP drafter (WP42) | Skipped | No catalog checkpoint keeps `mtp.*` weights, although some configs declare a layer. |
 | Swift DFlash port | Deferred (threshold met) | The lab measured 5.03 tokens and 4.03 accepted draft tokens per round on Woof (run 37786174712), above the 2.5 threshold, but dflash-mlx was slower than plain greedy on the CI GPU and not lossless against it. A port needs hidden-state taps from several layers and 0.3–1 GB more memory, and must prove lossless and faster on an iPhone. |
-| Two-step tool selector and filler | Deferred | Woof called 12/12 tools correctly; revisit only if D10 shows < 85 % on the phone. |
+| Two-step tool selector and filler | Built | D10 measured 19/24 on the phone, below 85 %; built in the engine as forced openings and a name selector (§4.8). |
 | Fast kernels on by default | Deferred | Slower than stock at 8 rows on the CI GPU; enabled per device after a measured ≥ 25 % gain. |
 | Model-shaped kernels, weight repacking, compiled decode | Skipped | Months of specialist work; upstream's compiled decode gave +1.7–3.5 % on a dense 4B. Revisit through a 3.32.x upgrade. |
 | mlx-swift-lm 3.32.x upgrade | Deferred | Its MTP rewinds 1 token and is greedy-only; the fork already carries the sanitize fix. |

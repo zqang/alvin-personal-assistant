@@ -40,14 +40,16 @@ public enum LocalDateTime {
         guard scanner.take("T") || scanner.take("t") || scanner.take(" "),
               let hour = scanner.digits(2), scanner.take(":"),
               let minute = scanner.digits(2),
-              (0...23).contains(hour), (0...59).contains(minute)
+              (0...59).contains(minute),
+              // 24:00 is the end of the day (ISO 8601), which models write as a range's end.
+              (0...23).contains(hour) || (hour == 24 && minute == 0)
         else { return nil }
         components.hour = hour
         components.minute = minute
 
         var fraction: TimeInterval = 0
         if scanner.take(":") {
-            guard let second = scanner.digits(2), (0...59).contains(second) else { return nil }
+            guard let second = scanner.digits(2), (0...59).contains(second), hour < 24 || second == 0 else { return nil }
             components.second = second
             if scanner.take(".") || scanner.take(",") {
                 let digits = scanner.digitRun()

@@ -198,9 +198,17 @@ public protocol ToolExecutor: Sendable {
     /// The tools to offer the model, sorted by name.
     var definitions: [ToolDefinition] { get }
     func presentation(for name: String) -> ToolPresentation
+    /// What running `name` does. The default, `.sideEffect`, assumes a call may have acted.
+    func effect(of name: String) -> ToolEffect
     /// Runs one round of calls. Never throws: a call that fails gives an error record.
     /// The records keep the calls' order.
     func run(_ calls: [PendingToolCall], context: ToolContext) async -> ToolRound
+}
+
+extension ToolExecutor {
+    public func effect(of name: String) -> ToolEffect {
+        .sideEffect
+    }
 }
 
 /// Offers no tools; any call it is asked to run gets the error record "Unknown tool".
