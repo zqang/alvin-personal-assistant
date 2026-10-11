@@ -1,3 +1,4 @@
+import AlvinProfile
 import AssistantKit
 import Foundation
 import LocalEngine
@@ -45,10 +46,11 @@ final class ToolCallIntegrationTests: XCTestCase {
 
         let log = IntegrationToolLog()
         let runner = ToolRunner(registry: ToolRegistry(lab.tools.map { IntegrationTool(definition: $0, log: log) as any AssistantTool }), lenientInput: true)
+        let profile = AlvinProfile.profile
         let system = PromptBuilder.localSystemPrompt(
-            base: PromptBuilder.systemPrompt(userName: "", customInstructions: ""), handoffAvailable: true)
+            base: PromptBuilder.systemPrompt(userName: "", customInstructions: "", profile: profile), handoffAvailable: true, profile: profile)
         let loop = LocalToolLoop(
-            engine: engine, executor: runner, handoffAvailable: true, isOnline: { true }, toolContext: { ToolContext() })
+            engine: engine, executor: runner, handoffAvailable: true, isOnline: { true }, toolContext: { ToolContext() }, profile: profile)
 
         var rows: [[String]] = []
         var parsedReminders = 0
@@ -203,7 +205,7 @@ private struct Lab {
         for schema in schemas {
             guard let name = schema["name"]?.stringValue, local.contains(name) else { continue }
             if name == HandoffTool.name {
-                tools.append(HandoffTool.definition)
+                tools.append(AlvinProfile.profile.handoffTool.definition)
             } else {
                 tools.append(ToolDefinition(
                     name: name, description: schema["description"]?.stringValue ?? "",

@@ -46,7 +46,7 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
             messages.append(pendingUser)
         }
         let turns = PromptBuilder.turns(from: messages)
-        let system = PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: settings.customInstructions)
+        let system = PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: settings.customInstructions, profile: .app)
 
         let decision = decide(settings: settings, turns: turns, request: request)
         // Under "On-device only", a reply started early may run only on device, and with automatic
@@ -161,7 +161,7 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
         )
         signals.setExpectations(from: store.latency)
         let utterance = turns.last(where: { $0.role == .user })?.text ?? ""
-        let decider = RouteDecider()
+        let decider = RouteDecider(classifier: AssistantProfile.app.intents)
         let intents = decider.classifier.classify(utterance)
         // A device action goes on device only when the on-device reply can run the tools: the
         // Alvin engine with the device tools on. MLX's stock session has no tools.

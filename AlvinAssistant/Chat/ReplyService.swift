@@ -15,7 +15,7 @@ enum ReplyService {
     static func stream(for conversation: Conversation, store: SettingsStore) -> AsyncThrowingStream<ReplyEvent, Error> {
         let settings = store.settings
         let turns = PromptBuilder.turns(from: conversation.orderedMessages.map(\.stored))
-        let system = PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: settings.customInstructions)
+        let system = PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: settings.customInstructions, profile: .app)
         do {
             return try provider(settings: settings, store: store).streamReply(system: system, turns: turns)
         } catch {

@@ -111,7 +111,9 @@ public struct RouteDecider: Sendable {
 
     public let classifier: IntentClassifier
 
-    public init(classifier: IntentClassifier = .init()) {
+    /// - Parameter classifier: the app's (`AssistantProfile.intents`). There is no default: a
+    ///   classifier without the app's action phrases would never see an action.
+    public init(classifier: IntentClassifier) {
         self.classifier = classifier
     }
 

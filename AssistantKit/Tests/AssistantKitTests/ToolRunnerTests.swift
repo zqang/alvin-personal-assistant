@@ -559,7 +559,7 @@ final class ToolRegistryTests: XCTestCase {
             XCTFail("set_timer should stay turned off")
         }
 
-        let withHandoff = local.adding([HandoffTool.tool, FakeTool(name: "create_reminder", description: "replaced")])
+        let withHandoff = local.adding([AssistantProfile().handoffTool, FakeTool(name: "create_reminder", description: "replaced")])
         XCTAssertEqual(withHandoff.definitions.map(\.name), ["create_reminder", "handoff_to_cloud", "set_timer"])
         XCTAssertEqual(withHandoff.definitions.first?.description, "replaced")
         XCTAssertEqual(local.definitions.count, 2, "the original is unchanged")
@@ -646,19 +646,22 @@ final class ToolRegistryTests: XCTestCase {
     }
 
     func testHandoffTool() async throws {
+        let tool = HandoffTool.tool(description: "Hand it over.")
+        let definition = HandoffTool.definition(description: "Hand it over.")
         XCTAssertEqual(HandoffTool.name, "handoff_to_cloud")
-        XCTAssertEqual(HandoffTool.definition.name, HandoffTool.name)
-        XCTAssertEqual(HandoffTool.tool.definition, HandoffTool.definition)
-        XCTAssertEqual(HandoffTool.definition.inputSchema["required"], ["reason"])
-        XCTAssertEqual(HandoffTool.definition.inputSchema["additionalProperties"], false)
-        XCTAssertEqual(HandoffTool.definition.inputSchema["properties"]?["reason"]?["type"], "string")
-        XCTAssertEqual(HandoffTool.tool.effect, .readOnly)
-        XCTAssertNil(HandoffTool.tool.presentation.cue)
+        XCTAssertEqual(definition.name, HandoffTool.name)
+        XCTAssertEqual(tool.definition, definition)
+        XCTAssertEqual(definition.inputSchema["required"], ["reason"])
+        XCTAssertEqual(definition.inputSchema["additionalProperties"], false)
+        XCTAssertEqual(definition.inputSchema["properties"]?["reason"]?["type"], "string")
+        XCTAssertEqual(tool.effect, .readOnly)
+        XCTAssertNil(tool.presentation.cue)
+        XCTAssertEqual(AssistantProfile(handoffDescription: "Hand it over.").handoffTool.definition, definition)
 
-        let output = try await HandoffTool.tool.run(["reason": "needs the web"], context: ToolContext())
+        let output = try await tool.run(["reason": "needs the web"], context: ToolContext())
         XCTAssertEqual(output, .error("intercepted"))
 
-        let round = await ToolRunner(registry: ToolRegistry([HandoffTool.tool])).run(
+        let round = await ToolRunner(registry: ToolRegistry([tool])).run(
             [call("h", "handoff_to_cloud", ["reason": "news"]), call("i", "handoff_to_cloud", [:])],
             context: ToolContext()
         )
@@ -677,6 +680,6 @@ final class ToolRegistryTests: XCTestCase {
         }
         let lab = try JSONValue.parse(data)
         let entry = try XCTUnwrap(lab["tool_schemas"]?.arrayValue?.first { $0["name"] == "handoff_to_cloud" })
-        XCTAssertEqual(entry["input_schema"], HandoffTool.definition.inputSchema)
+        XCTAssertEqual(entry["input_schema"], HandoffTool.definition(description: "").inputSchema)
     }
 }

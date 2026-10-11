@@ -288,7 +288,7 @@ running on the unloaded model.
   asked again once with a required call. If that still writes no readable call, the request is handed off
   when it can be, else the reply says the action couldn't be done. Woof also looked up the time for "next
   Monday", then said the meeting was in the calendar: until a side-effect call has succeeded, the
-  continuation after a time lookup (`LocalToolLoop.contextLookups`; not after a list lookup, whose true answer
+  continuation after a time lookup (the app profile's `contextLookups`; not after a list lookup, whose true answer
   can read as a claim) opens the same way while a round is left, and, if the run hasn't retried, its
   claim is dropped and the continuation decoded again from the end of the round's results with a required
   call (`InferenceEngine.retryContinuation` rewinds the cache there), so the cache and the stored reply stay

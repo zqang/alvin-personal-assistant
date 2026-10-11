@@ -85,7 +85,7 @@ enum DeviceTools {
     /// The on-device subset, plus `handoff_to_cloud` when `handoff` is true.
     static func localRegistry(settings: AssistantSettings, handoff: Bool) -> ToolRegistry {
         let local = registry(settings: settings).subset(localToolNames)
-        return handoff ? local.adding([HandoffTool.tool]) : local
+        return handoff ? local.adding([AssistantProfile.app.handoffTool]) : local
     }
 
     /// Whether every tool of `category` may run.

@@ -106,12 +106,12 @@ public enum PromptBuilder {
         return formatter
     }
 
-    /// The system prompt. It contains nothing that changes per request, so it stays cacheable.
-    public static func systemPrompt(userName: String, customInstructions: String) -> String {
+    /// The system prompt: `profile.persona`, then the rules every app shares. It contains nothing
+    /// that changes per request, so it stays cacheable.
+    public static func systemPrompt(userName: String, customInstructions: String, profile: AssistantProfile) -> String {
         let name = userName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let owner = name.isEmpty ? "" : " for \(name)"
-        var prompt = """
-        You are a warm, capable personal assistant\(owner), running as an iPhone app. The user talks to you by voice or types.
+        var prompt = profile.persona(name) + " " + """
+        The user talks to you by voice or types.
 
         Each user message starts with a <context> tag giving the local time it was sent and whether it was spoken or typed. Use the time when it matters, and never mention the tag.
 
@@ -134,12 +134,13 @@ public enum PromptBuilder {
         return prompt
     }
 
-    /// The system prompt for the on-device model: `base` plus what it needs to know about running
-    /// on the phone, and about handing requests to the cloud assistant when that is possible.
-    public static func localSystemPrompt(base: String, handoffAvailable: Bool) -> String {
-        var prompt = base + "\n\nYou run on the user's iPhone. Use your tools for reminders, calendar, timers and the current time."
+    /// The system prompt for the on-device model: `base` plus what it needs to know about its
+    /// tools (`profile.localToolHint`), and about handing requests to the cloud assistant when
+    /// that is possible (`profile.localHandoffHint`).
+    public static func localSystemPrompt(base: String, handoffAvailable: Bool, profile: AssistantProfile) -> String {
+        var prompt = base + "\n\n" + profile.localToolHint
         if handoffAvailable {
-            prompt += " If a request needs the internet (news, weather, prices, scores) or deep expertise, call handoff_to_cloud before saying anything."
+            prompt += " " + profile.localHandoffHint
         }
         return prompt
     }

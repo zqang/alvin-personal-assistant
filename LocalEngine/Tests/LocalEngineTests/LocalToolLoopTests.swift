@@ -1,3 +1,4 @@
+import AlvinProfile
 import AssistantKit
 import Foundation
 import LocalEngine
@@ -768,12 +769,15 @@ final class LocalToolLoopTests: XCTestCase {
     private func makeLoop(
         _ engine: InferenceEngine, log: LoopToolLog, handoffAvailable: Bool = true,
         isOnline: @escaping @Sendable () -> Bool = { true }, maxRounds: Int = 3,
-        callGuard: LocalToolLoop.CallGuard = .standard, onRun: (@Sendable () async -> Void)? = nil
+        callGuard: ToolCallGuard = AlvinProfile.profile.callGuard, onRun: (@Sendable () async -> Void)? = nil
     ) -> Fixture {
-        let runner = ToolRunner(registry: ToolRegistry(LoopTools.make(log: log, onRun: onRun) + [HandoffTool.tool]), lenientInput: true)
+        // This app's profile, whose words, claims and guard the scripts below were written for.
+        var profile = AlvinProfile.profile
+        profile.callGuard = callGuard
+        let runner = ToolRunner(registry: ToolRegistry(LoopTools.make(log: log, onRun: onRun) + [profile.handoffTool]), lenientInput: true)
         let loop = LocalToolLoop(
             engine: engine, executor: runner, handoffAvailable: handoffAvailable, isOnline: isOnline,
-            toolContext: { ToolContext() }, maxRounds: maxRounds, callGuard: callGuard)
+            toolContext: { ToolContext() }, profile: profile, maxRounds: maxRounds)
         return Fixture(loop: loop, runner: runner)
     }
 
@@ -884,14 +888,14 @@ final class LocalToolLoopLogicTests: XCTestCase {
             "一个半小时后叫我", "倒计时一百二十秒", "计时十多分钟", "设一刻钟的计时器",
         ]
         for text in amounts {
-            XCTAssertTrue(LocalToolLoop.CallGuard.statesAnAmount(text), text)
+            XCTAssertTrue(TimerCheck.statesAnAmount(text), text)
         }
         let questions = [
             "How long is left on my timer?", "我的计时器还剩多少时间？", "Set the timer", "what's left on the pasta timer", "Set a timer", "",
             "帮我看一下计时器", "设一个计时器", "计时器还剩几分钟？",
         ]
         for text in questions {
-            XCTAssertFalse(LocalToolLoop.CallGuard.statesAnAmount(text), text)
+            XCTAssertFalse(TimerCheck.statesAnAmount(text), text)
         }
     }
 
@@ -903,27 +907,27 @@ final class LocalToolLoopLogicTests: XCTestCase {
             ChatTurn(role: .assistant, text: "Sure. What should I call it?"),
             ChatTurn(role: .user, text: "Pasta."),
         ]
-        XCTAssertEqual(LocalToolLoop.CallGuard.userText(of: asked), "Set a timer for ten minutes.\nPasta.")
-        XCTAssertTrue(LocalToolLoop.CallGuard.statesAnAmount(LocalToolLoop.CallGuard.userText(of: asked)))
+        XCTAssertEqual(ToolCallGuard.userText(of: asked), "Set a timer for ten minutes.\nPasta.")
+        XCTAssertTrue(TimerCheck.statesAnAmount(ToolCallGuard.userText(of: asked)))
 
         let answered = [
             ChatTurn(role: .user, text: "Set a timer for ten minutes."),
             ChatTurn(role: .assistant, text: "Done, ten minutes."),
             ChatTurn(role: .user, text: "How long is left on it?"),
         ]
-        XCTAssertEqual(LocalToolLoop.CallGuard.userText(of: answered), "How long is left on it?")
-        XCTAssertEqual(LocalToolLoop.CallGuard.userText(of: [ChatTurn(role: .user, text: "Hi")]), "Hi")
-        XCTAssertEqual(LocalToolLoop.CallGuard.userText(of: []), "")
+        XCTAssertEqual(ToolCallGuard.userText(of: answered), "How long is left on it?")
+        XCTAssertEqual(ToolCallGuard.userText(of: [ChatTurn(role: .user, text: "Hi")]), "Hi")
+        XCTAssertEqual(ToolCallGuard.userText(of: []), "")
     }
 
     func testStandardGuardChecksOnlyTimers() {
         let timer = PendingToolCall(id: "call_1", name: "set_timer", input: ["seconds": 1])
         let reminder = PendingToolCall(id: "call_2", name: "create_reminder", input: ["title": "Call mum"])
         let question = "How long is left on my timer?"
-        XCTAssertNotNil(LocalToolLoop.CallGuard.standard.check(timer, question))
-        XCTAssertNil(LocalToolLoop.CallGuard.standard.check(timer, "Set a timer for five minutes."))
-        XCTAssertNil(LocalToolLoop.CallGuard.standard.check(reminder, question))
-        XCTAssertNil(LocalToolLoop.CallGuard.none.check(timer, question))
+        XCTAssertNotNil(TimerCheck.guard.check(timer, question))
+        XCTAssertNil(TimerCheck.guard.check(timer, "Set a timer for five minutes."))
+        XCTAssertNil(TimerCheck.guard.check(reminder, question))
+        XCTAssertNil(ToolCallGuard.none.check(timer, question))
     }
 
     /// The standard guard objects to a timer only when the user's words ask about a running
@@ -932,7 +936,7 @@ final class LocalToolLoopLogicTests: XCTestCase {
         func timer(_ seconds: JSONValue) -> PendingToolCall {
             PendingToolCall(id: "call_1", name: "set_timer", input: ["seconds": seconds])
         }
-        let guardCheck = LocalToolLoop.CallGuard.standard.check
+        let guardCheck = TimerCheck.guard.check
 
         // Asked about a running timer: refused whatever the duration (the lab's case: "1").
         for question in ["How long is left on my timer?", "我的计时器还剩多少时间？", "计时器还剩几分钟？", "How much time on the pasta timer?"] {
@@ -977,14 +981,14 @@ final class LocalToolLoopLogicTests: XCTestCase {
             "我的计时器还剩多少时间？", "计时器还剩几分钟？", "还有多久？", "計時器還有幾分鐘", "倒计时还有几个小时", "计时器剩下的时间",
         ]
         for text in questions {
-            XCTAssertTrue(LocalToolLoop.CallGuard.asksAboutRunningTimer(text), text)
+            XCTAssertTrue(TimerCheck.asksAboutRunningTimer(text), text)
         }
         let requests = [
             "Set a timer for ten minutes", "Set a timer", "Timer for half an hour", "", "设一个计时器", "帮我设一个二十分钟的计时器",
             "Pon un temporizador de diez minutos", "Show me how to cook rice", "几乎完成了",
         ]
         for text in requests {
-            XCTAssertFalse(LocalToolLoop.CallGuard.asksAboutRunningTimer(text), text)
+            XCTAssertFalse(TimerCheck.asksAboutRunningTimer(text), text)
         }
     }
 

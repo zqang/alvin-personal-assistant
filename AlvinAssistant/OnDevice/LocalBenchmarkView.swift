@@ -1,9 +1,10 @@
+import AlvinProfile
 import AssistantKit
 import LocalEngine
 import SwiftUI
 import UIKit
 
-/// Plays a scripted scenario (`LocalBenchmark.scenarios`) through the on-device model and reports
+/// Plays a scripted scenario (`scenarios`) through the on-device model and reports
 /// time to first text, prefill and generation speed, cache reuse, speculative decoding, tool-call
 /// accuracy and peak memory. "Compare engines" plays the scenario with the Alvin engine, then with
 /// MLX's stock session over the same loaded model. "Compare tool modes" plays it on the Alvin
@@ -13,15 +14,18 @@ struct LocalBenchmarkView: View {
     @State private var runner = LocalBenchmarkRunner()
     @State private var scenarioID = LocalBenchmark.continued.id
 
+    /// The shared scenarios, then this app's tool calls.
+    static let scenarios = LocalBenchmark.scenarios + [ToolBenchmark.tools]
+
     private var scenario: LocalBenchmark.Scenario {
-        LocalBenchmark.scenario(id: scenarioID) ?? LocalBenchmark.continued
+        Self.scenarios.first { $0.id == scenarioID } ?? LocalBenchmark.continued
     }
 
     var body: some View {
         List {
             Section {
                 Picker("Scenario", selection: $scenarioID) {
-                    ForEach(LocalBenchmark.scenarios) { scenario in
+                    ForEach(Self.scenarios) { scenario in
                         Text(scenario.title).tag(scenario.id)
                     }
                 }
@@ -256,7 +260,7 @@ final class LocalBenchmarkRunner {
     ) async -> (rows: [LocalBenchmark.Row], stopped: String?) {
         let host = LocalModelHost.shared
         var settings = settings
-        let system = PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: "")
+        let system = PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: "", profile: .app)
         let definitions = DeviceTools.localRegistry(settings: settings, handoff: false).definitions
         let effects = Dictionary(uniqueKeysWithValues: DeviceTools.allTools.map { ($0.definition.name, $0.effect) })
         // The continued chat ends with its last turn played again without the cache.
@@ -430,7 +434,7 @@ private final class ReplyRecorder {
 
 /// Offers the on-device tools but carries none out, so a benchmark never changes the user's
 /// reminders, calendar or timers: each call gets a stand-in result in its tool's shape
-/// (`LocalBenchmark.toolResult`) at the time the turn's context tag gives, and the model carries
+/// (`ToolBenchmark.toolResult`) at the time the turn's context tag gives, and the model carries
 /// on as after a real call. `get_current_time` runs the real tool, which only reads that time.
 struct BenchmarkToolExecutor: ToolExecutor {
     let definitions: [ToolDefinition]
@@ -455,7 +459,7 @@ struct BenchmarkToolExecutor: ToolExecutor {
         }
         var records: [ToolCallRecord] = []
         for call in calls {
-            var output = LocalBenchmark.toolResult(for: call, now: context.now, timeZone: context.timeZone)
+            var output = ToolBenchmark.toolResult(for: call, now: context.now, timeZone: context.timeZone)
             if call.name == CurrentTimeTool.name, let real = try? await CurrentTimeTool().run(call.input?.objectValue ?? [:], context: context) {
                 output = real
             }

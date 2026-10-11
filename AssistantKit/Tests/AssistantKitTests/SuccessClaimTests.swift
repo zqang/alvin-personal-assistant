@@ -1,7 +1,11 @@
+import AlvinProfile
 import XCTest
 @testable import AssistantKit
 
 final class SuccessClaimTests: XCTestCase {
+    /// This app's claims: the shared tables plus its reminder, timer and event nouns.
+    private let claims = AlvinProfile.profile.claims
+
     func testClaims() {
         for text in [
             // Measured on the phone: Woof answered two benchmark requests without a tool call.
@@ -23,7 +27,7 @@ final class SuccessClaimTests: XCTestCase {
             "Your dentist appointment is scheduled for Friday at 3 pm.",
             "I\u{2019}ve set it for 8, is that okay?",
         ] {
-            XCTAssertTrue(SuccessClaim.claimsDone(text), "\"\(text)\"")
+            XCTAssertTrue(claims.claimsDone(text), "\"\(text)\"")
         }
     }
 
@@ -45,7 +49,7 @@ final class SuccessClaimTests: XCTestCase {
             SuccessClaim.actionFailedMessage(for: "Remind me at 5"),
             SuccessClaim.actionFailedMessage(for: "提醒我"),
         ] {
-            XCTAssertFalse(SuccessClaim.claimsDone(text), "\"\(text)\"")
+            XCTAssertFalse(claims.claimsDone(text), "\"\(text)\"")
         }
     }
 
@@ -56,7 +60,7 @@ final class SuccessClaimTests: XCTestCase {
     }
 
     func testTablesAreLowercaseAndUnique() {
-        for table in [SuccessClaim.englishPhrases, SuccessClaim.chinesePhrases, SuccessClaim.participles, SuccessClaim.promisedVerbs] {
+        for table in [claims.phrases, SuccessClaim.chinesePhrases, claims.allParticiples, SuccessClaim.promisedVerbs] {
             XCTAssertEqual(Set(table).count, table.count)
             for phrase in table {
                 XCTAssertEqual(phrase, IntentClassifier.normalize(phrase))

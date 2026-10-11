@@ -1,7 +1,11 @@
+import AlvinProfile
 import XCTest
 @testable import AssistantKit
 
 final class PromptBuilderTests: XCTestCase {
+    /// This app's profile, whose prompts these tests read.
+    private let profile = AlvinProfile.profile
+
     func testTurnsSkipFailedRepliesAndMergeUserMessages() throws {
         let start = Date(timeIntervalSince1970: 0)
         let zone = try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo"))
@@ -43,10 +47,10 @@ final class PromptBuilderTests: XCTestCase {
     }
 
     func testSystemPromptPersonalization() {
-        let prompt = PromptBuilder.systemPrompt(userName: "Alvin", customInstructions: " I live in Singapore. ")
+        let prompt = PromptBuilder.systemPrompt(userName: "Alvin", customInstructions: " I live in Singapore. ", profile: profile)
         XCTAssertTrue(prompt.contains("personal assistant for Alvin"))
         XCTAssertTrue(prompt.hasSuffix("<user_instructions>\nI live in Singapore.\n</user_instructions>"))
-        let plain = PromptBuilder.systemPrompt(userName: "", customInstructions: "")
+        let plain = PromptBuilder.systemPrompt(userName: "", customInstructions: "", profile: profile)
         XCTAssertFalse(plain.contains("user_instructions"))
         XCTAssertTrue(plain.contains("personal assistant, running"))
     }
@@ -117,22 +121,22 @@ final class PromptBuilderTests: XCTestCase {
     }
 
     func testSystemPromptAsksForToolsBeforeSpeaking() {
-        let prompt = PromptBuilder.systemPrompt(userName: "", customInstructions: "")
+        let prompt = PromptBuilder.systemPrompt(userName: "", customInstructions: "", profile: profile)
         XCTAssertTrue(prompt.hasSuffix(
             "Keep responses focused, brief, and concise to avoid overwhelming the person. Latency-sensitive: begin your visible answer immediately, unless you need a tool first; then call it before saying anything. Don't narrate tool use; the app plays a short cue. After an action, confirm the outcome in one short sentence."
         ))
         XCTAssertFalse(prompt.contains("Latency-sensitive; begin your visible answer immediately."))
-        XCTAssertEqual(PromptBuilder.systemPrompt(userName: "", customInstructions: ""), prompt, "the prompt is static, so it caches")
+        XCTAssertEqual(PromptBuilder.systemPrompt(userName: "", customInstructions: "", profile: profile), prompt, "the prompt is static, so it caches")
     }
 
     func testLocalSystemPrompt() {
-        let base = PromptBuilder.systemPrompt(userName: "Alvin", customInstructions: "")
+        let base = PromptBuilder.systemPrompt(userName: "Alvin", customInstructions: "", profile: profile)
         XCTAssertEqual(
-            PromptBuilder.localSystemPrompt(base: base, handoffAvailable: false),
+            PromptBuilder.localSystemPrompt(base: base, handoffAvailable: false, profile: profile),
             base + "\n\nYou run on the user's iPhone. Use your tools for reminders, calendar, timers and the current time."
         )
         XCTAssertEqual(
-            PromptBuilder.localSystemPrompt(base: "BASE", handoffAvailable: true),
+            PromptBuilder.localSystemPrompt(base: "BASE", handoffAvailable: true, profile: profile),
             "BASE\n\nYou run on the user's iPhone. Use your tools for reminders, calendar, timers and the current time. If a request needs the internet (news, weather, prices, scores) or deep expertise, call handoff_to_cloud before saying anything."
         )
     }

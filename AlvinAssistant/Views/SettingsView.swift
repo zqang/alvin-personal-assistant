@@ -12,6 +12,9 @@ struct SettingsView: View {
     @State private var compatibleKey = ""
     @State private var openAIKey = ""
     @State private var previewSynthesizer = AVSpeechSynthesizer()
+    /// What the downloaded models take on the iPhone, read when Settings opens and after a load.
+    @State private var downloadedBytes: Int64 = 0
+    @State private var confirmingDelete = false
 
     private static let speechLocales: [String] = SFSpeechRecognizer.supportedLocales()
         .map { $0.identifier.replacingOccurrences(of: "_", with: "-") }
@@ -37,6 +40,7 @@ struct SettingsView: View {
             }
         }
         .onAppear {
+            downloadedBytes = LocalModelHost.downloadedBytes()
             anthropicKey = store.secret(.anthropic)
             compatibleKey = store.secret(.compatible)
             openAIKey = store.secret(.openAI)
@@ -47,6 +51,7 @@ struct SettingsView: View {
             // other options change on the running engine.
             LocalModelHost.shared.apply(store.settings)
         }
+        .onChange(of: LocalModelHost.shared.status) { downloadedBytes = LocalModelHost.downloadedBytes() }
         .onChange(of: anthropicKey) { store.setSecret(anthropicKey, for: .anthropic) }
         .onChange(of: compatibleKey) { store.setSecret(compatibleKey, for: .compatible) }
         .onChange(of: openAIKey) { store.setSecret(openAIKey, for: .openAI) }
@@ -285,6 +290,19 @@ struct SettingsView: View {
     private var infoSection: some View {
         Section {
             LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")
+            if downloadedBytes > 0 {
+                Button("Delete downloaded models (\(ByteCountFormatter.string(fromByteCount: downloadedBytes, countStyle: .file)))", role: .destructive) {
+                    confirmingDelete = true
+                }
+                .confirmationDialog("Delete the downloaded models?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+                    Button("Delete", role: .destructive) {
+                        LocalModelHost.shared.deleteDownloads()
+                        downloadedBytes = LocalModelHost.downloadedBytes()
+                    }
+                } message: {
+                    Text("On-device replies and Qwen3-ASR listening stop until a model is downloaded again, over Wi-Fi.")
+                }
+            }
         } footer: {
             Text("Speech is recognized on your iPhone. Your messages go to the model provider you choose above.")
         }

@@ -9,9 +9,16 @@ let package = Package(
     platforms: [.iOS(.v17), .macOS(.v14)],
     products: [
         .library(name: "AssistantKit", targets: ["AssistantKit"]),
+        .library(name: "AlvinProfile", targets: ["AlvinProfile"]),
     ],
     targets: [
         .target(name: "AssistantKit"),
-        .testTarget(name: "AssistantKitTests", dependencies: ["AssistantKit"]),
+        // This app's own domain (AssistantProfile), which another app replaces with its own and
+        // never links. ponytail: it sits in this package only because AssistantKitTests and
+        // LocalEngine's test targets use it and the app has no test target. Once a second app
+        // shares AssistantKit, give it its own package with those tests, give LocalEngine's tests
+        // a small fixture profile, and drop the AlvinProfile product from LocalEngine/Package.swift.
+        .target(name: "AlvinProfile", dependencies: ["AssistantKit"]),
+        .testTarget(name: "AssistantKitTests", dependencies: ["AssistantKit", "AlvinProfile"]),
     ]
 )

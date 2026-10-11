@@ -6,35 +6,42 @@ import Foundation
 /// The local tool loop intercepts the call before it would run (it throws `ReplyHandoff`, or
 /// answers it itself when offline), so the tool's own `run` only reports that it was meant to be
 /// intercepted. Its input schema matches `handoff_to_cloud` in `scripts/lab_prompts.json`, which
-/// the lab measures models against. The description is more explicit than the lab's first one:
-/// with that, asked how long a timer had left while it could only start timers, the on-device
-/// model started a one-second timer instead of handing off.
+/// the lab measures models against. Its description comes from the app (`AssistantProfile
+/// .handoffDescription`), which can name the requests its own tools can't do.
 public enum HandoffTool {
     public static let name = "handoff_to_cloud"
 
-    public static let definition = ToolDefinition(
-        name: name,
-        description: "Hand this request to the more capable cloud assistant, which sees the whole conversation. Call this first, instead of answering or calling another tool, when the request needs the internet (news, weather, prices, scores, opening hours), asks about something none of your other tools can read or do (for example cancelling a timer, when your tools can only start and list timers), or needs long, careful reasoning. Never call another tool as a stand-in for a request it doesn't fit.",
-        inputSchema: [
-            "type": "object",
-            "properties": [
-                "reason": [
-                    "type": "string",
-                    "description": "One short sentence on why the cloud assistant is needed.",
-                ],
-            ],
-            "required": ["reason"],
-            "additionalProperties": false,
-        ]
-    )
+    /// A description that names no app's tools, for `AssistantProfile`'s default.
+    public static let neutralDescription = "Hand this request to the more capable cloud assistant, which sees the whole conversation. Call this first, instead of answering or calling another tool, when the request needs the internet, asks about something none of your other tools can read or do, or needs long, careful reasoning. Never call another tool as a stand-in for a request it doesn't fit."
 
-    public static let tool: any AssistantTool = Handoff()
+    public static func definition(description: String) -> ToolDefinition {
+        ToolDefinition(
+            name: name,
+            description: description,
+            inputSchema: [
+                "type": "object",
+                "properties": [
+                    "reason": [
+                        "type": "string",
+                        "description": "One short sentence on why the cloud assistant is needed.",
+                    ],
+                ],
+                "required": ["reason"],
+                "additionalProperties": false,
+            ]
+        )
+    }
+
+    /// The tool with `description` (usually `AssistantProfile.handoffTool`).
+    public static func tool(description: String) -> any AssistantTool {
+        Handoff(definition: definition(description: description))
+    }
 
     /// The result `run` gives when nothing intercepted the call.
     public static let interceptedMessage = "intercepted"
 
     private struct Handoff: AssistantTool {
-        var definition: ToolDefinition { HandoffTool.definition }
+        let definition: ToolDefinition
         // It changes nothing itself, so it never waits for the commit gate.
         var effect: ToolEffect { .readOnly }
         // No cue: whoever performs the handoff announces it with `.handingOff`.

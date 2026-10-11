@@ -2,7 +2,7 @@
 import PackageDescription
 
 // The on-device reply engine ("Alvin engine"). It is built and tested on the CI GPU by
-// .github/workflows/local-engine.yml and is not linked into the app yet. The dependency URLs
+// .github/workflows/local-engine.yml, and the app links it. The dependency URLs
 // are byte-identical to AlvinAssistant.xcodeproj, and the exact pins equal the app's resolution.
 let package = Package(
     name: "LocalEngine",
@@ -29,7 +29,9 @@ let package = Package(
         .target(name: "LocalEngineTestSupport", dependencies: ["LocalEngine",
             .product(name: "MLX", package: "mlx-swift"), .product(name: "MLXNN", package: "mlx-swift"),
             .product(name: "MLXLLM", package: "mlx-swift-lm"), .product(name: "MLXLMCommon", package: "mlx-swift-lm")]),
-        .testTarget(name: "LocalEngineTests", dependencies: ["LocalEngine", "LocalEngineTestSupport"]),
-        .testTarget(name: "LocalEngineIntegrationTests", dependencies: ["LocalEngine", "LocalEngineTestSupport"]),
+        .testTarget(name: "LocalEngineTests", dependencies: ["LocalEngine", "LocalEngineTestSupport",
+            .product(name: "AlvinProfile", package: "AssistantKit")]),
+        .testTarget(name: "LocalEngineIntegrationTests", dependencies: ["LocalEngine", "LocalEngineTestSupport",
+            .product(name: "AlvinProfile", package: "AssistantKit")]),
     ]
 )
