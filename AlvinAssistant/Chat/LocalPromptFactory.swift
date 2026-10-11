@@ -14,7 +14,7 @@ enum LocalPromptFactory {
     /// - `handoff`: whether the on-device model may hand a request to Claude (see
     ///   `handoffAvailable(settings:store:)`).
     static func make(settings: AssistantSettings, store: SettingsStore) -> (system: String, tools: ToolRegistry, handoff: Bool) {
-        let system = PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: settings.customInstructions)
+        let system = PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: settings.customInstructions, profile: .app)
         let handoff = handoffAvailable(settings: settings, store: store)
         let tools: ToolRegistry
         if settings.deviceToolsEnabled {
@@ -22,7 +22,7 @@ enum LocalPromptFactory {
         } else {
             // The system prompt tells the model to call handoff_to_cloud whenever a handoff is
             // available, so the tool stays defined without the device tools.
-            tools = handoff ? ToolRegistry([HandoffTool.tool]) : .empty
+            tools = handoff ? ToolRegistry([AssistantProfile.app.handoffTool]) : .empty
         }
         return (system, tools, handoff)
     }

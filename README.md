@@ -152,6 +152,46 @@ The code is split in three:
   - the audio engine, speech recognition, and speech playback
   - `VoiceSession`, the state machine that ties them together
 
+AssistantKit and LocalEngine know nothing about reminders, calendars or timers. This app's domain lives in one
+value, `AssistantProfile.app` (`AlvinAssistant/App/AppSetup.swift`), which comes from the `AlvinProfile` module
+(`AssistantKit/Sources/AlvinProfile/`). It holds:
+
+- the persona;
+- the on-device prompt lines and the hand-off description;
+- the words that ask for an action, in English and Chinese;
+- what a reply claiming an action sounds like;
+- the timer check.
+
+### Reuse in another app
+
+Add the `AssistantKit` (and, for on-device replies, `LocalEngine`) packages, write your tools as `AssistantTool`
+types, and describe your domain in one profile in your own project. Everything left out keeps a neutral default.
+
+```swift
+extension AssistantProfile {
+    static let app = AssistantProfile(
+        persona: { name in "You are a friendly travel guide\(name.isEmpty ? "" : " for \(name)") in a trip-planning app." },
+        localToolHint: "Use your tools to open trips, add places to a day, and show the app's features.",
+        intents: IntentClassifier(
+            actionPhrases: ["my trip", "itinerary", "add to day", "flight", "行程"],
+            // Flights are this app's own action, not a web search.
+            freshFactsPhrases: IntentClassifier.freshFactsPhrases.filter { $0 != "flight" }
+        ),
+        claims: SuccessClaim(nouns: ["trip", "itinerary"])
+    )
+}
+```
+
+Pass `.app` wherever a profile is asked for: `PromptBuilder.systemPrompt` and `localSystemPrompt`,
+`RouteDecider(classifier: AssistantProfile.app.intents)`, `AssistantProfile.app.handoffTool`, and `LocalToolLoop(…, profile: .app)`.
+The rules after the persona (spoken and typed replies, brevity, the tool cue) are shared `PromptBuilder` text, not
+part of the profile.
+
+To measure your tools on a phone, define a tool-call scenario with stand-in results, as
+`AlvinProfile/ToolBenchmark.swift` does, and list it after the shared ones (`LocalBenchmark.scenarios + [yours]`). The
+screen that plays it (`LocalBenchmarkRunner` and `BenchmarkToolExecutor` in `AlvinAssistant/OnDevice/LocalBenchmarkView.swift`)
+is app code tied to `LocalModelHost`, so copy and adapt it.
+
 ### Claude API details
 
 Swift has no official Anthropic SDK, so `ClaudeProvider` calls the Messages API over HTTP with streaming.

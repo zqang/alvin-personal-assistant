@@ -1,3 +1,4 @@
+import AlvinProfile
 import XCTest
 @testable import AssistantKit
 
@@ -224,10 +225,11 @@ final class LocalBenchmarkScenarioTests: XCTestCase {
     }
 
     func testScenarioList() {
-        XCTAssertEqual(LocalBenchmark.scenarios.map(\.id), ["continued", "bargeIn", "coldPrefix", "longChat", "copyHeavy", "tools"])
-        XCTAssertEqual(Set(LocalBenchmark.scenarios.map(\.title)).count, 6)
-        XCTAssertEqual(LocalBenchmark.scenario(id: "tools"), LocalBenchmark.tools)
-        XCTAssertNil(LocalBenchmark.scenario(id: "nope"))
+        XCTAssertEqual(LocalBenchmark.scenarios.map(\.id), ["continued", "bargeIn", "coldPrefix", "longChat", "copyHeavy"])
+        // The app's benchmark lists its own tool scenario last.
+        let app = LocalBenchmark.scenarios + [ToolBenchmark.tools]
+        XCTAssertEqual(app.map(\.id), ["continued", "bargeIn", "coldPrefix", "longChat", "copyHeavy", "tools"])
+        XCTAssertEqual(Set(app.map(\.title)).count, 6)
     }
 
     func testContinuedPlaysTodaysPrompts() {
@@ -291,7 +293,7 @@ final class LocalBenchmarkScenarioTests: XCTestCase {
     }
 
     func testToolPromptsCarryTheLabsExpectations() throws {
-        let scenario = LocalBenchmark.tools
+        let scenario = ToolBenchmark.tools
         let turns = turns(scenario)
         XCTAssertEqual(turns.count, 12)
         XCTAssertEqual(scenario.steps.filter { $0 == .newConversation }.count, 11)
@@ -419,7 +421,7 @@ final class BenchmarkToolResultTests: XCTestCase {
     func testResultsHaveTheToolsShapes() throws {
         let now = try XCTUnwrap(LocalDateTime.parse("2026-10-07T16:05", timeZone: singapore)).date
         func result(_ name: String, _ input: JSONValue) -> JSONValue {
-            let output = LocalBenchmark.toolResult(for: PendingToolCall(id: "1", name: name, input: input), now: now, timeZone: singapore)
+            let output = ToolBenchmark.toolResult(for: PendingToolCall(id: "1", name: name, input: input), now: now, timeZone: singapore)
             XCTAssertFalse(output.isError, name)
             return output.content
         }
@@ -442,7 +444,7 @@ final class BenchmarkToolResultTests: XCTestCase {
             ["status": "started", "id": "timer.benchmark", "seconds": 600, "ends": "2026-10-07T16:15", "label": "Pasta"])
         // A tool the benchmark doesn't offer: the app's error, not a success to build on.
         XCTAssertEqual(
-            LocalBenchmark.toolResult(for: PendingToolCall(id: "1", name: "launch", input: [:]), now: now, timeZone: singapore),
+            ToolBenchmark.toolResult(for: PendingToolCall(id: "1", name: "launch", input: [:]), now: now, timeZone: singapore),
             .error(ToolRunner.unknownToolMessage))
     }
 }

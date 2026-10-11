@@ -1,8 +1,9 @@
+import AlvinProfile
 import XCTest
 @testable import AssistantKit
 
 final class RouteDeciderTests: XCTestCase {
-    private let decider = RouteDecider()
+    private let decider = RouteDecider(classifier: AlvinProfile.profile.intents)
 
     /// Automatic routing, online, with a key and a downloaded model that is loaded.
     private func signals(

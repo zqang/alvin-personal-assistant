@@ -1,9 +1,11 @@
 import XCTest
 @testable import AssistantKit
+import AlvinProfile
 
 final class IntentClassifierTests: XCTestCase {
     private typealias Intents = IntentClassifier.Intents
-    private let classifier = IntentClassifier()
+    /// This app's classifier: the shared tables plus its reminder, calendar and timer phrases.
+    private let classifier = AlvinProfile.profile.intents
 
     private func assertIntents(_ cases: [(String, Intents)], file: StaticString = #filePath, line: UInt = #line) {
         for (utterance, expected) in cases {
@@ -49,7 +51,8 @@ final class IntentClassifierTests: XCTestCase {
     }
 
     func testBenchmarkToolPromptsAreDeviceActions() {
-        for (prompt, _) in LocalBenchmark.toolPrompts {
+        for step in ToolBenchmark.tools.steps {
+            guard case .user(let prompt) = step else { continue }
             XCTAssertTrue(classifier.classify(prompt).contains(.deviceAction), "\"\(prompt)\"")
         }
     }
@@ -187,9 +190,9 @@ final class IntentClassifierTests: XCTestCase {
         XCTAssertEqual(IntentClassifier.endings(for: "plan"), ["", "s", "ed", "ing", "ned", "ning"])
         XCTAssertEqual(IntentClassifier.endings(for: "search"), ["", "es", "ed", "ing", "hed", "hing"])
         XCTAssertEqual(IntentClassifier.endings(for: "score"), ["", "s", "d"])
-        XCTAssertTrue(IntentClassifier.verbPhrases.isSubset(of: Set(
-            IntentClassifier.freshFactsPhrases + IntentClassifier.deviceActionPhrases + IntentClassifier.complexPhrases
-        )))
+        XCTAssertTrue(IntentClassifier.verbPhrases.isSubset(of: Set(IntentClassifier.freshFactsPhrases + IntentClassifier.complexPhrases)))
+        XCTAssertEqual(IntentClassifier.endings(for: "schedule"), ["", "s"])
+        XCTAssertEqual(IntentClassifier.endings(for: "schedule", verbs: classifier.verbs), ["", "s", "d"])
     }
 
     func testMeasures() {
@@ -205,7 +208,7 @@ final class IntentClassifierTests: XCTestCase {
 
     func testTablesAreLowercaseAndUnique() {
         let tables = [
-            IntentClassifier.freshFactsPhrases, IntentClassifier.deviceActionPhrases, IntentClassifier.explicitDepthPhrases,
+            IntentClassifier.freshFactsPhrases, classifier.actionPhrases, IntentClassifier.explicitDepthPhrases,
             IntentClassifier.complexPhrases, IntentClassifier.smallTalkPhrases, IntentClassifier.clockPhrases,
         ]
         for table in tables {

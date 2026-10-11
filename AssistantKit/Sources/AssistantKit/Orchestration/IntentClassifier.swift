@@ -5,11 +5,19 @@ import Foundation
 /// The router uses them to choose an engine and a mode; they never change what a model is told.
 /// Matching is a substring search of the lowercased text, with word boundaries at the ends of a
 /// phrase in Latin script, so "plan" doesn't fire on "explanation" or "planet" and "hi" doesn't fire
-/// on "this". In the fresh-facts, device-action and complex tables the last word may be inflected:
-/// every phrase may take a plural ("reminders", "searches"), and the phrases in `verbPhrases` also
-/// take verb endings ("scored", "searching", "scheduled", "planning"); see `endings(for:)`. Nouns
-/// don't take verb endings, so "alarming" isn't a device action. Chinese, Japanese and Korean
-/// phrases match anywhere, because those scripts don't separate words.
+/// on "this". In the fresh-facts, action and complex tables the last word may be inflected:
+/// every phrase may take a plural ("reminders", "searches"), and the verbs (`verbPhrases` and the
+/// app's `actionVerbs`) also take verb endings ("scored", "searching", "scheduled", "planning");
+/// see `endings(for:)`. Nouns don't take verb endings, so "alarming" isn't an action. Chinese,
+/// Japanese and Korean phrases match anywhere, because those scripts don't separate words.
+///
+/// The app supplies its action phrases, the words that ask for one of its own tools
+/// (`AssistantProfile.intents`). The fresh-facts, explicit-depth and complex tables are shared
+/// defaults it may replace; small talk and clock questions stay shared. Fresh facts are routed
+/// before actions, so a travel app whose tools handle flights moves "flight" from
+/// `freshFactsPhrases` to its action phrases; explicit depth ("in-depth", "深入") asks for deep
+/// thinking; and "plan" makes a request complex, which with automatic deep thinking means a
+/// slower, deeper answer.
 public struct IntentClassifier: Sendable {
     public struct Intents: OptionSet, Hashable, Sendable {
         public let rawValue: UInt8
@@ -20,7 +28,7 @@ public struct IntentClassifier: Sendable {
 
         /// Needs current information from the internet: news, weather, prices, scores, search.
         public static let freshFacts = Intents(rawValue: 1 << 0)
-        /// Acts on the device or reads from it: reminders, calendar, timers, alarms.
+        /// Asks for one of the app's own actions or lookups (its action phrases).
         public static let deviceAction = Intents(rawValue: 1 << 1)
         /// The user asks for a careful, in-depth answer.
         public static let explicitDepth = Intents(rawValue: 1 << 2)
@@ -43,35 +51,39 @@ public struct IntentClassifier: Sendable {
 
     // MARK: Phrase tables (lowercase). Tests pin them; tune them together.
 
-    static let freshFactsPhrases = [
+    /// This classifier's action, fresh-facts, explicit-depth and complex phrases, and its verbs.
+    let actionPhrases: [String]
+    let freshFacts: [String]
+    let explicitDepth: [String]
+    let complex: [String]
+    let verbs: Set<String>
+
+    /// The default fresh-facts table: requests for current information.
+    public static let freshFactsPhrases = [
         "weather", "forecast", "news", "headline", "score", "stock", "share price", "price of",
         "exchange rate", "traffic", "flight", "open now", "opening hours", "latest", "today's",
         "right now", "search", "look up", "look it up", "look that up", "google",
         "天气", "新闻", "股价", "汇率", "比分", "最新", "今天的", "搜索", "查一下",
     ]
 
-    /// Phrases in the inflected tables that are also verbs, which take verb endings as well as plurals:
-    /// "scored", "searching", "googled", "scheduled", "compared", "planning".
-    static let verbPhrases: Set<String> = ["score", "search", "google", "schedule", "compare", "plan"]
+    /// Phrases in the default tables that are also verbs, which take verb endings as well as plurals:
+    /// "scored", "searching", "googled", "compared", "planning".
+    static let verbPhrases: Set<String> = ["score", "search", "google", "compare", "plan"]
 
     /// Fresh-facts phrases that only qualify time. They don't count in a question about the clock
     /// itself ("what time is it right now", "what's today's date").
     static let timeQualifierPhrases = ["today's", "right now", "今天的"]
 
-    static let deviceActionPhrases = [
-        "remind me", "reminder", "to-do", "todo", "calendar", "schedule", "meeting", "appointment",
-        "what's on", "am i free", "timer", "alarm", "wake me",
-        "提醒", "日程", "日历", "会议", "开会", "安排", "待办", "计时", "闹钟", "定时",
-    ]
-
-    static let explicitDepthPhrases = [
+    /// The default explicit-depth table: requests for a careful, in-depth answer.
+    public static let explicitDepthPhrases = [
         "think hard", "think harder", "think carefully", "think deeply", "think it through",
         "take your time", "deep dive", "really think", "research this", "in depth", "in-depth",
         "thoroughly", "dig into",
         "认真想", "仔细想", "好好想想", "深入", "详细分析",
     ]
 
-    static let complexPhrases = [
+    /// The default complex table: comparisons, plans, step-by-step requests.
+    public static let complexPhrases = [
         "compare", "comparison", "pros and cons", "step by step", "step-by-step", "plan", "strategy",
         "strategies", "explain why",
         "比较", "优缺点", "计划",
@@ -91,7 +103,28 @@ public struct IntentClassifier: Sendable {
         "你好", "您好", "谢谢", "多谢", "早上好", "早安", "晚上好", "晚安", "再见",
     ] + clockPhrases
 
-    public init() {}
+    /// - Parameters:
+    ///   - actionPhrases: words that ask for one of the app's tools (`.deviceAction`), such as
+    ///     "remind me" or "提醒". None by default, so nothing counts as an action.
+    ///   - actionVerbs: the action phrases that are also verbs, which take verb endings too
+    ///     ("schedule" → "scheduled", "scheduling").
+    ///   - freshFactsPhrases, explicitDepthPhrases, complexPhrases: replace the default tables.
+    public init(
+        actionPhrases: [String] = [],
+        actionVerbs: Set<String> = [],
+        freshFactsPhrases: [String] = IntentClassifier.freshFactsPhrases,
+        explicitDepthPhrases: [String] = IntentClassifier.explicitDepthPhrases,
+        complexPhrases: [String] = IntentClassifier.complexPhrases
+    ) {
+        // Matching lowercases the text, not the phrases.
+        self.actionPhrases = actionPhrases.map(Self.normalize)
+        self.freshFacts = freshFactsPhrases.map(Self.normalize)
+        self.explicitDepth = explicitDepthPhrases.map(Self.normalize)
+        self.complex = complexPhrases.map(Self.normalize)
+        let actionVerbs = Set(actionVerbs.map(Self.normalize))
+        assert(actionVerbs.isSubset(of: self.actionPhrases), "every action verb must be an action phrase")
+        verbs = Self.verbPhrases.union(actionVerbs)
+    }
 
     public func classify(_ utterance: String) -> Intents {
         let text = Self.normalize(utterance)
@@ -103,15 +136,15 @@ public struct IntentClassifier: Sendable {
 
         var intents: Intents = []
         let fresh = isClockQuestion
-            ? Self.freshFactsPhrases.filter { !Self.timeQualifierPhrases.contains($0) }
-            : Self.freshFactsPhrases
-        if Self.matchesAny(scalars, fresh, inflected: true) { intents.insert(.freshFacts) }
-        if Self.matchesAny(scalars, Self.deviceActionPhrases, inflected: true) { intents.insert(.deviceAction) }
-        if Self.matchesAny(scalars, Self.explicitDepthPhrases) { intents.insert(.explicitDepth) }
+            ? freshFacts.filter { !Self.timeQualifierPhrases.contains($0) }
+            : freshFacts
+        if Self.matchesAny(scalars, fresh, inflected: true, verbs: verbs) { intents.insert(.freshFacts) }
+        if Self.matchesAny(scalars, actionPhrases, inflected: true, verbs: verbs) { intents.insert(.deviceAction) }
+        if Self.matchesAny(scalars, explicitDepth) { intents.insert(.explicitDepth) }
 
         let questions = scalars.filter { $0 == "?" || $0 == "？" }.count
         if words >= Self.complexMinWords || cjk >= Self.complexMinCJK || questions >= Self.complexMinQuestions
-            || Self.matchesAny(scalars, Self.complexPhrases, inflected: true) {
+            || Self.matchesAny(scalars, complex, inflected: true, verbs: verbs) {
             intents.insert(.complex)
         }
 
@@ -166,30 +199,30 @@ public struct IntentClassifier: Sendable {
 
     // MARK: Matching
 
-    static func matchesAny(_ text: [Unicode.Scalar], _ phrases: [String], inflected: Bool = false) -> Bool {
-        phrases.contains { matches(text, phrase: $0, inflected: inflected) }
+    static func matchesAny(_ text: [Unicode.Scalar], _ phrases: [String], inflected: Bool = false, verbs: Set<String> = verbPhrases) -> Bool {
+        phrases.contains { matches(text, phrase: $0, inflected: inflected, verbs: verbs) }
     }
 
     /// Whether `phrase` occurs in `text`; with `inflected`, also with the endings its last word may
-    /// take (see `endings(for:)`).
-    static func matches(_ text: [Unicode.Scalar], phrase: String, inflected: Bool) -> Bool {
+    /// take (see `endings(for:verbs:)`).
+    static func matches(_ text: [Unicode.Scalar], phrase: String, inflected: Bool, verbs: Set<String> = verbPhrases) -> Bool {
         let scalars = Array(phrase.unicodeScalars)
         guard inflected else { return contains(text, phrase: scalars) }
-        if contains(text, phrase: scalars, endings: endings(for: phrase)) { return true }
+        if contains(text, phrase: scalars, endings: endings(for: phrase, verbs: verbs)) { return true }
         // A verb's final "e" drops before "ing": "score" → "scoring".
-        return verbPhrases.contains(phrase) && phrase.hasSuffix("e") && scalars.count > 2
+        return verbs.contains(phrase) && phrase.hasSuffix("e") && scalars.count > 2
             && contains(text, phrase: Array(scalars.dropLast()), endings: ["ing"])
     }
 
     /// The letters the last word of `phrase` may gain in an inflected table, "" being none: a plural
-    /// ("es" after s, x, z, ch or sh, otherwise "s"), and for a verb "d" after a final "e", otherwise
-    /// "ed" and "ing", also after a doubled final consonant. So "plan" matches "plans", "planned"
-    /// and "planning" but not "planes", and "alarm" matches "alarms" but not "alarming".
-    static func endings(for phrase: String) -> Set<String> {
+    /// ("es" after s, x, z, ch or sh, otherwise "s"), and for one of `verbs` "d" after a final "e",
+    /// otherwise "ed" and "ing", also after a doubled final consonant. So "plan" matches "plans",
+    /// "planned" and "planning" but not "planes", and "alarm" matches "alarms" but not "alarming".
+    static func endings(for phrase: String, verbs: Set<String> = verbPhrases) -> Set<String> {
         guard let last = phrase.last else { return [""] }
         let sibilant = ["s", "x", "z", "ch", "sh"].contains { phrase.hasSuffix($0) }
         var endings: Set<String> = ["", sibilant ? "es" : "s"]
-        guard verbPhrases.contains(phrase) else { return endings }
+        guard verbs.contains(phrase) else { return endings }
         if last == "e" {
             endings.insert("d")
         } else {

@@ -36,7 +36,7 @@ final class LocalModelHost {
     /// available. Launch setup replaces the default.
     static var systemProvider: @MainActor (AssistantSettings) -> (system: String, tools: [ToolDefinition]) = { settings in
         (
-            PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: settings.customInstructions),
+            PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: settings.customInstructions, profile: .app),
             DeviceTools.localRegistry(settings: settings, handoff: false).definitions
         )
     }
@@ -367,6 +367,19 @@ final class LocalModelHost {
                 await previous.value
                 try Task.checkCancellation()
             }
+            let needed = option.approximateBytes + (wanted.draft ? option.draftApproximateBytes : 0) + Self.memoryMargin
+            let draftID = wanted.draft ? option.draftModelID : nil
+            if !isDownloaded(option.id) || draftID.map({ !isDownloaded($0) }) == true {
+                // Before gigabytes come down: will the model fit in memory, and on the iPhone?
+                // Measured like the check below, once an earlier model has let go of its memory.
+                await retired?.value
+                await Task.detached { Memory.clearCache() }.value
+                try checkStillWanted()
+                let download = option.approximateBytes + (draftID != nil ? option.draftApproximateBytes : 0)
+                if let shortfall = Self.memoryShortfall(option, needed: needed) ?? Self.storageShortfall(option.displayName, bytes: download) {
+                    return fail(shortfall)
+                }
+            }
             let downloader = HubDownloader(client: Self.hubClient())
             downloading = true
             // Most of the bytes are the main model's; the draft model follows.
@@ -388,13 +401,8 @@ final class LocalModelHost {
             await Task.detached { Memory.clearCache() }.value
             try checkStillWanted()
 
-            let needed = option.approximateBytes + (wanted.draft ? option.draftApproximateBytes : 0) + Self.memoryMargin
-            // The app's own iOS limit minus what it holds, not the phone's free memory: closing
-            // other apps doesn't raise it (the increased-memory-limit entitlement does).
-            let available = os_proc_available_memory()
-            guard available > needed else {
-                let gb = { (bytes: Int) in String(format: "%.1f GB", Double(bytes) / 1e9) }
-                return fail("Not enough memory for \(option.displayName): it needs \(gb(needed)) and the app has \(gb(available)) left. Turn off Qwen3-ASR listening or pick a smaller model.")
+            if let shortfall = Self.memoryShortfall(option, needed: needed) {
+                return fail(shortfall)
             }
             status = .loading(1)
             let started = ContinuousClock.now
@@ -470,6 +478,53 @@ final class LocalModelHost {
             downloading = false
             fail("The on-device model couldn't load: \(error.localizedDescription)")
         }
+    }
+
+    /// Why `option` can't load now: the app has less than `needed` bytes left. The app's own iOS
+    /// limit minus what it holds, not the phone's free memory: closing other apps doesn't raise it
+    /// (the increased-memory-limit entitlement does).
+    private static func memoryShortfall(_ option: LocalModelOption, needed: Int) -> String? {
+        let available = os_proc_available_memory()
+        guard available <= needed else { return nil }
+        return "Not enough memory for \(option.displayName): it needs \(gigabytes(needed)) and the app has \(gigabytes(available)) left. Turn off Qwen3-ASR listening or pick a smaller model."
+    }
+
+    /// Why `bytes` more of `name` can't be stored: the iPhone has less free space than that plus a
+    /// margin iOS needs for itself. Nil when it fits, or when iOS doesn't say.
+    nonisolated static func storageShortfall(_ name: String, bytes: Int) -> String? {
+        let key = URLResourceKey.volumeAvailableCapacityForImportantUsageKey
+        guard let free = try? modelsFolder().resourceValues(forKeys: [key]).volumeAvailableCapacityForImportantUsage,
+              free < Int64(bytes) + 500_000_000
+        else { return nil }
+        return "Not enough storage for \(name): it needs \(gigabytes(bytes + 500_000_000)) free and this iPhone has \(gigabytes(Int(free))). Free up space or pick a smaller model."
+    }
+
+    nonisolated private static func gigabytes(_ bytes: Int) -> String {
+        String(format: "%.1f GB", Double(bytes) / 1e9)
+    }
+
+    /// What the downloaded models and the engine's caches take on the iPhone, Qwen3-ASR's included.
+    nonisolated static func downloadedBytes() -> Int64 {
+        var total: Int64 = 0
+        for folder in [modelsFolder(), EngineSetup.cacheDirectory()] {
+            let files = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.totalFileAllocatedSizeKey])
+            while let file = files?.nextObject() as? URL {
+                total += Int64((try? file.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize) ?? 0)
+            }
+        }
+        return total
+    }
+
+    /// Unloads the models and deletes every download and the engine's caches (the saved system
+    /// prompts and drafting corpora). A model downloads again the next time it's needed.
+    func deleteDownloads() {
+        unload(stopDownload: true)
+        QwenListener.shared.unload(stopDownload: true)
+        for folder in [Self.modelsFolder(), EngineSetup.cacheDirectory()] {
+            try? FileManager.default.removeItem(at: folder)
+        }
+        statusText = nil
+        status = .off
     }
 
     private func fail(_ message: String) {
@@ -860,7 +915,7 @@ final class LocalModelHost {
         guard let engine, status == .ready, prewarming == nil, usesEngine(settings) else { return }
         let provided = Self.systemProvider(settings)
         let handoff = provided.tools.contains { $0.name == HandoffTool.name }
-        let system = PromptBuilder.localSystemPrompt(base: provided.system, handoffAvailable: handoff)
+        let system = PromptBuilder.localSystemPrompt(base: provided.system, handoffAvailable: handoff, profile: .app)
         let tools = provided.tools
         prewarming = Task {
             if await beginPrewarmJob(engine) {
@@ -977,7 +1032,7 @@ final class LocalModelHost {
         emit: (AssistantEvent) -> Void
     ) async throws -> (text: String, stats: LocalGenerationStats) {
         let request = EngineRequest(
-            system: PromptBuilder.localSystemPrompt(base: system, handoffAvailable: handoffAvailable),
+            system: PromptBuilder.localSystemPrompt(base: system, handoffAvailable: handoffAvailable, profile: .app),
             tools: tools?.definitions ?? [],
             turns: turns,
             toolChoice: toolMode == .guided ? .auto : .native
@@ -988,7 +1043,8 @@ final class LocalModelHost {
             executor: tools ?? NoToolExecutor(),
             handoffAvailable: handoffAvailable,
             isOnline: { online },
-            toolContext: { ToolContext(commitGate: commitGate) }
+            toolContext: { ToolContext(commitGate: commitGate) },
+            profile: .app
         )
         let report = ReportBox()
         var text = ""

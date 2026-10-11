@@ -30,27 +30,27 @@ import Foundation
 /// The orchestrator falls back to the cloud on `ReplyHandoff` only before commit, which is why
 /// a reply that showed text or ran tools never throws it.
 ///
-/// **Plausibility guard.** Before a round runs, `callGuard` checks each call against the user's
-/// words (`CallGuard.userText(of:)`): an on-device model sometimes reaches for the wrong tool
-/// (asked how long a timer had left, Woof started a one-second timer). A call the guard objects
+/// **Plausibility guard.** Before a round runs, `profile.callGuard` checks each call against the
+/// user's words (`ToolCallGuard.userText(of:)`): an on-device model sometimes reaches for the wrong
+/// tool (asked how long a timer had left, Woof started a one-second timer). A call the guard objects
 /// to never runs: the request is handed off when it still can be, else the call gets an error
 /// result that tells the model to ask the user.
 ///
-/// **Claim guard.** On a device action (`IntentClassifier`'s `.deviceAction` for the user's
-/// words) with tools offered, Woof sometimes answered in words that the action was done ("已经为
+/// **Claim guard.** On an action request (`.deviceAction` for the user's words, from
+/// `profile.intents`) with tools offered, Woof sometimes answered in words that the action was done ("已经为
 /// 你设置好了明天的提醒") without calling a tool. For such a request:
 /// - the first reply asks the engine for `.requiredIfLikely(likelyToolCallFloor)`;
 /// - its visible text is held back until its first sentence ends (or the reply does), while no
 ///   tool call has started; a hold that lasts `holdActivityDelay` shows `holdActivity`;
-/// - held text that claims an action (`SuccessClaim.claimsDone`) is dropped with its generation,
+/// - held text that claims an action (`profile.claims`) is dropped with its generation,
 ///   and the request is asked again with `.required`, once per run (`Report.claimRetries`);
 /// - a retry that writes no call with readable input throws `ReplyHandoff(reason:
 ///   claimHandoffReason)` when it can, else ends with `SuccessClaim.actionFailedMessage`, which
 ///   the engine didn't write, so the next request rebuilds (`diverged`).
 ///
 /// The guard lasts while every tool round has only gathered context for the action
-/// (`contextLookups`, the time) and no side-effect call (`ToolExecutor.effect(of:)`) has
-/// succeeded: Woof once looked up the time for "next Monday", then said the meeting was in the
+/// (`profile.contextLookups`, such as the time) and no side-effect call
+/// (`ToolExecutor.effect(of:)`) has succeeded: Woof once looked up the time for "next Monday", then said the meeting was in the
 /// calendar. After any other lookup the model is answering a question ("What's on my calendar
 /// tomorrow?"), whose true answer can read as a claim ("你明天已经有两个会议"), so nothing more is
 /// forced or held: a forced call there could create an event nobody asked for. While a round is left, the continuation after
@@ -78,9 +78,6 @@ public struct LocalToolLoop: Sendable {
     /// call when the model gives one at least this probability at the first token: a call it
     /// considered at all.
     public static let likelyToolCallFloor = 0.05
-    /// Lookups that only gather context for an action, after which the guard goes on: the time,
-    /// which Woof looked up to place "next Monday".
-    public static let contextLookups: Set<String> = ["get_current_time"]
     /// The activity shown while held-back text has lasted `holdActivityDelay` seconds.
     public static let holdActivity = "…"
     static let holdActivityDelay: TimeInterval = 1
@@ -112,7 +109,8 @@ public struct LocalToolLoop: Sendable {
     public let handoffAvailable: Bool
     /// Most tool rounds one reply runs.
     public let maxRounds: Int
-    public let callGuard: CallGuard
+    /// The app's words, claims, context lookups and call guard (`AssistantProfile`).
+    public let profile: AssistantProfile
     private let isOnline: @Sendable () -> Bool
     private let toolContext: @Sendable () -> ToolContext
 
@@ -123,15 +121,15 @@ public struct LocalToolLoop: Sendable {
     ///   - isOnline: read when a handoff is decided.
     ///   - toolContext: read once per round; carries the commit gate side effects wait for.
     ///   - maxRounds: most tool rounds per reply.
-    ///   - callGuard: checks calls against the user's words before they run.
+    ///   - profile: the app's profile, the same value its router and prompts use.
     public init(
         engine: InferenceEngine,
         executor: any ToolExecutor,
         handoffAvailable: Bool,
         isOnline: @escaping @Sendable () -> Bool,
         toolContext: @escaping @Sendable () -> ToolContext,
-        maxRounds: Int = 3,
-        callGuard: CallGuard = .standard
+        profile: AssistantProfile,
+        maxRounds: Int = 3
     ) {
         self.engine = engine
         self.executor = executor
@@ -139,7 +137,7 @@ public struct LocalToolLoop: Sendable {
         self.isOnline = isOnline
         self.toolContext = toolContext
         self.maxRounds = max(0, maxRounds)
-        self.callGuard = callGuard
+        self.profile = profile
     }
 
     /// Answers `request`. Ending or cancelling the stream stops the engine at its next step.
@@ -261,173 +259,6 @@ public struct LocalToolLoop: Sendable {
 
     // MARK: Plausibility guard
 
-    /// Checks a tool call against the user's words before it runs.
-    public struct CallGuard: Sendable {
-        /// Why `call` doesn't fit `userText` (`userText(of:)` of the request), or nil when it may run.
-        public let check: @Sendable (_ call: PendingToolCall, _ userText: String) -> String?
-
-        public init(_ check: @escaping @Sendable (_ call: PendingToolCall, _ userText: String) -> String?) {
-            self.check = check
-        }
-
-        /// Lets every call run.
-        public static let none = CallGuard { _, _ in nil }
-
-        /// Stops the measured failure (plan §9): asked how long a timer had left, Woof started a
-        /// one-second timer. A `set_timer` call runs when the user stated an amount the guard can
-        /// read (`statesAnAmount`). Without one, it doesn't run when the user's words ask about a
-        /// timer that is already running (`asksAboutRunningTimer`), or when `seconds` is under
-        /// `shortestUnstatedSeconds`, a duration nobody wants without saying so (in any
-        /// language).
-        ///
-        /// Any other call runs. Amounts are read only in English, Chinese and digits, and the
-        /// app takes typed and spoken requests in every language speech recognition offers:
-        /// objecting to every call without a readable amount would refuse "pon un temporizador
-        /// de diez minutos" every time, and offline it could never be set at all.
-        public static let standard = CallGuard { call, userText in
-            switch call.name {
-            case CallGuard.setTimerName:
-                return CallGuard.timerObjection(seconds: CallGuard.seconds(of: call), userText: userText)
-            default:
-                return nil
-            }
-        }
-
-        static let setTimerName = "set_timer"
-        /// A timer shorter than this (in seconds) runs only when the user stated an amount.
-        public static let shortestUnstatedSeconds = 5
-
-        /// Why a `set_timer` call for `seconds` (nil when unreadable) doesn't fit `userText`.
-        static func timerObjection(seconds: Int?, userText: String) -> String? {
-            if statesAnAmount(userText) {
-                return nil
-            }
-            if asksAboutRunningTimer(userText) {
-                return "the user asked about a timer that is already running, and set_timer only starts a new one"
-            }
-            if let seconds, seconds < shortestUnstatedSeconds {
-                return "the user didn't say how long the timer should run"
-            }
-            return nil
-        }
-
-        /// The call's `seconds` as a whole number, also when the model wrote it as a string
-        /// ("600"), as on-device models do.
-        static func seconds(of call: PendingToolCall) -> Int? {
-            guard let value = call.input?["seconds"] else { return nil }
-            if let whole = value.intValue {
-                return whole
-            }
-            guard let text = value.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
-            if let whole = Int(text) {
-                return whole
-            }
-            guard let number = Double(text), number.isFinite, abs(number) < 9e15 else { return nil }
-            return Int(number.rounded(.down))
-        }
-
-        /// Whether `text` asks about a timer that is already running: in English "left",
-        /// "remaining", "how long", "how much"; in Chinese 剩 ("还剩", "剩下"), 多久, 多长时间,
-        /// 多少时间 or 几 before a unit of time ("还有几分钟"). Other languages aren't recognised.
-        public static func asksAboutRunningTimer(_ text: String) -> Bool {
-            let words = text.lowercased().split { !$0.isLetter }.map(String.init)
-            if words.contains(where: { runningTimerWords.contains($0) }) {
-                return true
-            }
-            for (index, word) in words.enumerated().dropLast() {
-                if word == "how", runningTimerFollowers.contains(words[index + 1]) {
-                    return true
-                }
-            }
-            if runningTimerChinese.contains(where: { text.contains($0) }) {
-                return true
-            }
-            let characters = Array(text)
-            for (index, character) in characters.enumerated() where character == "几" || character == "幾" {
-                var next = index + 1
-                while next < characters.count, chineseBetween.contains(characters[next]) {
-                    next += 1
-                }
-                if next < characters.count, chineseTimeUnits.contains(characters[next]) {
-                    return true
-                }
-            }
-            return false
-        }
-
-        private static let runningTimerWords: Set<String> = ["left", "remaining", "remain", "remains", "elapsed"]
-        /// Words after "how" that ask for a duration: "how long", "how much (time)".
-        private static let runningTimerFollowers: Set<String> = ["long", "much"]
-        private static let runningTimerChinese = ["剩", "多久", "多长", "多長", "多少时间", "多少時間"]
-
-        /// The user's words a call should fit: the newest user turn's text and, when the reply
-        /// before it asked the user something ("What should I call it?"), the user turn that
-        /// reply answered, so an amount given there still counts.
-        public static func userText(of turns: [ChatTurn]) -> String {
-            guard let last = turns.lastIndex(where: { $0.role == .user }) else { return "" }
-            var texts = [turns[last].text]
-            if last >= 2, turns[last - 1].role == .assistant, turns[last - 2].role == .user,
-               turns[last - 1].text.contains(where: { $0 == "?" || $0 == "？" }) {
-                texts.insert(turns[last - 2].text, at: 0)
-            }
-            return texts.joined(separator: "\n")
-        }
-
-        /// Whether `text` states an amount: a decimal digit in any script ("10", "３"), a Chinese
-        /// numeral before a unit of time ("二十分钟", "一个半小时"; not the "一" of "一下" or
-        /// "一个计时器"), an English number word ("ten", "half", "couple"), or "a"/"an" before a
-        /// unit of time ("an hour").
-        public static func statesAnAmount(_ text: String) -> Bool {
-            if text.unicodeScalars.contains(where: { $0.properties.numericType == .decimal }) || hasChineseDuration(text) {
-                return true
-            }
-            let words = text.lowercased().split { !$0.isLetter }.map(String.init)
-            for (index, word) in words.enumerated() {
-                if numberWords.contains(word) {
-                    return true
-                }
-                if word == "a" || word == "an", index + 1 < words.count, timeUnits.contains(words[index + 1]) {
-                    return true
-                }
-            }
-            return false
-        }
-
-        /// A Chinese numeral followed by a unit of time, possibly after more numerals or a
-        /// measure word ("一个半小时", "十多分钟", "一百二十秒"). "几分钟" doesn't count: it is
-        /// how a question about a running timer asks ("还剩几分钟").
-        private static func hasChineseDuration(_ text: String) -> Bool {
-            let characters = Array(text)
-            for (index, character) in characters.enumerated() where chineseNumerals.contains(character) {
-                var next = index + 1
-                while next < characters.count, chineseNumerals.contains(characters[next]) || chineseBetween.contains(characters[next]) {
-                    next += 1
-                }
-                if next < characters.count, chineseTimeUnits.contains(characters[next]) {
-                    return true
-                }
-            }
-            return false
-        }
-
-        private static let chineseNumerals: Set<Character> = Set("〇零一二两兩三四五六七八九十百千万萬半廿卅")
-        /// Measure words and "more" that may sit between a numeral and its unit.
-        private static let chineseBetween: Set<Character> = Set("个個多来來")
-        /// Seconds, minutes, hours (小时/小時, 钟头/鐘頭), quarter hours.
-        private static let chineseTimeUnits: Set<Character> = Set("秒分小钟鐘刻")
-
-        private static let numberWords: Set<String> = [
-            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-            "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
-            "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "hundred",
-            "half", "quarter", "couple", "few", "several", "dozen",
-        ]
-
-        private static let timeUnits: Set<String> = [
-            "second", "sec", "minute", "min", "hour", "hr",
-        ]
-    }
-
     /// The result of a call the guard objected to, when the request can't be handed off.
     static func guardMessage(_ objection: String) -> String {
         "Not done: \(objection). Don't guess: ask the user, or say you can't do that here."
@@ -449,7 +280,7 @@ public struct LocalToolLoop: Sendable {
         var claimRetries = 0
         /// A side-effect call has succeeded: the claim guard is over.
         var acted = false
-        /// Every round so far only gathered context for the action (`contextLookups`).
+        /// Every round so far only gathered context for the action (`profile.contextLookups`).
         var contextOnly = true
         /// Times `show` emitted text.
         var shownTexts = 0
@@ -509,10 +340,12 @@ public struct LocalToolLoop: Sendable {
     }
 
     func drive(_ request: EngineRequest, state: inout RunState, emit: (AssistantEvent) -> Void) async throws {
-        let userText = CallGuard.userText(of: request.turns)
-        // A device action with tools: the claim guard (see the type's documentation).
+        let userText = ToolCallGuard.userText(of: request.turns)
+        // An action with tools: the claim guard (see the type's documentation). Unlike the router,
+        // which reads only the newest user turn, this also reads the turn an assistant question
+        // was answering, so "Ten minutes" after "How long should the timer run?" stays an action.
         var first = request
-        let guarded = !request.tools.isEmpty && request.toolChoice != .native && IntentClassifier().classify(userText).contains(.deviceAction)
+        let guarded = !request.tools.isEmpty && request.toolChoice != .native && profile.intents.classify(userText).contains(.deviceAction)
         if guarded {
             if first.toolChoice == .auto {
                 first.toolChoice = .requiredIfLikely(Self.likelyToolCallFloor)
@@ -553,7 +386,7 @@ public struct LocalToolLoop: Sendable {
                 state.rounds += 1
                 state.committed = true
                 state.acted = state.acted || round.calls.contains { !$0.isError && executor.effect(of: $0.name) == .sideEffect }
-                state.contextOnly = state.contextOnly && round.calls.allSatisfy { Self.contextLookups.contains($0.name) }
+                state.contextOnly = state.contextOnly && round.calls.allSatisfy { profile.contextLookups.contains($0.name) }
                 emit(.toolRound(round))
                 try Task.checkCancellation()
                 // After lookups only, a call is still due (see the type's documentation); a call
@@ -633,7 +466,7 @@ public struct LocalToolLoop: Sendable {
                 state.held += text
                 let visible = state.held.drop(while: { $0.isWhitespace })
                 if Self.endsFirstSentence(visible) {
-                    if SuccessClaim.claimsDone(String(visible)) {
+                    if profile.claims.claimsDone(String(visible)) {
                         return .claimed
                     }
                     state.release(emit: emit)
@@ -650,7 +483,7 @@ public struct LocalToolLoop: Sendable {
             case .finished(let finish):
                 state.generations.append(finish.stats)
                 if state.holding, finish.reason != .cancelled {
-                    if calls.isEmpty, SuccessClaim.claimsDone(state.held) {
+                    if calls.isEmpty, profile.claims.claimsDone(state.held) {
                         return .claimed
                     }
                     state.release(emit: emit)
@@ -684,7 +517,7 @@ public struct LocalToolLoop: Sendable {
         // Calls whose input didn't parse never run (the executor answers them with an error).
         let objections = calls.indices.compactMap { index -> (index: Int, why: String)? in
             guard calls[index].name != HandoffTool.name, calls[index].input != nil,
-                  let why = callGuard.check(calls[index], userText) else { return nil }
+                  let why = profile.callGuard.check(calls[index], userText) else { return nil }
             return (index, why)
         }
 

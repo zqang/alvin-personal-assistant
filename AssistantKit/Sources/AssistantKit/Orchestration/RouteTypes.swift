@@ -27,7 +27,7 @@ public enum RouteReason: String, Codable, Sendable {
     case deepBudgetExhausted
     /// The request needs current information (news, weather, prices).
     case freshFacts
-    /// The request acts on the device (reminders, calendar, timers).
+    /// The request asks for one of the app's own actions (`IntentClassifier.Intents.deviceAction`).
     case deviceAction
     case complex
     /// The user prefers on-device replies.

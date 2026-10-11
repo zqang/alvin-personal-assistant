@@ -172,6 +172,14 @@ final class QwenListener {
 
     private func prepare() async {
         do {
+            // Before about 1 GB comes down. Memory is checked only once it's downloaded: it is
+            // short only while the reply model holds it, and the download is good for later.
+            if !LocalModelHost.shared.isDownloaded(Self.modelID),
+               let shortfall = LocalModelHost.storageShortfall("Qwen3-ASR", bytes: 1_000_000_000) {
+                status = .failed(shortfall)
+                loading = nil
+                return
+            }
             let directory = try await download()
             // Turned on in Settings with no voice session: stop at the download.
             guard isWanted else {

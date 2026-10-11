@@ -1,7 +1,15 @@
+import AlvinProfile
 import AssistantKit
 import Foundation
 import LocalEngine
 import UserNotifications
+
+extension AssistantProfile {
+    /// This app's domain: who the assistant is and the words, claims and checks that go with its
+    /// reminder, calendar and timer tools. Every prompt, the router and the on-device tool loop
+    /// read this one value. An app built on AssistantKit writes its own here.
+    static let app = AlvinProfile.profile
+}
 
 /// Wires the app together at launch: the reply pipeline, the on-device host's prompt and network
 /// seams, the engine extensions and the timer notifications. `AlvinAssistantApp.init` calls
@@ -29,6 +37,18 @@ enum AppSetup {
 
         // Start watching the network now, so the first reply has a real path to route by.
         _ = Connectivity.shared
+
+        #if DEBUG
+        // The profile and the tool benchmark name tools by string; the app has no test target,
+        // so this is where a renamed tool is caught.
+        let toolNames = Set(DeviceTools.allTools.map(\.definition.name))
+        let benchmarked = ToolBenchmark.tools.actions.compactMap { action -> String? in
+            if case .turn(let turn) = action { return turn.expectation?.name }
+            return nil
+        }
+        let named = AssistantProfile.app.contextLookups.union(benchmarked).union([TimerCheck.setTimerName])
+        assert(named.isSubset(of: toolNames), "AlvinProfile names unknown tools: \(named.subtracting(toolNames).sorted())")
+        #endif
     }
 }
 

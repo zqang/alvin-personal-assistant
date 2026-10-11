@@ -16,6 +16,7 @@
 		A10000000000000000000034 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000002E /* MLXLMCommon */; };
 		A10000000000000000000035 /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000002F /* Tokenizers */; };
 		A10000000000000000000038 /* LocalEngine in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000037 /* LocalEngine */; };
+		A1000000000000000000003A /* AlvinProfile in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000039 /* AlvinProfile */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -45,6 +46,7 @@
 				A10000000000000000000034 /* MLXLMCommon in Frameworks */,
 				A10000000000000000000035 /* Tokenizers in Frameworks */,
 				A10000000000000000000038 /* LocalEngine in Frameworks */,
+				A1000000000000000000003A /* AlvinProfile in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -105,6 +107,7 @@
 				A1000000000000000000002E /* MLXLMCommon */,
 				A1000000000000000000002F /* Tokenizers */,
 				A10000000000000000000037 /* LocalEngine */,
+				A10000000000000000000039 /* AlvinProfile */,
 			);
 			productName = AlvinAssistant;
 			productReference = A10000000000000000000004 /* AlvinAssistant.app */;
@@ -312,7 +315,6 @@
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -323,7 +325,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Debug;
 		};
@@ -346,7 +348,6 @@
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -357,7 +358,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};
@@ -481,6 +482,10 @@
 		A10000000000000000000037 /* LocalEngine */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = LocalEngine;
+		};
+		A10000000000000000000039 /* AlvinProfile */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AlvinProfile;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
