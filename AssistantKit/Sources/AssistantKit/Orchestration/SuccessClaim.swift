@@ -29,10 +29,13 @@ public struct SuccessClaim: Sendable {
         func after(_ firsts: [String], _ lasts: [String]) -> [String] {
             firsts.flatMap { first in ["", "just ", "already ", "also "].flatMap { adverb in lasts.map { "\(first) \(adverb)\($0)" } } }
         }
-        return after(["i", "i've", "i have"], participles + ["put"]) + after(["i'll", "i will"], verbs)
-            + ["is", "are", "it's", "that's", "has been", "have been"].flatMap { verb in participles.map { "\(verb) \($0)" } }
-            + nouns.flatMap { noun in participles.map { "\(noun) \($0)" } }
-            + ["all set", "added to your", "added it to"]
+        // In steps: as one expression, Swift on Linux can't type-check it in reasonable time.
+        var phrases = after(["i", "i've", "i have"], participles + ["put"])
+        phrases += after(["i'll", "i will"], verbs)
+        for word in ["is", "are", "it's", "that's", "has been", "have been"] + nouns {
+            phrases += participles.map { "\(word) \($0)" }
+        }
+        return phrases + ["all set", "added to your", "added it to"]
     }
 
     static let chinesePhrases = [
