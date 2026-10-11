@@ -67,14 +67,16 @@ public enum EngineTestHarness {
         return InferenceEngine(loaded: loaded, configuration: configuration)
     }
 
-    /// An engine whose replies follow `scripts` (one per reply, in order; see `ScriptedTarget`).
+    /// An engine whose replies follow `scripts` (one per reply, in order; see `ScriptedTarget`),
+    /// parsing tool calls in `toolCallFormat` (JSON when nil).
     public static func makeScriptedEngine(
         tiny: Tiny, scripts: [[Int]], tokenizer: FakeChatMLTokenizer = FakeChatMLTokenizer(), seed: UInt64 = 0,
-        configuration: EngineConfiguration = testConfiguration()
+        configuration: EngineConfiguration = testConfiguration(), toolCallFormat: ToolCallFormat? = nil
     ) throws -> (engine: InferenceEngine, target: ScriptedTarget) {
         // The script decides the replies, so the weights needn't be sharpened.
         let model = try makeModel(tiny, seed: seed, sharpen: false)
-        let loaded = try loadedModel(model, tokenizer: tokenizer, id: "tiny-scripted-\(tiny.rawValue)-\(seed)", modelType: modelType(tiny))
+        let loaded = try loadedModel(
+            model, tokenizer: tokenizer, id: "tiny-scripted-\(tiny.rawValue)-\(seed)", modelType: modelType(tiny), toolCallFormat: toolCallFormat)
         let inner: any TargetModel = EngineModelRegistry.makeTarget(for: loaded) ?? StockTarget(model: model)
         let target = ScriptedTarget(
             inner: inner, generationPrompt: tokenizer.encodeRaw(generationPromptText), scripts: scripts,
@@ -159,8 +161,10 @@ public struct UnusedTestInputProcessor: UserInputProcessor {
 /// generation prompt starts a reply; that reply takes the next unused script (remembered by the
 /// context, so re-feeding the same context replays the same script), and its rows k = 0, 1, …
 /// get a one-hot logit row (100 on the scripted token) for script token k, then for the stop
-/// token. Rows outside a scripted reply keep the model's logits. `LiveSession.assertConsistent`
-/// compares the raw model, so it checks the real cache.
+/// token. A reply whose first token isn't its script's (the engine forced a tool call's start)
+/// takes the next unused script instead, if one is left, from row 1 on: write it whole, from
+/// that token. Rows outside a scripted reply keep the model's logits.
+/// `LiveSession.assertConsistent` compares the raw model, so it checks the real cache.
 public final class ScriptedTarget: TargetModel {
     public let inner: any TargetModel
     public let generationPrompt: [Int]
@@ -246,7 +250,7 @@ public final class ScriptedTarget: TargetModel {
         }
         guard promptEnd >= length - 1 else { return nil }
         let key = PrefixKey.tokenHash(history[0 ... promptEnd])
-        let index: Int
+        var index: Int
         if let assigned = assignments[key] {
             index = assigned
         } else {
@@ -254,6 +258,16 @@ public final class ScriptedTarget: TargetModel {
             index = nextScript
             assignments[key] = index
             nextScript += 1
+        }
+        if end > promptEnd, let first = scripts[index].first, history[promptEnd + 1] != first {
+            let forced = PrefixKey.tokenHash(history[0 ... promptEnd + 1])
+            if let assigned = assignments[forced] {
+                index = assigned
+            } else if nextScript < scripts.count {
+                index = nextScript
+                assignments[forced] = index
+                nextScript += 1
+            }
         }
         let step = end - promptEnd
         let script = scripts[index]

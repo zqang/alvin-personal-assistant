@@ -48,6 +48,7 @@ enum DeviceTools {
         CurrentTimeTool.name,
         ListEventsTool.name,
         ListRemindersTool.name,
+        ListTimersTool.name,
         SetTimerTool.name,
     ]
 

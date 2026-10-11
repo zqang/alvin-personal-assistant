@@ -56,6 +56,10 @@ public struct ToolRunner: ToolExecutor {
         registry.presentation(for: name)
     }
 
+    public func effect(of name: String) -> ToolEffect {
+        registry.tool(named: name)?.effect ?? .sideEffect
+    }
+
     public func run(_ calls: [PendingToolCall], context: ToolContext) async -> ToolRound {
         var outputs = [ToolOutput?](repeating: nil, count: calls.count)
         var reads: [Job] = []

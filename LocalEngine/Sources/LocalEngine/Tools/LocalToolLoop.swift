@@ -36,11 +36,65 @@ import Foundation
 /// to never runs: the request is handed off when it still can be, else the call gets an error
 /// result that tells the model to ask the user.
 ///
+/// **Claim guard.** On a device action (`IntentClassifier`'s `.deviceAction` for the user's
+/// words) with tools offered, Woof sometimes answered in words that the action was done ("已经为
+/// 你设置好了明天的提醒") without calling a tool. For such a request:
+/// - the first reply asks the engine for `.requiredIfLikely(likelyToolCallFloor)`;
+/// - its visible text is held back until its first sentence ends (or the reply does), while no
+///   tool call has started; a hold that lasts `holdActivityDelay` shows `holdActivity`;
+/// - held text that claims an action (`SuccessClaim.claimsDone`) is dropped with its generation,
+///   and the request is asked again with `.required`, once per run (`Report.claimRetries`);
+/// - a retry that writes no call with readable input throws `ReplyHandoff(reason:
+///   claimHandoffReason)` when it can, else ends with `SuccessClaim.actionFailedMessage`, which
+///   the engine didn't write, so the next request rebuilds (`diverged`).
+///
+/// The guard lasts while every tool round has only gathered context for the action
+/// (`contextLookups`, the time) and no side-effect call (`ToolExecutor.effect(of:)`) has
+/// succeeded: Woof once looked up the time for "next Monday", then said the meeting was in the
+/// calendar. After any other lookup the model is answering a question ("What's on my calendar
+/// tomorrow?"), whose true answer can read as a claim ("你明天已经有两个会议"), so nothing more is
+/// forced or held: a forced call there could create an event nobody asked for. While a round is left, the continuation after
+/// such a round opens with `.requiredIfLikely(likelyToolCallFloor)` and, if the run hasn't
+/// retried yet, its text is held the same way: a claim is dropped and the continuation decoded
+/// again from the end of the round's results with `.required`
+/// (`InferenceEngine.retryContinuation`), so the cache and the reply hold only what is shown.
+/// Without a retry left the text goes out as written: an answer from a lookup ("You have a
+/// meeting scheduled at 10") can read as a claim, and mustn't end in `actionFailedMessage`.
+/// Once a side effect has succeeded, the model is confirming a real action: nothing is forced
+/// or held.
+///
+/// A request with `ToolChoice.native` is left to the model: no claim guard (the benchmark's
+/// "Compare tool modes").
+///
 /// The engine's cache stays exact whatever happens (plan §4.4): an aborted reply is recorded as
 /// unanswered, so the next request rewinds past it (`replaceLastUserTurn` or `diverged`).
 public struct LocalToolLoop: Sendable {
     /// The reason of the `ReplyHandoff` thrown as soon as the model names `handoff_to_cloud`.
     public static let earlyHandoffReason = "early"
+    /// The reason of the `ReplyHandoff` thrown when a reply claimed an action and its retry
+    /// still wrote no tool call.
+    public static let claimHandoffReason = "claimed an action without a tool call"
+    /// A device action's first reply, and its continuations after lookups only, open with a tool
+    /// call when the model gives one at least this probability at the first token: a call it
+    /// considered at all.
+    public static let likelyToolCallFloor = 0.05
+    /// Lookups that only gather context for an action, after which the guard goes on: the time,
+    /// which Woof looked up to place "next Monday".
+    public static let contextLookups: Set<String> = ["get_current_time"]
+    /// The activity shown while held-back text has lasted `holdActivityDelay` seconds.
+    public static let holdActivity = "…"
+    static let holdActivityDelay: TimeInterval = 1
+    /// Where held-back text's first sentence ends.
+    static let sentenceEnds: Set<Character> = Set("。！？.!?\n")
+    /// Letters and digits held-back text needs before a sentence end releases it, so an opener
+    /// such as "OK!" or "好的！" doesn't let the claim after it ("好的！已经为你设置好了…") through.
+    static let shortOpenerLength = 10
+
+    /// Whether held-back text has ended a first sentence that isn't just a short opener.
+    public static func endsFirstSentence(_ text: Substring) -> Bool {
+        guard let end = text.lastIndex(where: { sentenceEnds.contains($0) }) else { return false }
+        return text[..<end].filter { $0.isLetter || $0.isNumber }.count >= shortOpenerLength
+    }
     /// The reason `.reply(.finished(.other(_)))` carries when `maxRounds` is used up.
     public static let toolLimitReason = "tool_limit"
     /// `handoff_to_cloud`'s result while offline.
@@ -115,7 +169,8 @@ public struct LocalToolLoop: Sendable {
 
     /// What one run did, for telemetry.
     public struct Report: Sendable {
-        /// Each engine generation's statistics, in order: the reply, then one per tool round.
+        /// Each engine generation's statistics, in order: the reply, then one per tool round. A
+        /// reply dropped for claiming an action is there only if it had finished; its retry follows.
         public var generations: [LocalGenerationStats]
         /// Tool rounds run.
         public var rounds: Int
@@ -123,24 +178,34 @@ public struct LocalToolLoop: Sendable {
         public var timeToFirstText: TimeInterval?
         /// The reason of the `ReplyHandoff` the run threw, if it did.
         public var handoffReason: String?
+        /// Times the reply was asked again because it claimed an action without a tool call.
+        public var claimRetries: Int
 
-        public init(generations: [LocalGenerationStats] = [], rounds: Int = 0, timeToFirstText: TimeInterval? = nil, handoffReason: String? = nil) {
+        public init(
+            generations: [LocalGenerationStats] = [], rounds: Int = 0, timeToFirstText: TimeInterval? = nil, handoffReason: String? = nil,
+            claimRetries: Int = 0
+        ) {
             self.generations = generations
             self.rounds = rounds
             self.timeToFirstText = timeToFirstText
             self.handoffReason = handoffReason
+            self.claimRetries = claimRetries
         }
 
-        /// The generations combined into one reply's statistics (see `LocalToolLoop.combine`).
+        /// The generations combined into one reply's statistics (see `LocalToolLoop.combine`),
+        /// with `claimRetries`.
         public var stats: LocalGenerationStats {
-            LocalToolLoop.combine(generations, timeToFirstText: timeToFirstText)
+            var stats = LocalToolLoop.combine(generations, timeToFirstText: timeToFirstText)
+            stats.claimRetries = claimRetries
+            return stats
         }
     }
 
     /// One reply's statistics from its generations: token counts, times, drafts and prefilled
     /// tokens add up; peak memory is the largest; confidence is token-weighted (its p10 is the
-    /// lowest p10, a lower bound); speculation adds up per source. The plan, phases, reused
-    /// tokens and engine are the first generation's, which answered the request.
+    /// lowest p10, a lower bound); speculation adds up per source; a forced tool call in any
+    /// generation counts. The plan, phases, reused tokens, tool-call probability and engine are
+    /// the first generation's, which answered the request.
     /// `timeToFirstText` replaces the first generation's, which only covers that generation.
     public static func combine(_ generations: [LocalGenerationStats], timeToFirstText: TimeInterval?) -> LocalGenerationStats {
         guard var combined = generations.first else {
@@ -158,6 +223,7 @@ public struct LocalToolLoop: Sendable {
             combined.prefilledTokens = sum(combined.prefilledTokens, next.prefilledTokens)
             combined.speculation = merge(combined.speculation, next.speculation)
             combined.confidence = merge(combined.confidence, next.confidence)
+            combined.forcedToolCall = combined.forcedToolCall || next.forcedToolCall
         }
         return combined
     }
@@ -380,6 +446,17 @@ public struct LocalToolLoop: Sendable {
         var activityShown = false
         var firstText: Date?
         var handoffReason: String?
+        var claimRetries = 0
+        /// A side-effect call has succeeded: the claim guard is over.
+        var acted = false
+        /// Every round so far only gathered context for the action (`contextLookups`).
+        var contextOnly = true
+        /// Times `show` emitted text.
+        var shownTexts = 0
+        /// Visible text is held back (a device action's reply before its first sentence end).
+        var holding = false
+        var held = ""
+        var heldSince: Date?
 
         init(start: Date) {
             self.start = start
@@ -388,7 +465,17 @@ public struct LocalToolLoop: Sendable {
         var report: Report {
             Report(
                 generations: generations, rounds: rounds, timeToFirstText: firstText.map { $0.timeIntervalSince(start) },
-                handoffReason: handoffReason)
+                handoffReason: handoffReason, claimRetries: claimRetries)
+        }
+
+        /// Ends a hold: the held text, if any, goes out (see `show`).
+        mutating func release(emit: (AssistantEvent) -> Void) {
+            guard holding else { return }
+            holding = false
+            if !held.isEmpty {
+                show(held, emit: emit)
+            }
+            held = ""
         }
 
         /// Emits visible text: leading whitespace is held back (dropped) until the first visible
@@ -406,6 +493,7 @@ public struct LocalToolLoop: Sendable {
                 activityShown = false
                 emit(.reply(.activity(nil)))
             }
+            shownTexts += 1
             emit(.reply(.text(text)))
         }
     }
@@ -416,13 +504,27 @@ public struct LocalToolLoop: Sendable {
         case toolCalls([PendingToolCall])
         /// The model named `handoff_to_cloud` while a handoff was possible.
         case handoff(String)
+        /// Held-back text claimed an action before a tool call of its own; the generation was dropped.
+        case claimed
     }
 
     func drive(_ request: EngineRequest, state: inout RunState, emit: (AssistantEvent) -> Void) async throws {
         let userText = CallGuard.userText(of: request.turns)
-        var generation = try await consume(engine.reply(request), state: &state, emit: emit)
+        // A device action with tools: the claim guard (see the type's documentation).
+        var first = request
+        let guarded = !request.tools.isEmpty && request.toolChoice != .native && IntentClassifier().classify(userText).contains(.deviceAction)
+        if guarded {
+            if first.toolChoice == .auto {
+                first.toolChoice = .requiredIfLikely(Self.likelyToolCallFloor)
+            }
+            state.holding = true
+        }
+        var generation = try await consume(engine.reply(first), state: &state, emit: emit)
         while true {
             switch generation {
+            case .claimed:
+                // Once: a retry never ends `.claimed`.
+                generation = try await retryClaim(request, userText: userText, state: &state, emit: emit)
             case .handoff(let reason):
                 // The engine stream is gone, so the engine stops at its next step; wait for it,
                 // so the cache and its record of the reply are settled before anyone else asks.
@@ -450,32 +552,109 @@ public struct LocalToolLoop: Sendable {
                 let round = try await runRound(calls, userText: userText, state: &state, emit: emit)
                 state.rounds += 1
                 state.committed = true
+                state.acted = state.acted || round.calls.contains { !$0.isError && executor.effect(of: $0.name) == .sideEffect }
+                state.contextOnly = state.contextOnly && round.calls.allSatisfy { Self.contextLookups.contains($0.name) }
                 emit(.toolRound(round))
                 try Task.checkCancellation()
-                generation = try await consume(engine.continueReply(after: round), state: &state, emit: emit)
+                // After lookups only, a call is still due (see the type's documentation); a call
+                // past `maxRounds` couldn't run, so none is forced or retried then.
+                var choice = ToolChoice.native
+                if guarded, !state.acted, state.contextOnly, state.rounds < maxRounds {
+                    choice = .requiredIfLikely(Self.likelyToolCallFloor)
+                    state.holding = state.claimRetries == 0
+                    state.heldSince = nil
+                }
+                generation = try await consume(engine.continueReply(after: round, toolChoice: choice), state: &state, emit: emit)
             }
         }
     }
 
-    /// Relays one engine generation. Returning early (an early handoff) drops the stream, which
-    /// terminates it: the engine stops at its next step, with an exact ledger.
+    /// Asks again, with a required tool call, for a generation whose held-back text claimed an
+    /// action: the reply, with the same turns, or after a tool round the continuation, from the
+    /// end of the round's results. Returns the retry's generation when it wrote a call with
+    /// readable input, handed off, showed text of its own or was cancelled. Otherwise the request
+    /// is handed off when it can be (throws), else the reply ends with
+    /// `SuccessClaim.actionFailedMessage` (as `.finished(.stop)`).
+    private func retryClaim(
+        _ request: EngineRequest, userText: String, state: inout RunState, emit: (AssistantEvent) -> Void
+    ) async throws -> Generation {
+        try Task.checkCancellation()
+        state.claimRetries += 1
+        state.held = ""
+        state.heldSince = nil
+        let shownTexts = state.shownTexts
+        var retry = request
+        retry.toolChoice = .required
+        let events = state.rounds == 0 ? engine.reply(retry) : engine.retryContinuation(toolChoice: .required)
+        let generation = try await consume(events, state: &state, emit: emit, retrying: true)
+        switch generation {
+        case .toolCalls(let calls) where calls.contains { $0.input != nil }:
+            return generation
+        case .handoff, .finished(.cancelled):
+            return generation
+        case .finished where state.shownTexts > shownTexts:
+            return generation
+        default:
+            break
+        }
+        if handoffBlocker(state) == nil {
+            await engine.waitUntilIdle()
+            throw ReplyHandoff(reason: Self.claimHandoffReason)
+        }
+        state.show(SuccessClaim.actionFailedMessage(for: userText), emit: emit)
+        return .finished(.stop)
+    }
+
+    /// Relays one engine generation. Returning early (an early handoff, a claim) drops the
+    /// stream, which terminates it: the engine stops at its next step, with an exact ledger.
+    /// A retry's (`retrying`) start marks aren't passed on: the first try reported them.
     private func consume(
-        _ events: AsyncThrowingStream<EngineEvent, Error>, state: inout RunState, emit: (AssistantEvent) -> Void
+        _ events: AsyncThrowingStream<EngineEvent, Error>, state: inout RunState, emit: (AssistantEvent) -> Void,
+        retrying: Bool = false
     ) async throws -> Generation {
         var calls: [PendingToolCall] = []
         for try await event in events {
             switch event {
             case .progress(let mark):
+                if case .toolCallStarted = mark {
+                    state.release(emit: emit)
+                } else if retrying {
+                    continue
+                }
                 emit(.progress(mark))
                 if case .toolCallStarted(let name?) = mark, name == HandoffTool.name, handoffBlocker(state) == nil {
                     return .handoff(Self.earlyHandoffReason)
                 }
             case .text(let text):
-                state.show(text, emit: emit)
+                guard state.holding else {
+                    state.show(text, emit: emit)
+                    continue
+                }
+                state.held += text
+                let visible = state.held.drop(while: { $0.isWhitespace })
+                if Self.endsFirstSentence(visible) {
+                    if SuccessClaim.claimsDone(String(visible)) {
+                        return .claimed
+                    }
+                    state.release(emit: emit)
+                } else if !visible.isEmpty, !state.activityShown {
+                    let since = state.heldSince ?? Date()
+                    state.heldSince = since
+                    if Date().timeIntervalSince(since) >= Self.holdActivityDelay {
+                        emit(.reply(.activity(Self.holdActivity)))
+                        state.activityShown = true
+                    }
+                }
             case .toolCalls(let found):
                 calls += found
             case .finished(let finish):
                 state.generations.append(finish.stats)
+                if state.holding, finish.reason != .cancelled {
+                    if calls.isEmpty, SuccessClaim.claimsDone(state.held) {
+                        return .claimed
+                    }
+                    state.release(emit: emit)
+                }
                 if finish.reason == .toolCalls {
                     return .toolCalls(calls)
                 }

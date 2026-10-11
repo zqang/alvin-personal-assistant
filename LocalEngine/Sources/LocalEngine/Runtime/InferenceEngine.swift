@@ -9,7 +9,11 @@ import MLXLMCommon
 /// - `reply` prepares the session for a request (reusing every cached token it can), then
 ///   decodes with the configured generator, streaming `EngineEvent`s.
 /// - `continueReply(after:)` appends a tool round's results to the reply in progress and
-///   decodes again.
+///   decodes again; `retryContinuation` decodes that continuation again from the same point.
+/// - A reply to a request with tools opens with a tool call when `ToolChoice` requires one or
+///   the model samples it; the engine then feeds the call's opening, its function name picked
+///   among the request's tools, and the generator decodes the arguments (all of it under
+///   `ToolChoice.native`). A continuation does so under its own tool choice.
 /// - Every GPU job runs between `hooks.beginGPU()` and `hooks.endGPU()`; `hooks.isAllowed()` and
 ///   the stream's termination are checked before every decode step and prefill chunk, and stop
 ///   the reply with `.cancelled`, leaving the ledger exact.
@@ -148,11 +152,21 @@ public final class InferenceEngine: @unchecked Sendable {
     }
 
     /// Continues the reply whose stream ended with `.toolCalls`, after `round` (the results of
-    /// those calls). Valid only right after `.toolCalls`; otherwise the stream throws
-    /// `EngineError.busy`.
-    public func continueReply(after round: ToolRound) -> AsyncThrowingStream<EngineEvent, Error> {
+    /// those calls), opening under `toolChoice` (by default the model alone, `.native`). Valid
+    /// only right after `.toolCalls`; otherwise the stream throws `EngineError.busy`.
+    public func continueReply(after round: ToolRound, toolChoice: ToolChoice = .native) -> AsyncThrowingStream<EngineEvent, Error> {
         stream { [self] continuation, cancellation in
-            self.generate(.continuation(round), continuation: continuation, cancellation: cancellation)
+            self.generate(.continuation(round, toolChoice), continuation: continuation, cancellation: cancellation)
+        }
+    }
+
+    /// Decodes the reply's last continuation again, opening under `toolChoice`: the session goes
+    /// back to the end of that continuation's tool results, so what it wrote leaves the cache and
+    /// the reply. Valid only right after a continuation that asked for no tools (it finished, or
+    /// its stream was ended); otherwise the stream throws `EngineError.busy`.
+    public func retryContinuation(toolChoice: ToolChoice) -> AsyncThrowingStream<EngineEvent, Error> {
+        stream { [self] continuation, cancellation in
+            self.generate(.retry(toolChoice), continuation: continuation, cancellation: cancellation)
         }
     }
 
@@ -196,7 +210,9 @@ public final class InferenceEngine: @unchecked Sendable {
 
     private enum Job {
         case reply(EngineRequest)
-        case continuation(ToolRound)
+        case continuation(ToolRound, ToolChoice)
+        /// The last continuation again (`retryContinuation`).
+        case retry(ToolChoice)
     }
 
     private func generate(
@@ -229,39 +245,35 @@ public final class InferenceEngine: @unchecked Sendable {
                 switch job {
                 case .reply(let request):
                     return try self.runtime.prepare(request, isAllowed: isAllowed)
-                case .continuation(let round):
+                case .continuation(let round, _):
                     return try self.runtime.prepareContinuation(after: round, isAllowed: isAllowed)
+                case .retry:
+                    return try self.runtime.prepareRetry(isAllowed: isAllowed)
                 }
             }
             guard let request = runtime.reply?.request else {
                 throw EngineError.busy
+            }
+            // How the first token is chosen: a reply's by its request, a continuation by its own
+            // choice; nil for a continuation left to the model, which opens as before tool choice.
+            let toolChoice: ToolChoice?
+            switch job {
+            case .reply: toolChoice = request.toolChoice
+            case .continuation(_, let choice), .retry(let choice): toolChoice = choice == .native ? nil : choice
             }
             continuation.yield(.progress(.prefillDone(prefilledTokens: prepared.prefilledTokens, reusedTokens: prepared.reusedTokens)))
 
             let streamer = TextStreamer(
                 tokenizer: loaded.tokenizer, renderer: loaded.renderer, format: toolCallFormat,
                 tools: JSONBridge.templateToolsOrNil(request.tools))
-            let drafters = activeExtensions().flatMap { $0.drafters(for: request, engine: self) }
-            for drafter in drafters {
-                drafter.reset(ledger: session.ledger, request: request)
-            }
-            let confidence = ConfidenceRecorder()
-            let context = GeneratorContext(
-                session: session, sampler: FastSampler(configuration: configuration, greedy: request.greedy),
-                firstLogits: prepared.firstLogits, stopTokens: loaded.stopTokenIDs,
-                maxTokens: request.maxTokens ?? configuration.maxTokens, request: request, drafters: drafters,
-                insideToolCall: { streamer.insideToolCall }, isAllowed: isAllowed, renderer: loaded.renderer,
-                toolCallFormat: toolCallFormat, confidence: confidence)
-            let generator = (configuration.generatorFactory ?? PlainGeneratorFactory()).makeGenerator(context)
-
-            let decodeStart = Date()
+            let sampler = FastSampler(configuration: configuration, greedy: request.greedy)
+            var decodeStart = Date()
             var phases = prepared.phases
             var firstToken = false
             var firstText: Date?
             var generated = 0
-            var reason: EngineFinish.Reason = .stop
-            while true {
-                let (emitted, finished) = try withError { try generator.step() }
+            /// Hands emitted tokens to the streamer and yields what they show.
+            func deliver(_ emitted: [Int], finished: EngineFinish.Reason? = nil) {
                 if !firstToken && (!emitted.isEmpty || finished == .stop || finished == .length) {
                     firstToken = true
                     phases.firstToken = Date().timeIntervalSince(decodeStart)
@@ -277,6 +289,45 @@ public final class InferenceEngine: @unchecked Sendable {
                         continuation.yield(.progress(.toolCallStarted(name: name)))
                     }
                 }
+            }
+
+            // The first token, when the request offers tools: a tool call's opening is fed here,
+            // the arguments are then decoded by the generator.
+            var firstLogits = prepared.firstLogits
+            var toolCallProbability: Double?
+            var forcedToolCall = false
+            if let toolChoice, !request.tools.isEmpty, let start = streamer.startToken {
+                let opening = try withError {
+                    try self.openReply(
+                        firstLogits: prepared.firstLogits, start: start, request: request, toolChoice: toolChoice, sampler: sampler,
+                        isAllowed: isAllowed, deliver: { deliver($0) })
+                }
+                firstLogits = opening.firstLogits
+                toolCallProbability = opening.toolCallProbability
+                forcedToolCall = opening.forced
+            }
+
+            let drafters = activeExtensions().flatMap { $0.drafters(for: request, engine: self) }
+            for drafter in drafters {
+                drafter.reset(ledger: session.ledger, request: request)
+            }
+            let confidence = ConfidenceRecorder()
+            let context = GeneratorContext(
+                session: session, sampler: sampler,
+                firstLogits: firstLogits, stopTokens: loaded.stopTokenIDs,
+                maxTokens: max(0, (request.maxTokens ?? configuration.maxTokens) - generated), request: request, drafters: drafters,
+                insideToolCall: { streamer.insideToolCall }, isAllowed: isAllowed, renderer: loaded.renderer,
+                toolCallFormat: toolCallFormat, confidence: confidence)
+            let generator = (configuration.generatorFactory ?? PlainGeneratorFactory()).makeGenerator(context)
+            if generated == 0 {
+                // No opening was fed: the decode is timed from the generator's start.
+                decodeStart = Date()
+            }
+
+            var reason: EngineFinish.Reason = .stop
+            while true {
+                let (emitted, finished) = try withError { try generator.step() }
+                deliver(emitted, finished: finished)
                 if let finished {
                     reason = finished
                     break
@@ -318,7 +369,9 @@ public final class InferenceEngine: @unchecked Sendable {
                 reusedTokens: prepared.reusedTokens,
                 planReason: prepared.reason,
                 speculation: speculation,
-                confidence: confidence.summary)
+                confidence: confidence.summary,
+                toolCallProbability: toolCallProbability,
+                forcedToolCall: forcedToolCall)
             if reason == .toolCalls {
                 continuation.yield(.toolCalls(calls))
             }
@@ -343,6 +396,90 @@ public final class InferenceEngine: @unchecked Sendable {
             Memory.clearCache()
             continuation.finish(throwing: error)
         }
+    }
+
+    // MARK: Opening a tool call
+
+    /// How a generation of a reply to a request with tools starts: the probability the model
+    /// gives the tool-call start token at the first position (raw softmax), whether `toolChoice`
+    /// forces a call, and the logits the generator starts from.
+    ///
+    /// - A forced call, or one sampled here (only when the start token is in the sampler's kept
+    ///   set, so it could be), is opened by `openToolCall`: the logits after its opening.
+    /// - A text token sampled here: the first logits with every other token at `-inf`, so the
+    ///   generator emits that token (its confidence then reads 1).
+    /// - Otherwise, and always for `.native`, the first logits, unchanged.
+    private func openReply(
+        firstLogits: MLXArray, start: Int, request: EngineRequest, toolChoice: ToolChoice, sampler: FastSampler,
+        isAllowed: () -> Bool, deliver: ([Int]) -> Void
+    ) throws -> (firstLogits: MLXArray, toolCallProbability: Double, forced: Bool) {
+        let row = firstLogits.reshaped(-1).asType(.float32)
+        let probability = Double(exp(row[start] - logSumExp(row, axis: -1)).item(Float.self))
+        if toolChoice.forcesCall(probability: probability) {
+            return try (openToolCall(start: start, request: request, isAllowed: isAllowed, deliver: deliver), probability, true)
+        }
+        guard toolChoice != .native, sampler.keptDistribution(firstLogits).contains(where: { $0.token == start }) else {
+            return (firstLogits, probability, false)
+        }
+        let position = session.ledger.count
+        let token = sampler.sample(firstLogits, positions: position ..< (position + 1)).tokens.item(Int.self)
+        if token == start {
+            return try (openToolCall(start: start, request: request, isAllowed: isAllowed, deliver: deliver), probability, false)
+        }
+        return (which(MLXArray.arange(row.dim(0)) .== token, firstLogits, MLXArray(-Float.infinity)), probability, false)
+    }
+
+    /// Feeds a tool call's opening (`callOpenings`): the start token, then a function name among
+    /// the request's tools, taking the model's most likely allowed token where the openings
+    /// branch. Each token is delivered (to the streamer) as it is fed; returns the logits after
+    /// the opening. Throws `PrefillInterrupted` when the GPU stops being allowed between feeds.
+    private func openToolCall(start: Int, request: EngineRequest, isAllowed: () -> Bool, deliver: ([Int]) -> Void) throws -> MLXArray {
+        let openings = Self.callOpenings(tools: request.tools, format: toolCallFormat, start: start, renderer: loaded.renderer)
+        var fed = 0
+        func feed(_ path: [Int]) throws -> MLXArray {
+            guard isAllowed() else { throw PrefillInterrupted() }
+            let tokens = Array(path[fed...])
+            deliver(tokens)
+            fed = path.count
+            guard let logits = session.feed(tokens, rows: .last).logits else {
+                preconditionFailure("A `.last` forward returned no logits.")
+            }
+            return logits
+        }
+        let opening = try Self.selectOpening(openings) { prefix, allowed in
+            let scores = try feed(prefix).take(MLXArray(allowed.map { Int32($0) })).asType(.float32).asArray(Float.self)
+            return allowed[scores.indices.max { scores[$0] < scores[$1] } ?? 0]
+        }
+        return try feed(opening)
+    }
+
+    /// The tokens a call to one of `tools` opens with in `format`, up to the function's name:
+    /// `<tool_call>\n<function=NAME>\n`, or `<tool_call>\n{"name": "NAME", "arguments":` (a
+    /// trailing space is left to the model, which writes it with what follows). Each starts with
+    /// `start`; `[[start]]` when the format has no skeletons.
+    static func callOpenings(tools: [ToolDefinition], format: ToolCallFormat, start: Int, renderer: any ChatTemplateRendering) -> [[Int]] {
+        let openings = ExemplarDrafter.skeletons(tools: tools, format: format, withParameter: false)
+            .map { renderer.encodeRaw($0.replacingOccurrences(of: " +$", with: "", options: .regularExpression)) }
+            .filter { $0.first == start }
+        return openings.isEmpty ? [[start]] : openings
+    }
+
+    /// Walks `openings` (a trie, as token lists) from their shared start: a token every remaining
+    /// opening has next is taken; where they differ, `choose(prefix, allowed)` picks among the
+    /// `allowed` next tokens. Ends where an opening ends.
+    static func selectOpening(_ openings: [[Int]], choose: (_ prefix: [Int], _ allowed: [Int]) throws -> Int) rethrows -> [Int] {
+        var candidates = openings
+        var path: [Int] = []
+        while !candidates.isEmpty, !candidates.contains(where: { $0.count == path.count }) {
+            var allowed: [Int] = []
+            for candidate in candidates where !allowed.contains(candidate[path.count]) {
+                allowed.append(candidate[path.count])
+            }
+            let token = try allowed.count == 1 ? allowed[0] : choose(path, allowed)
+            path.append(token)
+            candidates = candidates.filter { $0[path.count - 1] == token }
+        }
+        return path
     }
 
     // MARK: Extensions

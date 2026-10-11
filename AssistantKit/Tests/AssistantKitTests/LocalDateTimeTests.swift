@@ -56,11 +56,23 @@ final class LocalDateTimeTests: XCTestCase {
         )
     }
 
+    func testTwentyFourHundredIsTheEndOfThatDay() {
+        let midnight = LocalDateTime.parse("2026-10-08T00:00", timeZone: singapore)
+        XCTAssertNotNil(midnight)
+        for text in ["2026-10-07T24:00", "2026-10-07T24:00:00", "2026-10-07 24:00"] {
+            XCTAssertEqual(LocalDateTime.parse(text, timeZone: singapore), midnight, text)
+        }
+        // Across a month and a year end, and with an offset.
+        XCTAssertEqual(LocalDateTime.parse("2026-10-31T24:00", timeZone: utc), LocalDateTime.parse("2026-11-01T00:00", timeZone: utc))
+        XCTAssertEqual(LocalDateTime.parse("2026-12-31T24:00", timeZone: utc), LocalDateTime.parse("2027-01-01T00:00", timeZone: utc))
+        XCTAssertEqual(LocalDateTime.parse("2026-10-07T24:00+08:00", timeZone: newYork)?.date, midnight?.date)
+    }
+
     func testRejectsMalformedAndImpossibleTimes() {
         let bad = [
             "", "tomorrow", "07/10/2026", "2026-1-7", "2026-10-7", "26-10-07",
             "2026-13-01", "2026-00-10", "2026-02-29", "2026-02-30", "2026-04-31", "2026-10-00",
-            "2026-10-07T24:00", "2026-10-07T17:60", "2026-10-07T17:00:60", "2026-10-07T17", "2026-10-07T5:00",
+            "2026-10-07T24:01", "2026-10-07T24:00:01", "2026-10-07T25:00", "2026-10-07T17:60", "2026-10-07T17:00:60", "2026-10-07T17", "2026-10-07T5:00",
             "2026-10-07T17:00 tomorrow", "2026-10-07T17:00+", "2026-10-07T17:00+19:00", "2026-10-07T17:00+08:61",
             "2026-10-07T17:00:00.", "2026-10-07Z", "2026-10-07X17:00",
         ]

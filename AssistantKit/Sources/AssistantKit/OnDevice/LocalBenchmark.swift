@@ -28,6 +28,14 @@ public struct LocalGenerationStats: Equatable, Sendable {
     public var speculation: SpeculationStats?
     /// The sampled tokens' top-1 probabilities.
     public var confidence: TokenConfidence?
+    /// The probability the model gave a tool call at the reply's first token (raw softmax), when
+    /// the request offered tools.
+    public var toolCallProbability: Double?
+    /// The engine opened the reply with a tool call because the request required one.
+    public var forcedToolCall: Bool
+    /// Times the reply was asked again, with a required tool call, because it claimed an action
+    /// without one (`LocalToolLoop`).
+    public var claimRetries: Int
 
     public init(
         timeToFirstText: TimeInterval? = nil,
@@ -45,7 +53,10 @@ public struct LocalGenerationStats: Equatable, Sendable {
         reusedTokens: Int? = nil,
         planReason: String? = nil,
         speculation: SpeculationStats? = nil,
-        confidence: TokenConfidence? = nil
+        confidence: TokenConfidence? = nil,
+        toolCallProbability: Double? = nil,
+        forcedToolCall: Bool = false,
+        claimRetries: Int = 0
     ) {
         self.timeToFirstText = timeToFirstText
         self.promptTokens = promptTokens
@@ -63,6 +74,9 @@ public struct LocalGenerationStats: Equatable, Sendable {
         self.planReason = planReason
         self.speculation = speculation
         self.confidence = confidence
+        self.toolCallProbability = toolCallProbability
+        self.forcedToolCall = forcedToolCall
+        self.claimRetries = claimRetries
     }
 
     public var tokensPerSecond: Double? {
@@ -99,14 +113,26 @@ public enum LocalBenchmark {
         public var prompt: String
         public var reply: String
         public var stats: LocalGenerationStats
-        /// For a turn with a `ToolExpectation`: how its first tool call scored.
+        /// For a turn with a `ToolExpectation`: how its tool calls scored (`score(calls:)`).
         public var toolScore: ToolScore?
+        /// The tool calls the turn made, in order, across its rounds.
+        public var calls: [ToolCallRecord]
+        /// The device's thermal state as the turn ended.
+        public var thermal: ThermalLevel?
+        /// Low Power Mode was on as the turn ended.
+        public var lowPowerMode: Bool
 
-        public init(prompt: String, reply: String, stats: LocalGenerationStats, toolScore: ToolScore? = nil) {
+        public init(
+            prompt: String, reply: String, stats: LocalGenerationStats, toolScore: ToolScore? = nil, calls: [ToolCallRecord] = [],
+            thermal: ThermalLevel? = nil, lowPowerMode: Bool = false
+        ) {
             self.prompt = prompt
             self.reply = reply
             self.stats = stats
             self.toolScore = toolScore
+            self.calls = calls
+            self.thermal = thermal
+            self.lowPowerMode = lowPowerMode
         }
     }
 
@@ -120,8 +146,9 @@ public enum LocalBenchmark {
         ]
         if let scenario { lines.append("Scenario: \(scenario)") }
         if let loadTime { lines.append("Load time: \(format(loadTime, digits: 1)) s") }
+        if rows.contains(where: \.lowPowerMode) { lines.append("Low Power Mode: on") }
         lines.append("")
-        lines.append("turn | first text s | prefill tok (tok/s) | gen tok/s | draft accept | cache | peak GB | engine | plan | prefilled/reused | tok/round | acc%")
+        lines.append("turn | first text s | prefill tok (tok/s) | gen tok/s | draft accept | cache | peak GB | engine | plan | prefilled/reused | tok/round | acc% | thermal")
         for (index, row) in rows.enumerated() {
             let stats = row.stats
             var columns: [String] = [
@@ -134,6 +161,7 @@ public enum LocalBenchmark {
                 stats.peakMemoryBytes.map { format(Double($0) / 1e9, digits: 2) } ?? "–",
             ]
             columns += engineColumns(stats)
+            columns.append(row.thermal.map { "\($0)" } ?? "–")
             lines.append(columns.joined(separator: " | "))
         }
         let summaries = [summary(rows), toolSummary(rows)].compactMap { $0 }
@@ -145,6 +173,9 @@ public enum LocalBenchmark {
         for (index, row) in rows.enumerated() {
             lines.append("\(index + 1). \(row.prompt)")
             lines.append("   → \(row.reply.trimmed.replacingOccurrences(of: "\n", with: " "))")
+            if row.toolScore != nil || !row.calls.isEmpty {
+                lines.append("   tool: \(toolLine(calls: row.calls, score: row.toolScore, stats: row.stats))")
+            }
         }
         return lines.joined(separator: "\n")
     }
@@ -172,6 +203,31 @@ public enum LocalBenchmark {
         let names = scores.filter(\.nameMatches).count
         let arguments = scores.filter(\.argumentsMatch).count
         return "Tool calls: name \(names)/\(scores.count), arguments \(arguments)/\(scores.count)"
+    }
+
+    /// A turn's calls in order, e.g. "get_current_time → create_event {start: 2026-10-12T10:00,
+    /// title: 王经理}"; with a score, its verdict after them (" — name ✓, args ✗ (start)", " — name
+    /// ✗ (expected create_event)") or "none — expected create_event"; then what the engine measured
+    /// of the reply, when it did: " · P(tool) 0.12, forced, retried" (`toolCallProbability`,
+    /// `forcedToolCall`, `claimRetries`).
+    static func toolLine(calls: [ToolCallRecord], score: ToolScore?, stats: LocalGenerationStats = LocalGenerationStats()) -> String {
+        var notes = stats.toolCallProbability.map { ["P(tool) \(format($0, digits: 2))"] } ?? []
+        if stats.forcedToolCall { notes.append("forced") }
+        if stats.claimRetries > 0 { notes.append("retried") }
+        let measured = notes.isEmpty ? "" : " · " + notes.joined(separator: ", ")
+        let sequence = calls.map { call in
+            guard let arguments = call.input.objectValue, !arguments.isEmpty else { return call.name }
+            let pairs = arguments.sorted { $0.key < $1.key }.map { key, value in
+                let text = ToolExpectation.text(of: value).replacingOccurrences(of: "\n", with: " ")
+                return "\(key): " + (text.count > 32 ? String(text.prefix(32)) + "…" : text)
+            }
+            return call.name + " {\(pairs.joined(separator: ", "))}"
+        }.joined(separator: " → ")
+        guard let score else { return sequence + measured }
+        guard !calls.isEmpty else { return "none — expected \(score.expectedName)" + measured }
+        guard score.nameMatches else { return "\(sequence) — name ✗ (expected \(score.expectedName))" + measured }
+        let failed = score.argumentResults.filter { !$0.value }.keys.sorted()
+        return "\(sequence) — name ✓, args " + (failed.isEmpty ? "✓" : "✗ (\(failed.joined(separator: ", ")))") + measured
     }
 
     /// The `engine | plan | prefilled/reused | tok/round | acc%` columns.
@@ -432,7 +488,8 @@ extension LocalBenchmark {
 
     /// Requests for device tools, each in a new conversation, with the expected tool and key
     /// arguments: the drafter lab's `tool-01` to `tool-12`, at the lab's fixed time. Run it with a
-    /// tool executor that records the calls instead of acting on them.
+    /// tool executor that records the calls and answers them with `toolResult(for:now:timeZone:)`
+    /// instead of acting on them.
     public static let tools = Scenario(
         id: "tools",
         title: "Tool calls",
@@ -482,7 +539,16 @@ extension LocalBenchmark {
             self.arguments = arguments
         }
 
-        /// Scores a reply's first tool call; pass nil for both when it made none.
+        /// Scores a turn's tool calls, in the order it made them across its rounds: the name
+        /// matches when any call is to the expected tool, and the first such call's arguments are
+        /// scored (a lookup such as `get_current_time` may come first). Without one, the first
+        /// call is scored.
+        public func score(calls: [ToolCallRecord]) -> ToolScore {
+            let call = calls.first { $0.name == name } ?? calls.first
+            return score(name: call?.name, arguments: call?.input)
+        }
+
+        /// Scores one tool call; pass nil for both when there was none.
         public func score(name actualName: String?, arguments actual: JSONValue?) -> ToolScore {
             let nameMatches = actualName == name
             var results: [String: Bool] = [:]
@@ -491,7 +557,12 @@ extension LocalBenchmark {
                     results[key] = Self.matches(expected, actual?[key])
                 }
             }
-            return ToolScore(nameMatches: nameMatches, argumentsMatch: nameMatches && results.values.allSatisfy { $0 }, argumentResults: results)
+            return ToolScore(
+                expectedName: name,
+                nameMatches: nameMatches,
+                argumentsMatch: nameMatches && results.values.allSatisfy { $0 },
+                argumentResults: results
+            )
         }
 
         /// Whether one argument matches:
@@ -613,18 +684,96 @@ extension LocalBenchmark {
         }
     }
 
-    /// How a reply's first tool call compared with a `ToolExpectation`.
+    /// How a turn's tool calls compared with a `ToolExpectation`.
     public struct ToolScore: Equatable, Sendable {
+        /// The tool the turn should have called.
+        public var expectedName: String
         public var nameMatches: Bool
         /// The name and every key argument matched.
         public var argumentsMatch: Bool
         /// Per key argument; empty when no tool was called.
         public var argumentResults: [String: Bool]
 
-        public init(nameMatches: Bool, argumentsMatch: Bool, argumentResults: [String: Bool] = [:]) {
+        public init(expectedName: String, nameMatches: Bool, argumentsMatch: Bool, argumentResults: [String: Bool] = [:]) {
+            self.expectedName = expectedName
             self.nameMatches = nameMatches
             self.argumentsMatch = argumentsMatch
             self.argumentResults = argumentResults
         }
+    }
+}
+
+// MARK: - Tool results
+
+extension LocalBenchmark {
+    /// The local time a context tag gives (`time: Wednesday 7 October 2026, 16:05 Asia/Singapore`,
+    /// as `PromptBuilder` writes it) and its time zone; nil when it gives none.
+    public static func time(ofContext context: String) -> (date: Date, timeZone: TimeZone)? {
+        guard let label = context.range(of: "time: ") else { return nil }
+        let value = context[label.upperBound...].prefix { $0 != ";" && $0 != "<" }
+        guard let space = value.lastIndex(of: " "),
+              let timeZone = TimeZone(identifier: String(value[value.index(after: space)...])),
+              let date = PromptBuilder.contextDateFormatter(timeZone: timeZone).date(from: String(value[..<space]))
+        else { return nil }
+        return (date, timeZone)
+    }
+
+    /// What the benchmark answers a call with instead of running it, so the model carries on as
+    /// after a real call while nothing on the phone changes: a result in the shape the app's tool
+    /// returns (`AlvinAssistant/Tools`), at `now`. Lists are empty; what a call creates echoes its
+    /// input, with times written as the tools write them; a tool the benchmark doesn't offer gets
+    /// `ToolRunner`'s "Unknown tool" error, as in the app, so a model that invents a name can
+    /// still correct itself. The app answers `get_current_time` with its real tool at the turn's
+    /// `time(ofContext:)`.
+    public static func toolResult(for call: PendingToolCall, now: Date, timeZone: TimeZone) -> ToolOutput {
+        let input = call.input?.objectValue ?? [:]
+        func text(_ key: String) -> String? {
+            guard let value = input[key]?.stringValue?.trimmed, !value.isEmpty else { return nil }
+            return value
+        }
+        // On-device models write numbers as strings too.
+        func number(_ key: String) -> Int? {
+            input[key]?.intValue ?? text(key).flatMap { Int($0) }
+        }
+        func local(_ date: Date, hasTime: Bool = true) -> JSONValue {
+            .string(LocalDateTime.format(date, timeZone: timeZone, includeTime: hasTime))
+        }
+        // A time from the input as the tools write it back; as given when it can't be read.
+        func time(_ key: String) -> JSONValue? {
+            guard let value = text(key) else { return nil }
+            return LocalDateTime.parse(value, timeZone: timeZone).map { local($0.date, hasTime: $0.hasTime) } ?? .string(value)
+        }
+
+        var content: [String: JSONValue]
+        switch call.name {
+        case "list_events":
+            content = ["count": 0, "events": []]
+            content["from"] = time("start")
+            content["to"] = time("end")
+        case "list_reminders":
+            content = ["scope": .string(text("scope")?.lowercased() ?? "all"), "count": 0, "reminders": []]
+        case "list_timers":
+            content = ["count": 0, "timers": []]
+        case "create_reminder":
+            content = ["status": "added", "id": "benchmark", "title": .string(text("title") ?? ""), "list": "Reminders"]
+            content["due"] = time("due")
+        case "create_event":
+            let start = text("start").flatMap { LocalDateTime.parse($0, timeZone: timeZone) }
+            content = [
+                "status": "added", "title": .string(text("title") ?? ""), "calendar": "Calendar",
+                "all_day": .bool(input["all_day"]?.boolValue ?? (start.map { !$0.hasTime } ?? false)),
+            ]
+            content["start"] = time("start")
+            content["end"] = time("end") ?? start.map {
+                local($0.date.addingTimeInterval(TimeInterval((number("duration_minutes") ?? 60) * 60)), hasTime: $0.hasTime)
+            }
+        case "set_timer":
+            let seconds = number("seconds") ?? 0
+            content = ["status": "started", "id": "timer.benchmark", "seconds": .int(seconds), "ends": local(now.addingTimeInterval(TimeInterval(seconds)))]
+            content["label"] = text("label").map(JSONValue.string)
+        default:
+            return .error(ToolRunner.unknownToolMessage)
+        }
+        return .ok(.object(content))
     }
 }

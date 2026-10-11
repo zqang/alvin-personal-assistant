@@ -1,6 +1,6 @@
 import AssistantKit
 import Foundation
-import LocalEngine
+@testable import LocalEngine
 import LocalEngineTestSupport
 import MLX
 import MLXLMCommon
@@ -70,6 +70,7 @@ final class EngineAPITests: XCTestCase {
         XCTAssertEqual(calls.first?.name, "set_timer")
         XCTAssertEqual(calls.first?.input, ["seconds": 600])
         XCTAssertTrue(calls.first?.id.hasPrefix("call_") ?? false)
+        await assertBusy(engine.retryContinuation(toolChoice: .required), "no continuation to retry yet")
 
         let round = ToolRound(calls: calls.map { ToolCallRecord(call: $0, output: .ok(["ok": true], summary: "Timer 10 min")) })
         let second = try await EngineTestHarness.collect(engine.continueReply(after: round))
@@ -86,11 +87,28 @@ final class EngineAPITests: XCTestCase {
         XCTAssertEqual(recorded?.toolRounds, [round])
 
         // Nothing waits for results any more.
+        await assertBusy(engine.continueReply(after: round), "continueReply without pending calls")
+
+        // The continuation again: what it wrote leaves the cache and the reply first.
+        let again = try await EngineTestHarness.collect(engine.retryContinuation(toolChoice: .native))
+        XCTAssertEqual(EngineTestHarness.text(again), "Timer set.", "the same context replays its script")
+        XCTAssertEqual(EngineTestHarness.finish(again)?.stats.planReason, "retry")
+        XCTAssertEqual(EngineTestHarness.finish(again)?.stats.prefilledTokens, 1)
+        let retried = try await engine.withSession { $0.snapshot?.turns.last?.turn }
+        XCTAssertEqual(retried?.text, "Sure. Timer set.")
+        XCTAssertEqual(retried?.toolRounds, [round])
+        let report = try await engine.withSession { $0.assertConsistent() }
+        XCTAssertTrue(report.isConsistent(), "\(report)")
+    }
+
+    private func assertBusy(
+        _ events: AsyncThrowingStream<EngineEvent, Error>, _ label: String, file: StaticString = #filePath, line: UInt = #line
+    ) async {
         do {
-            _ = try await EngineTestHarness.collect(engine.continueReply(after: round))
-            XCTFail("continueReply without pending calls should throw")
+            _ = try await EngineTestHarness.collect(events)
+            XCTFail("\(label) should throw", file: file, line: line)
         } catch {
-            XCTAssertEqual(error as? EngineError, .busy)
+            XCTAssertEqual(error as? EngineError, .busy, label, file: file, line: line)
         }
     }
 
@@ -294,6 +312,186 @@ final class EngineAPITests: XCTestCase {
         let noReuse = try await engine.withSession { $0.noReuse }
         XCTAssertTrue(noReuse)
     }
+
+    // MARK: Tool choice and the call's opening
+
+    /// `.required` opens the reply with a tool call (Woof's xml-function format here): the name
+    /// is picked among the request's tools, the arguments decode freely, and the tool round's
+    /// continuation decides for itself. The cache holds exactly the call as written.
+    func testRequiredToolChoiceOpensACall() async throws {
+        for tiny in EngineTestHarness.Tiny.allCases {
+            let call = "<tool_call>\n<function=create_reminder>\n<parameter=title>\nparcel\n</parameter>\n</function>\n</tool_call>"
+            let (engine, target) = try EngineTestHarness.makeScriptedEngine(
+                tiny: tiny, scripts: [call, "Reminder set."].map(tokenizer.encodeRaw),
+                configuration: EngineTestHarness.testConfiguration(maxTokens: 256), toolCallFormat: .xmlFunction)
+            var required = request("Remind me about the parcel", tools: deviceTools)
+            required.toolChoice = .required
+            let first = try await EngineTestHarness.collect(engine.reply(required))
+            let kinds = EngineTestHarness.kinds(first)
+            XCTAssertEqual(
+                Array(kinds.prefix(5)),
+                ["responseStarted", "prefillDone", "firstToken", "toolCallStarted(nil)", "toolCallStarted(create_reminder)"], "\(tiny)")
+            XCTAssertEqual(Array(kinds.suffix(2)), ["toolCalls", "finished(toolCalls)"], "\(tiny)")
+            XCTAssertEqual(EngineTestHarness.text(first), "", "\(tiny)")
+            let calls = EngineTestHarness.toolCalls(first)
+            XCTAssertEqual(calls.map(\.name), ["create_reminder"], "\(tiny)")
+            XCTAssertEqual(calls.first?.input, ["title": "parcel"], "\(tiny)")
+            let stats = try XCTUnwrap(EngineTestHarness.finish(first)?.stats, "\(tiny)")
+            XCTAssertTrue(stats.forcedToolCall, "\(tiny)")
+            XCTAssertGreaterThan(stats.toolCallProbability ?? 0, 0.99, "\(tiny): the script's one-hot row")
+            XCTAssertEqual(stats.generatedTokens, tokenizer.encodeRaw(call).count, "\(tiny): the opening counts as generated")
+
+            let (ledger, replyStart) = try await engine.withSession { ($0.ledger, $0.snapshot?.turns.first?.replyStart) }
+            let start = try XCTUnwrap(replyStart, "\(tiny)")
+            XCTAssertEqual(tokenizer.decodeRaw(Array(ledger[start...])), call + "<|im_end|>", "\(tiny)")
+
+            let round = ToolRound(calls: calls.map { ToolCallRecord(call: $0, output: .ok(["ok": true], summary: "Reminder")) })
+            let second = try await EngineTestHarness.collect(engine.continueReply(after: round))
+            XCTAssertEqual(EngineTestHarness.text(second), "Reminder set.", "\(tiny): the continuation isn't forced")
+            let secondStats = try XCTUnwrap(EngineTestHarness.finish(second)?.stats, "\(tiny)")
+            XCTAssertFalse(secondStats.forcedToolCall, "\(tiny)")
+            XCTAssertNil(secondStats.toolCallProbability, "\(tiny)")
+            XCTAssertEqual(target.usedScripts, 2, "\(tiny)")
+            let report = try await engine.withSession { $0.assertConsistent() }
+            XCTAssertTrue(report.isConsistent(), "\(tiny): \(report)")
+        }
+    }
+
+    /// A model that would answer in text (a claim that it is done) still writes a call under
+    /// `.required`, to one of the request's tools, and the claim is never shown.
+    func testRequiredToolChoiceOverridesText() async throws {
+        let (engine, _) = try EngineTestHarness.makeScriptedEngine(
+            tiny: .qwen3, scripts: [tokenizer.encodeRaw("Done, your reminder is set.")], toolCallFormat: .xmlFunction)
+        var required = request("Remind me about the parcel", tools: deviceTools)
+        required.toolChoice = .required
+        let events = try await EngineTestHarness.collect(engine.reply(required))
+        XCTAssertEqual(EngineTestHarness.text(events), "")
+        let named = EngineTestHarness.kinds(events).filter { $0.hasPrefix("toolCallStarted(") && $0 != "toolCallStarted(nil)" }
+        XCTAssertEqual(named.count, 1, "\(named)")
+        XCTAssertTrue(deviceTools.contains { "toolCallStarted(\($0.name))" == named.first }, "\(named)")
+        let stats = try XCTUnwrap(EngineTestHarness.finish(events)?.stats)
+        XCTAssertTrue(stats.forcedToolCall)
+        XCTAssertLessThan(stats.toolCallProbability ?? 1, 0.01)
+        let report = try await engine.withSession { $0.assertConsistent() }
+        XCTAssertTrue(report.isConsistent(), "\(report)")
+    }
+
+    /// A call the model starts by itself (`.auto`) is also named among the request's tools: the
+    /// undeclared `launch` it begins to write can't be.
+    func testSampledCallIsNamedAmongTheTools() async throws {
+        let (engine, _) = try EngineTestHarness.makeScriptedEngine(
+            tiny: .qwen3, scripts: [tokenizer.encodeRaw("<tool_call>\n<function=launch>\n</function>\n</tool_call>")],
+            toolCallFormat: .xmlFunction)
+        let events = try await EngineTestHarness.collect(engine.reply(request("Launch it", tools: deviceTools)))
+        let named = EngineTestHarness.kinds(events).filter { $0.hasPrefix("toolCallStarted(") && $0 != "toolCallStarted(nil)" }
+        XCTAssertEqual(named.count, 1, "\(named)")
+        XCTAssertTrue(deviceTools.contains { "toolCallStarted(\($0.name))" == named.first }, "\(named)")
+        let stats = try XCTUnwrap(EngineTestHarness.finish(events)?.stats)
+        XCTAssertFalse(stats.forcedToolCall)
+        XCTAssertGreaterThan(stats.toolCallProbability ?? 0, 0.99)
+        let report = try await engine.withSession { $0.assertConsistent() }
+        XCTAssertTrue(report.isConsistent(), "\(report)")
+    }
+
+    /// `.native` leaves the call to the model, as before tool choice: nothing is forced or fed, so
+    /// the undeclared `launch` it writes keeps its name and the generator samples every token.
+    /// The probability of a call is still measured.
+    func testNativeToolChoiceLeavesTheCallToTheModel() async throws {
+        let script = "<tool_call>\n<function=launch>\n</function>\n</tool_call>"
+        let (engine, _) = try EngineTestHarness.makeScriptedEngine(
+            tiny: .hybrid, scripts: [tokenizer.encodeRaw(script)], toolCallFormat: .xmlFunction)
+        var native = request("Launch it", tools: deviceTools)
+        native.toolChoice = .native
+        let events = try await EngineTestHarness.collect(engine.reply(native))
+        let kinds = EngineTestHarness.kinds(events)
+        XCTAssertEqual(kinds.filter { $0.hasPrefix("toolCallStarted(") && $0 != "toolCallStarted(nil)" }, ["toolCallStarted(launch)"], "\(kinds)")
+        let stats = try XCTUnwrap(EngineTestHarness.finish(events)?.stats)
+        XCTAssertFalse(stats.forcedToolCall)
+        XCTAssertGreaterThan(stats.toolCallProbability ?? 0, 0.99)
+        XCTAssertEqual(stats.confidence?.tokens, tokenizer.encodeRaw(script).count + 1, "every token sampled by the generator")
+        let report = try await engine.withSession { $0.assertConsistent() }
+        XCTAssertTrue(report.isConsistent(), "\(report)")
+    }
+
+    /// `.requiredIfLikely` forces no call the model didn't consider: a text reply streams as with
+    /// `.auto`, its first token sampled by the generator as before.
+    func testLikelyToolChoiceLeavesATextReplyAlone() async throws {
+        let (engine, _) = try EngineTestHarness.makeScriptedEngine(
+            tiny: .hybrid, scripts: [tokenizer.encodeRaw("It is noon.")], toolCallFormat: .xmlFunction)
+        var likely = request("What time is it?", tools: deviceTools)
+        likely.toolChoice = .requiredIfLikely(0.05)
+        let events = try await EngineTestHarness.collect(engine.reply(likely))
+        XCTAssertEqual(EngineTestHarness.text(events), "It is noon.")
+        XCTAssertFalse(EngineTestHarness.kinds(events).contains { $0.hasPrefix("toolCallStarted") })
+        let stats = try XCTUnwrap(EngineTestHarness.finish(events)?.stats)
+        XCTAssertFalse(stats.forcedToolCall)
+        XCTAssertLessThan(stats.toolCallProbability ?? 1, 0.05)
+        XCTAssertEqual(stats.confidence?.tokens, "It is noon.".count + 1, "every token sampled by the generator")
+    }
+
+    /// A first token the engine samples itself (every token is kept, so the start token could
+    /// be) and finds to be text reaches the generator as that token: the seeded reply is the one
+    /// an engine that never opens calls (no one-token start tag in `.gemma`) samples.
+    func testSampledTextFirstTokenIsTheGeneratorsToo() async throws {
+        var configuration = EngineTestHarness.testConfiguration(maxTokens: 24)
+        configuration.temperature = 1
+        configuration.topP = 1
+        configuration.topK = 0
+        configuration.seed = 3
+        for tiny in EngineTestHarness.Tiny.allCases {
+            var replies: [[Int]] = []
+            for format in [ToolCallFormat.json, .gemma] {
+                // Unsharpened, so which key a position draws with shows in the reply.
+                let model = try EngineTestHarness.makeModel(tiny, sharpen: false)
+                let loaded = try EngineTestHarness.loadedModel(
+                    model, tokenizer: tokenizer, id: "tiny-first-token-\(tiny.rawValue)-\(format.rawValue)",
+                    modelType: EngineTestHarness.modelType(tiny), toolCallFormat: format)
+                let engine = InferenceEngine(loaded: loaded, configuration: configuration)
+                let events = try await EngineTestHarness.collect(engine.reply(request("Hello", tools: deviceTools)))
+                let stats = try XCTUnwrap(EngineTestHarness.finish(events)?.stats, "\(tiny) \(format)")
+                XCTAssertEqual(stats.toolCallProbability == nil, format == .gemma, "\(tiny) \(format)")
+                let (ledger, replyStart) = try await engine.withSession { ($0.ledger, $0.snapshot?.turns.first?.replyStart) }
+                let start = try XCTUnwrap(replyStart, "\(tiny) \(format)")
+                replies.append(Array(ledger[start...]))
+            }
+            XCTAssertNotEqual(replies[0].first, FakeChatMLTokenizer.toolCallStart, "\(tiny): pick a seed whose first token is text")
+            XCTAssertEqual(replies[0], replies[1], "\(tiny)")
+        }
+    }
+
+    /// A consumer that stops at the call's start (as the loop's early handoff does) leaves the
+    /// cache exact wherever the opening got to; the retry is planned as a replaced user turn and
+    /// writes the call.
+    func testStoppingAtTheCallsStartLeavesTheCacheExact() async throws {
+        for tiny in EngineTestHarness.Tiny.allCases {
+            let call = "<tool_call>\n<function=list_timers>\n<parameter=title>\nall\n</parameter>\n</function>\n</tool_call>"
+            let (engine, _) = try EngineTestHarness.makeScriptedEngine(
+                tiny: tiny, scripts: [tokenizer.encodeRaw(call)], configuration: EngineTestHarness.testConfiguration(maxTokens: 256),
+                toolCallFormat: .xmlFunction)
+            let timers = request("How long is left on my timer?", tools: deviceTools)
+            for try await event in engine.reply(timers) {
+                if case .progress(.toolCallStarted) = event { break }
+            }
+            await engine.waitUntilIdle()
+            let stopped = try await engine.withSession { $0.assertConsistent() }
+            XCTAssertTrue(stopped.isConsistent(), "\(tiny): \(stopped)")
+
+            let retried = try await EngineTestHarness.collect(engine.reply(timers))
+            XCTAssertEqual(EngineTestHarness.finish(retried)?.stats.planReason, "replaceLastUserTurn", "\(tiny)")
+            XCTAssertEqual(EngineTestHarness.toolCalls(retried).map(\.name), ["list_timers"], "\(tiny)")
+            let report = try await engine.withSession { $0.assertConsistent() }
+            XCTAssertTrue(report.isConsistent(), "\(tiny): \(report)")
+        }
+    }
+}
+
+/// Tools whose names share prefixes, as the on-device set's do.
+private var deviceTools: [ToolDefinition] {
+    ["create_event", "create_reminder", "list_reminders", "list_timers", "set_timer"].map {
+        ToolDefinition(
+            name: $0, description: "A device tool.",
+            inputSchema: ["type": "object", "properties": ["title": ["type": "string"]], "required": ["title"]])
+    }
 }
 
 enum EngineHarnessCheck {
@@ -467,5 +665,66 @@ final class TextStreamerTests: XCTestCase {
         XCTAssertTrue(streamer.insideToolCall)
         _ = streamer.append(tokenizer.encodeRaw(": \"x\", \"arguments\": {}}\n</tool_call>"))
         XCTAssertFalse(streamer.insideToolCall)
+    }
+
+    // MARK: A tool call's opening (the engine's selector)
+
+    func testToolChoiceForcesByItsFloor() {
+        XCTAssertFalse(ToolChoice.auto.forcesCall(probability: 1))
+        XCTAssertFalse(ToolChoice.native.forcesCall(probability: 1))
+        XCTAssertTrue(ToolChoice.required.forcesCall(probability: 0))
+        XCTAssertTrue(ToolChoice.requiredIfLikely(0.05).forcesCall(probability: 0.05))
+        XCTAssertFalse(ToolChoice.requiredIfLikely(0.05).forcesCall(probability: 0.049))
+    }
+
+    /// The openings stop right after the function's name in either format, and start with the
+    /// start token; a format without skeletons opens with the start token alone.
+    func testCallOpeningsEndAfterTheName() {
+        let start = FakeChatMLTokenizer.toolCallStart
+        let xml = InferenceEngine.callOpenings(tools: deviceTools, format: .xmlFunction, start: start, renderer: tokenizer)
+        XCTAssertEqual(xml.map(tokenizer.decodeRaw), deviceTools.map { "<tool_call>\n<function=\($0.name)>\n" })
+        XCTAssertTrue(xml.allSatisfy { $0.first == start })
+        let json = InferenceEngine.callOpenings(tools: deviceTools, format: .json, start: start, renderer: tokenizer)
+        XCTAssertEqual(json.map(tokenizer.decodeRaw), deviceTools.map { "<tool_call>\n{\"name\": \"\($0.name)\", \"arguments\":" })
+        XCTAssertEqual(InferenceEngine.callOpenings(tools: deviceTools, format: .gemma, start: start, renderer: tokenizer), [[start]])
+    }
+
+    /// The selector takes what the remaining openings share and asks only where they branch,
+    /// among the tokens that continue one of them; it ends with a whole opening.
+    func testSelectorAsksOnlyWhereTheNamesBranch() {
+        let openings = InferenceEngine.callOpenings(
+            tools: deviceTools, format: .xmlFunction, start: FakeChatMLTokenizer.toolCallStart, renderer: tokenizer)
+        let expected = [
+            "create_event": ["cls", "er"], "create_reminder": ["cls", "er"], "list_reminders": ["cls", "rt"],
+            "list_timers": ["cls", "rt"], "set_timer": ["cls"],
+        ]
+        for (target, tool) in zip(openings, deviceTools) {
+            var asked: [String] = []
+            let chosen = InferenceEngine.selectOpening(openings) { prefix, allowed in
+                XCTAssertEqual(prefix, Array(target.prefix(prefix.count)), tool.name)
+                asked.append(tokenizer.decodeRaw(allowed))
+                return target[prefix.count]
+            }
+            XCTAssertEqual(chosen, target, tool.name)
+            XCTAssertEqual(asked, expected[tool.name], tool.name)
+        }
+    }
+
+    /// The engine streams the opening it feeds like emitted tokens: the call starts at the start
+    /// token, its name is reported once the opening is in (before any argument), and the
+    /// arguments the model writes after it complete a call that parses.
+    func testStreamedOpeningThenArgumentsParse() {
+        let openings = InferenceEngine.callOpenings(
+            tools: deviceTools, format: .xmlFunction, start: FakeChatMLTokenizer.toolCallStart, renderer: tokenizer)
+        let opening = InferenceEngine.selectOpening(openings) { _, allowed in allowed[allowed.count - 1] }
+        let streamer = TextStreamer(tokenizer: tokenizer, renderer: tokenizer, format: .xmlFunction, tools: JSONBridge.templateTools(deviceTools))
+        XCTAssertEqual(streamer.append(Array(opening.prefix(1))), [.toolCallStarted(nil)])
+        XCTAssertEqual(streamer.append(Array(opening.dropFirst())), [.toolCallStarted("set_timer")])
+        XCTAssertTrue(streamer.insideToolCall)
+        XCTAssertEqual(streamer.append(tokenizer.encodeRaw("<parameter=title>\nTea\n</parameter>\n</function>\n</tool_call>")), [])
+        let (tail, calls) = streamer.finish()
+        XCTAssertEqual(tail, "")
+        XCTAssertEqual(calls.map(\.name), ["set_timer"])
+        XCTAssertEqual(calls.first?.input, ["title": "Tea"])
     }
 }

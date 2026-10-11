@@ -47,6 +47,9 @@ final class SessionRuntime {
         var pendingCalls: [PendingToolCall]?
         /// Whether this reply renders everything into an empty cache (no reuse).
         var fullRender = false
+        /// Where the last continuation began: the ledger's length after its tool results, and
+        /// the reply's text before it (`prepareRetry` goes back there).
+        var continuationStart: (position: Int, text: String)?
     }
 
     private(set) var reply: ReplyState?
@@ -338,6 +341,48 @@ final class SessionRuntime {
     /// Appends `round`'s results to the reply in progress (whose last generation asked for the
     /// tools) and the generation prompt that follows. Throws `busy` when no reply is waiting.
     func prepareContinuation(after round: ToolRound, isAllowed: () -> Bool) throws -> Prepared {
+        let prepared = try appendRound(round, isAllowed: isAllowed)
+        let text = reply?.text ?? ""
+        reply?.continuationStart = (session.ledger.count, text)
+        return prepared
+    }
+
+    /// Takes the reply back to where its last continuation began (the end of its tool results),
+    /// dropping what that continuation wrote, to decode it again. Throws `busy` unless the last
+    /// generation was a continuation that asked for no tools.
+    func prepareRetry(isAllowed: () -> Bool) throws -> Prepared {
+        guard var state = reply, state.pendingCalls == nil, let start = state.continuationStart,
+              start.position > 0, start.position <= session.ledger.count
+        else {
+            throw EngineError.busy
+        }
+        state.text = start.text
+        reply = state
+        guard session.reusable else {
+            let inProgress = ChatTurn(role: .assistant, text: "", toolRounds: state.rounds)
+            return try prepareFullRender(state.request, extra: inProgress, reason: "retry", isAllowed: isAllowed)
+        }
+        var phases = EnginePhaseTimes(start: "warm")
+        var clock = Date()
+        // The logits there come from feeding the last token before it again.
+        let last = session.ledger[start.position - 1]
+        let logits: MLXArray
+        do {
+            try session.rewind(to: start.position - 1, isAllowed: isAllowed)
+            phases.rewind = Date().timeIntervalSince(clock)
+            clock = Date()
+            logits = try prefill([last], marks: [], isAllowed: isAllowed)
+        } catch let interrupted as PrefillInterrupted {
+            // Keep the deepest cut of the conversation the ledger still holds.
+            session.snapshot = session.snapshot.flatMap { Self.snapshot(of: $0, describingAtMost: session.ledger.count, key: $0.prefixKey) }
+            throw interrupted
+        }
+        phases.prefill = Date().timeIntervalSince(clock)
+        recordReply(unanswered: false)
+        return Prepared(firstLogits: logits, reason: "retry", phases: phases, prefilledTokens: 1, reusedTokens: start.position - 1)
+    }
+
+    private func appendRound(_ round: ToolRound, isAllowed: () -> Bool) throws -> Prepared {
         guard var state = reply, state.pendingCalls != nil else {
             throw EngineError.busy
         }

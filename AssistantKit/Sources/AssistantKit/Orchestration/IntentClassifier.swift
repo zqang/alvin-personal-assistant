@@ -61,7 +61,7 @@ public struct IntentClassifier: Sendable {
     static let deviceActionPhrases = [
         "remind me", "reminder", "to-do", "todo", "calendar", "schedule", "meeting", "appointment",
         "what's on", "am i free", "timer", "alarm", "wake me",
-        "提醒", "日程", "日历", "会议", "计时", "闹钟", "定时",
+        "提醒", "日程", "日历", "会议", "开会", "安排", "待办", "计时", "闹钟", "定时",
     ]
 
     static let explicitDepthPhrases = [

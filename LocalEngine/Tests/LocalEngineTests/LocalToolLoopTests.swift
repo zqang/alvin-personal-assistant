@@ -7,7 +7,7 @@ import XCTest
 /// `LocalToolLoop` on the scripted tiny engines (plan WP31): the cue and activity come before a
 /// round; the results are appended to the cache, then the final text; the ledger stays exact
 /// across rounds; `handoff_to_cloud` is intercepted (early abort, offline, after text, not
-/// available); the plausibility guard; `maxRounds`; cancellation.
+/// available); the plausibility guard; the claim guard; `maxRounds`; cancellation.
 final class LocalToolLoopTests: XCTestCase {
     private let tokenizer = FakeChatMLTokenizer()
     private let system = "You are Alvin."
@@ -310,6 +310,377 @@ final class LocalToolLoopTests: XCTestCase {
         }
     }
 
+    // MARK: Claim guard
+
+    /// Asked for a reminder, the model says it is done without a call (Woof did, in Chinese, on
+    /// the phone). The claim is held back and dropped; the retry is required to call, and writes
+    /// the call in Woof's xml-function format; the round runs and its answer is shown.
+    func testClaimIsRetriedWithARequiredCall() async throws {
+        for tiny in EngineTestHarness.Tiny.allCases {
+            let callText = "<tool_call>\n<function=create_reminder>\n<parameter=title>\nparcel\n</parameter>\n</function>\n</tool_call>"
+            let (engine, target) = try EngineTestHarness.makeScriptedEngine(
+                tiny: tiny, scripts: scripts(["Done, I've set your reminder.", callText, "Reminder set."]),
+                configuration: EngineTestHarness.testConfiguration(maxTokens: 256), toolCallFormat: .xmlFunction)
+            let log = LoopToolLog()
+            let reports = LoopReports()
+            let fixture = makeLoop(engine, log: log)
+            let outcome = await collect(fixture.loop.run(request("Remind me to pick up the parcel.", fixture.runner), report: reports.add))
+            XCTAssertNil(outcome.error, "\(tiny): \(String(describing: outcome.error))")
+            XCTAssertEqual(
+                kinds(outcome.events), ["activity(Creating a reminder)", "toolRound", "activity(nil)", "text", "finished(completed)"], "\(tiny)")
+            XCTAssertEqual(text(outcome.events), "Reminder set.", "\(tiny): the claim is never shown")
+            XCTAssertEqual(log.runs.map(\.name), ["create_reminder"], "\(tiny)")
+            XCTAssertEqual(log.runs.first?.input["title"], "parcel", "\(tiny)")
+            XCTAssertEqual(target.usedScripts, 3, "\(tiny): the claim, the retry's call, the answer")
+            XCTAssertEqual(
+                outcome.events.filter { $0 == .progress(.firstToken) }.count, 2, "\(tiny): the first try's and the round's, not the retry's")
+
+            let report = try XCTUnwrap(reports.all.first, "\(tiny)")
+            XCTAssertEqual(report.claimRetries, 1, "\(tiny)")
+            XCTAssertEqual(report.rounds, 1, "\(tiny)")
+            // The dropped generation never finished, so the retry comes first.
+            XCTAssertEqual(report.generations.map(\.planReason), ["replaceLastUserTurn", "toolRound"], "\(tiny)")
+            XCTAssertEqual(report.generations.first?.forcedToolCall, true, "\(tiny)")
+            XCTAssertEqual(report.stats.claimRetries, 1, "\(tiny)")
+            XCTAssertTrue(report.stats.forcedToolCall, "\(tiny)")
+            XCTAssertLessThan(report.stats.toolCallProbability ?? 1, LocalToolLoop.likelyToolCallFloor, "\(tiny): the model wanted text")
+
+            // The cache holds the call, not the claim.
+            let (ledger, replyStart) = try await engine.withSession { ($0.ledger, $0.snapshot?.turns.first?.replyStart) }
+            let start = try XCTUnwrap(replyStart, "\(tiny)")
+            XCTAssertTrue(tokenizer.decodeRaw(Array(ledger[start...])).hasPrefix(callText + "<|im_end|>"), "\(tiny)")
+            try await assertConsistent(engine, "\(tiny)")
+        }
+    }
+
+    /// A short opener doesn't release the hold: the claim after "OK!" is still caught and retried.
+    func testClaimAfterAShortOpenerIsStillRetried() async throws {
+        let callText = "<tool_call>\n<function=create_reminder>\n<parameter=title>\nparcel\n</parameter>\n</function>\n</tool_call>"
+        let (engine, target) = try EngineTestHarness.makeScriptedEngine(
+            tiny: .qwen3, scripts: scripts(["OK! I've set your reminder.", callText, "Reminder set."]),
+            configuration: EngineTestHarness.testConfiguration(maxTokens: 256), toolCallFormat: .xmlFunction)
+        let log = LoopToolLog()
+        let fixture = makeLoop(engine, log: log)
+        let outcome = await collect(fixture.loop.run(request("Remind me to pick up the parcel.", fixture.runner)))
+        XCTAssertNil(outcome.error, String(describing: outcome.error))
+        XCTAssertEqual(text(outcome.events), "Reminder set.", "neither the opener nor the claim is shown")
+        XCTAssertEqual(log.runs.map(\.name), ["create_reminder"])
+        XCTAssertEqual(target.usedScripts, 3)
+        try await assertConsistent(engine, "opener")
+    }
+
+    func testShortOpenersDontEndTheFirstSentence() {
+        XCTAssertFalse(LocalToolLoop.endsFirstSentence("OK!"))
+        XCTAssertFalse(LocalToolLoop.endsFirstSentence("好的！"))
+        XCTAssertFalse(LocalToolLoop.endsFirstSentence("Sure. What"))
+        XCTAssertTrue(LocalToolLoop.endsFirstSentence("Sure. What time should I remind you?"))
+        XCTAssertTrue(LocalToolLoop.endsFirstSentence("好的！已经为你设置好了明天的提醒。"))
+        XCTAssertFalse(LocalToolLoop.endsFirstSentence("Which day"))
+    }
+
+    /// Held-back text that claims nothing goes out unchanged: at its first sentence end, or at
+    /// the end of a reply that has none. Nothing is retried.
+    func testTextThatClaimsNothingIsReleasedUnchanged() async throws {
+        for (tiny, reply) in [(EngineTestHarness.Tiny.qwen3, "Sure. What time should I remind you?"), (.hybrid, "Which day")] {
+            let (engine, target) = try scriptedEngine(tiny: tiny, scripts: scripts([reply]))
+            let log = LoopToolLog()
+            let reports = LoopReports()
+            let fixture = makeLoop(engine, log: log)
+            let outcome = await collect(fixture.loop.run(request("Remind me to call mum.", fixture.runner), report: reports.add))
+            XCTAssertNil(outcome.error, reply)
+            XCTAssertEqual(kinds(outcome.events), ["text", "finished(completed)"], reply)
+            XCTAssertEqual(text(outcome.events), reply)
+            XCTAssertTrue(log.runs.isEmpty, reply)
+            XCTAssertEqual(target.usedScripts, 1, reply)
+            XCTAssertEqual(reports.all.first?.claimRetries, 0, reply)
+            XCTAssertEqual(reports.all.first?.generations.count, 1, reply)
+            XCTAssertEqual(reports.all.first?.stats.forcedToolCall, false, reply)
+            XCTAssertNotNil(reports.all.first?.timeToFirstText, reply)
+            try await assertConsistent(engine, reply)
+        }
+    }
+
+    /// Only a device action with tools is guarded: a claim to anything else, without tools to
+    /// call, or in a request left to the model (`.native`), streams as the model wrote it.
+    func testUnguardedRequestsStreamAsBefore() async throws {
+        let claim = "Done, I've set your reminder."
+        let cases: [(String, Bool, ToolChoice)] = [
+            ("Tell me something nice.", true, .auto), ("Remind me to call mum.", false, .auto), ("Remind me to call mum.", true, .native),
+        ]
+        for (userText, offersTools, choice) in cases {
+            let label = "\(userText) (tools: \(offersTools), \(choice))"
+            let (engine, target) = try scriptedEngine(tiny: .qwen3, scripts: scripts([claim]))
+            let reports = LoopReports()
+            let fixture = makeLoop(engine, log: LoopToolLog())
+            let unguarded = EngineRequest(
+                system: system, tools: offersTools ? fixture.runner.definitions : [], turns: [ChatTurn(role: .user, text: userText)],
+                toolChoice: choice)
+            let outcome = await collect(fixture.loop.run(unguarded, report: reports.add))
+            XCTAssertNil(outcome.error, label)
+            XCTAssertEqual(kinds(outcome.events), ["text", "finished(completed)"], label)
+            XCTAssertEqual(text(outcome.events), claim, label)
+            XCTAssertEqual(target.usedScripts, 1, label)
+            XCTAssertEqual(reports.all.first?.claimRetries, 0, label)
+            XCTAssertEqual(reports.all.first?.stats.forcedToolCall, false, label)
+            try await assertConsistent(engine, label)
+        }
+    }
+
+    /// A retry that writes no call (here it replays the claim inside the forced call, which is
+    /// cut off) hands the request off when it can, else says in the user's language that it
+    /// couldn't be done. Nothing runs, and the claim is never shown: neither at its first
+    /// sentence end nor at the end of a reply that has none, whose statistics are kept.
+    func testClaimRetryWithoutACallHandsOffOrSaysSo() async throws {
+        let claim = "Done, I've set your reminder."
+        let (online, onlineTarget) = try scriptedEngine(tiny: .qwen3, scripts: scripts([claim]))
+        let onlineLog = LoopToolLog()
+        let onlineReports = LoopReports()
+        let handingOff = makeLoop(online, log: onlineLog)
+        let handedOff = await collect(handingOff.loop.run(request("Remind me to call mum.", handingOff.runner), report: onlineReports.add))
+        XCTAssertEqual(handedOff.error as? ReplyHandoff, ReplyHandoff(reason: LocalToolLoop.claimHandoffReason), "\(String(describing: handedOff.error))")
+        XCTAssertEqual(kinds(handedOff.events), [])
+        XCTAssertTrue(onlineLog.runs.isEmpty)
+        XCTAssertEqual(onlineTarget.usedScripts, 1)
+        XCTAssertEqual(onlineReports.all.first?.claimRetries, 1)
+        XCTAssertEqual(onlineReports.all.first?.handoffReason, LocalToolLoop.claimHandoffReason)
+        try await assertConsistent(online, "claim handed off")
+
+        let chinese = "提醒我明天早上八点去取快递。"
+        let (local, _) = try scriptedEngine(tiny: .hybrid, scripts: scripts(["Done, I've set your reminder"]))
+        let localLog = LoopToolLog()
+        let localReports = LoopReports()
+        let saying = makeLoop(local, log: localLog, handoffAvailable: false)
+        let said = await collect(saying.loop.run(request(chinese, saying.runner), report: localReports.add))
+        XCTAssertNil(said.error)
+        XCTAssertEqual(kinds(said.events), ["text", "finished(completed)"])
+        XCTAssertEqual(text(said.events), SuccessClaim.actionFailedMessage(for: chinese))
+        XCTAssertTrue(localLog.runs.isEmpty)
+        XCTAssertEqual(localReports.all.first?.claimRetries, 1)
+        // The claim finished before it was dropped, so its generation is kept; the retry follows.
+        XCTAssertEqual(localReports.all.first?.generations.map(\.forcedToolCall), [false, true])
+        try await assertConsistent(local, "claim answered locally")
+    }
+
+    // MARK: Claim guard after lookups
+
+    /// After a round that only looked something up, a device action's continuation opens with a
+    /// call the model gives at least `likelyToolCallFloor` (this one wrote it anyway), named among
+    /// the tools. After the side effect nothing is forced or held: the model confirming the
+    /// reminder is shown as written. A `.native` request is left to the model throughout; the
+    /// engine doesn't open its continuations at all.
+    func testContinuationAfterALookupOpensWithACall() async throws {
+        for choice in [ToolChoice.auto, .native] {
+            let label = "\(choice)"
+            let (engine, target) = try scriptedEngine(
+                tiny: .qwen3,
+                scripts: scripts([
+                    call("get_current_time", "{}"), call("create_reminder", "{\"title\": \"Call Sam\"}"), "Done, I've set your reminder.",
+                ]))
+            let log = LoopToolLog()
+            let reports = LoopReports()
+            let fixture = makeLoop(engine, log: log)
+            let reminder = EngineRequest(
+                system: system, tools: fixture.runner.definitions, turns: [ChatTurn(role: .user, text: "Remind me next Monday to call Sam.")],
+                toolChoice: choice)
+            let outcome = await collect(fixture.loop.run(reminder, report: reports.add))
+            XCTAssertNil(outcome.error, label)
+            XCTAssertEqual(
+                kinds(outcome.events),
+                [
+                    "cue(checking)", "activity(Checking the time)", "toolRound", "activity(Creating a reminder)", "toolRound", "activity(nil)",
+                    "text", "finished(completed)",
+                ],
+                label)
+            XCTAssertEqual(text(outcome.events), "Done, I've set your reminder.", label)
+            XCTAssertEqual(log.runs.map(\.name), ["get_current_time", "create_reminder"], label)
+            XCTAssertEqual(target.usedScripts, 3, label)
+
+            let report = try XCTUnwrap(reports.all.first, label)
+            let guided = choice == .auto
+            XCTAssertEqual(report.claimRetries, 0, label)
+            XCTAssertEqual(report.generations.map(\.forcedToolCall), [guided, guided, false], label)
+            XCTAssertEqual(report.generations.map { $0.toolCallProbability != nil }, [true, guided, false], "\(label): the generations the engine opened")
+            try await assertConsistent(engine, label)
+        }
+    }
+
+    /// Text shown before a lookup is all there is until the answer: a call (the continuation's,
+    /// or a retry's) ends a hold with nothing in it, which shows no (empty) text, leaves the
+    /// round's activity up until the next round's, and doesn't count as the retry's own text, so
+    /// a retry that writes no call still ends with the fallback sentence.
+    func testEmptyHoldAfterShownTextShowsNothing() async throws {
+        let opener = "Sure, let me look up the date first. "
+        let userText = "Remind me next Monday to call Sam."
+        let cases: [(continuation: [String], kinds: [String], answer: String, runs: [String])] = [
+            (
+                [call("create_reminder", "{\"title\": \"Call Sam\"}"), "Reminder set."],
+                ["activity(Creating a reminder)", "toolRound", "activity(nil)", "text", "finished(completed)"], "Reminder set.",
+                ["get_current_time", "create_reminder"]
+            ),
+            (
+                ["Done, I've set your reminder."], ["activity(nil)", "text", "finished(completed)"],
+                SuccessClaim.actionFailedMessage(for: userText), ["get_current_time"]
+            ),
+        ]
+        for (continuation, expectedKinds, answer, runs) in cases {
+            let (engine, _) = try scriptedEngine(tiny: .qwen3, scripts: scripts([opener + call("get_current_time", "{}")] + continuation))
+            let log = LoopToolLog()
+            let fixture = makeLoop(engine, log: log)
+            let outcome = await collect(fixture.loop.run(request(userText, fixture.runner)))
+            XCTAssertNil(outcome.error, "\(answer): \(String(describing: outcome.error))")
+            XCTAssertEqual(kinds(outcome.events), ["text", "cue(checking)", "activity(Checking the time)", "toolRound"] + expectedKinds, answer)
+            XCTAssertFalse(outcome.events.contains(.reply(.text(""))), answer)
+            XCTAssertEqual(text(outcome.events), opener + answer)
+            XCTAssertEqual(log.runs.map(\.name), runs, answer)
+            try await assertConsistent(engine, answer)
+        }
+    }
+
+    /// After looking up the time for "next Monday", the continuation claims the reminder is set
+    /// without a call (Woof did so for a meeting, on the phone). The claim is held back and
+    /// dropped, and the continuation is decoded again from the end of the round's results with a
+    /// required call; the reminder is created and its answer shown. The cache and the recorded
+    /// reply hold only what was shown, so the next request extends them.
+    func testClaimAfterALookupIsRetriedFromTheRoundsResults() async throws {
+        for tiny in EngineTestHarness.Tiny.allCases {
+            let (engine, target) = try scriptedEngine(
+                tiny: tiny,
+                scripts: scripts([
+                    call("get_current_time", "{}"), "Done, I've set your reminder.", call("create_reminder", "{\"title\": \"Call Sam\"}"),
+                    "Reminder set.", "You're welcome.",
+                ]))
+            let log = LoopToolLog()
+            let reports = LoopReports()
+            let fixture = makeLoop(engine, log: log)
+            let userTurn = ChatTurn(role: .user, text: "Remind me next Monday to call Sam.")
+            let outcome = await collect(
+                fixture.loop.run(EngineRequest(system: system, tools: fixture.runner.definitions, turns: [userTurn]), report: reports.add))
+            XCTAssertNil(outcome.error, "\(tiny): \(String(describing: outcome.error))")
+            XCTAssertEqual(
+                kinds(outcome.events),
+                [
+                    "cue(checking)", "activity(Checking the time)", "toolRound", "activity(Creating a reminder)", "toolRound", "activity(nil)",
+                    "text", "finished(completed)",
+                ],
+                "\(tiny)")
+            XCTAssertEqual(text(outcome.events), "Reminder set.", "\(tiny): the claim is never shown")
+            XCTAssertEqual(log.runs.map(\.name), ["get_current_time", "create_reminder"], "\(tiny)")
+            XCTAssertEqual(target.usedScripts, 4, "\(tiny): the lookup, the claim, the retry's call, the answer")
+            XCTAssertEqual(outcome.events.filter { $0 == .progress(.firstToken) }.count, 3, "\(tiny): not the retry's")
+
+            let report = try XCTUnwrap(reports.all.first, "\(tiny)")
+            XCTAssertEqual(report.claimRetries, 1, "\(tiny)")
+            XCTAssertEqual(report.rounds, 2, "\(tiny)")
+            // The dropped continuation never finished; the retry took its place.
+            XCTAssertEqual(report.generations.map(\.planReason), ["newSession", "retry", "toolRound"], "\(tiny)")
+            XCTAssertEqual(report.generations.map(\.forcedToolCall), [true, true, false], "\(tiny)")
+
+            let ledger = try await engine.withSession { $0.ledger }
+            XCTAssertFalse(tokenizer.decodeRaw(ledger).contains("I've set your"), "\(tiny): the claim left the cache")
+            try await assertConsistent(engine, "\(tiny)")
+
+            // The reply as the app stores it: its text and both rounds.
+            let reply = ChatTurn(role: .assistant, text: text(outcome.events), toolRounds: rounds(outcome.events))
+            let nextReports = LoopReports()
+            let next = await collect(
+                fixture.loop.run(
+                    EngineRequest(
+                        system: system, tools: fixture.runner.definitions, turns: [userTurn, reply, ChatTurn(role: .user, text: "Thanks.")]),
+                    report: nextReports.add))
+            XCTAssertNil(next.error, "\(tiny)")
+            XCTAssertEqual(text(next.events), "You're welcome.", "\(tiny)")
+            XCTAssertEqual(nextReports.all.first?.generations.first?.planReason, "append", "\(tiny)")
+            try await assertConsistent(engine, "\(tiny) after the next turn")
+        }
+    }
+
+    /// A continuation retry that writes no call (it replays the claim inside the forced call,
+    /// which is cut off) ends with the fallback sentence: the reply has run a round, so it can't
+    /// be handed off. The engine wrote something else, so the next request rebuilds (`diverged`).
+    func testClaimAfterALookupWhoseRetryWritesNoCallSaysSo() async throws {
+        let userTurn = ChatTurn(role: .user, text: "Remind me next Monday to call Sam.")
+        let (engine, target) = try scriptedEngine(
+            tiny: .hybrid, scripts: scripts([call("get_current_time", "{}"), "Done, I've set your reminder."]))
+        let log = LoopToolLog()
+        let reports = LoopReports()
+        let fixture = makeLoop(engine, log: log)
+        let outcome = await collect(
+            fixture.loop.run(EngineRequest(system: system, tools: fixture.runner.definitions, turns: [userTurn]), report: reports.add))
+        XCTAssertNil(outcome.error, String(describing: outcome.error))
+        XCTAssertEqual(
+            kinds(outcome.events), ["cue(checking)", "activity(Checking the time)", "toolRound", "activity(nil)", "text", "finished(completed)"])
+        XCTAssertEqual(text(outcome.events), SuccessClaim.actionFailedMessage(for: userTurn.text))
+        XCTAssertEqual(log.runs.map(\.name), ["get_current_time"])
+        XCTAssertEqual(target.usedScripts, 2)
+        XCTAssertEqual(reports.all.first?.claimRetries, 1)
+        XCTAssertNil(reports.all.first?.handoffReason)
+        try await assertConsistent(engine, "fallback")
+
+        target.append(scripts: scripts(["You're welcome."]))
+        let reply = ChatTurn(role: .assistant, text: text(outcome.events), toolRounds: rounds(outcome.events))
+        let nextReports = LoopReports()
+        let next = await collect(
+            fixture.loop.run(
+                EngineRequest(system: system, tools: fixture.runner.definitions, turns: [userTurn, reply, ChatTurn(role: .user, text: "Thanks.")]),
+                report: nextReports.add))
+        XCTAssertNil(next.error)
+        XCTAssertEqual(text(next.events), "You're welcome.")
+        XCTAssertEqual(nextReports.all.first?.generations.first?.planReason, "diverged")
+        try await assertConsistent(engine, "after the fallback")
+    }
+
+    /// After a lookup that answers a question (not the time), the answer goes out as written:
+    /// "Your reminder is set for 5 pm" reads as a claim, but forcing a call here could create
+    /// something nobody asked for.
+    func testAnswerAfterAListLookupIsNeitherForcedNorRetried() async throws {
+        let answer = "Your reminder is set for 5 pm."
+        let (engine, target) = try scriptedEngine(
+            tiny: .qwen3, scripts: scripts([call("list_reminders", "{\"scope\": \"today\"}"), answer]))
+        let log = LoopToolLog()
+        let reports = LoopReports()
+        let fixture = makeLoop(engine, log: log)
+        let outcome = await collect(fixture.loop.run(request("Which of my reminders are due today?", fixture.runner), report: reports.add))
+        XCTAssertNil(outcome.error)
+        XCTAssertEqual(text(outcome.events), answer)
+        XCTAssertEqual(log.runs.map(\.name), ["list_reminders"])
+        XCTAssertEqual(target.usedScripts, 2)
+        XCTAssertEqual(reports.all.first?.claimRetries, 0)
+        XCTAssertEqual(reports.all.first?.generations.last?.forcedToolCall, false)
+        try await assertConsistent(engine, "list lookup")
+    }
+
+    /// The guard after a lookup acts only while it can: with no round left (a call couldn't
+    /// run), or once the run has retried, the continuation is neither forced nor held, and its
+    /// text goes out as written; so it does in a request left to the model (`.native`).
+    func testContinuationGuardNeedsARoundAndARetryLeft() async throws {
+        let claim = "Done, I've set your reminder."
+        let cases: [(label: String, texts: [String], maxRounds: Int, retries: Int, choice: ToolChoice)] = [
+            ("no round left", [call("get_current_time", "{}"), claim], 1, 0, .auto),
+            ("retried already", [claim, call("get_current_time", "{}"), claim], 3, 1, .auto),
+            ("native", [call("get_current_time", "{}"), claim], 3, 0, .native),
+        ]
+        for (label, texts, maxRounds, retries, choice) in cases {
+            let (engine, target) = try scriptedEngine(tiny: .qwen3, scripts: scripts(texts))
+            let log = LoopToolLog()
+            let reports = LoopReports()
+            let fixture = makeLoop(engine, log: log, maxRounds: maxRounds)
+            let reminder = EngineRequest(
+                system: system, tools: fixture.runner.definitions, turns: [ChatTurn(role: .user, text: "Remind me next Monday to call Sam.")],
+                toolChoice: choice)
+            let outcome = await collect(fixture.loop.run(reminder, report: reports.add))
+            XCTAssertNil(outcome.error, label)
+            XCTAssertEqual(
+                kinds(outcome.events), ["cue(checking)", "activity(Checking the time)", "toolRound", "activity(nil)", "text", "finished(completed)"],
+                label)
+            XCTAssertEqual(text(outcome.events), claim, label)
+            XCTAssertEqual(log.runs.map(\.name), ["get_current_time"], label)
+            XCTAssertEqual(target.usedScripts, texts.count, label)
+            XCTAssertEqual(reports.all.first?.claimRetries, retries, label)
+            XCTAssertEqual(reports.all.first?.generations.last?.forcedToolCall, false, label)
+            try await assertConsistent(engine, label)
+        }
+    }
+
     // MARK: Limits and endings
 
     func testMaxRoundsEndsWithToolLimit() async throws {
@@ -445,9 +816,12 @@ final class LocalToolLoopTests: XCTestCase {
     }
 
     /// The events other than progress marks, as short names, consecutive texts merged:
-    /// `text`, `activity(…)`, `cue(…)`, `toolRound`, `finished(…)`.
+    /// `text`, `activity(…)`, `cue(…)`, `toolRound`, `finished(…)`. The claim guard's hold
+    /// activity, which shows only when a hold lasts, is left out with the `activity(nil)` that
+    /// clears it.
     private func kinds(_ events: [AssistantEvent]) -> [String] {
         var kinds: [String] = []
+        var holdShown = false
         for event in events {
             let kind: String
             switch event {
@@ -465,6 +839,14 @@ final class LocalToolLoopTests: XCTestCase {
                 kind = "toolRound"
             case .routed:
                 kind = "routed"
+            }
+            if kind == "activity(\(LocalToolLoop.holdActivity))" {
+                holdShown = true
+                continue
+            }
+            if holdShown {
+                holdShown = false
+                if kind == "activity(nil)" { continue }
             }
             if kind == "text", kinds.last == "text" { continue }
             kinds.append(kind)
@@ -618,7 +1000,7 @@ final class LocalToolLoopLogicTests: XCTestCase {
             timeToFirstText: 0.1, promptTokens: 30, promptTime: 0.05, generatedTokens: 10, generateTime: 0.25, reusedSession: true,
             peakMemoryBytes: 3_000, engine: "alvin", prefilledTokens: 30, reusedTokens: 520, planReason: "toolRound",
             speculation: SpeculationStats(rounds: 1, plainTokens: 2, drafted: ["seeds": 4], accepted: ["seeds": 4], tokensPerRound: [3: 1, 5: 1]),
-            confidence: TokenConfidence(meanTop1: 0.6, p10Top1: 0.3, tokens: 10))
+            confidence: TokenConfidence(meanTop1: 0.6, p10Top1: 0.3, tokens: 10), toolCallProbability: 0.9, forcedToolCall: true)
 
         let combined = LocalToolLoop.combine([first, second], timeToFirstText: 1.2)
         XCTAssertEqual(combined.timeToFirstText, 1.2)
@@ -642,6 +1024,10 @@ final class LocalToolLoopLogicTests: XCTestCase {
         XCTAssertEqual(combined.confidence?.tokens, 30)
         XCTAssertEqual(combined.confidence?.meanTop1 ?? 0, 0.8, accuracy: 1e-9)
         XCTAssertEqual(combined.confidence?.p10Top1, 0.3)
+        XCTAssertNil(combined.toolCallProbability, "the first generation's")
+        XCTAssertTrue(combined.forcedToolCall, "a forced call in any generation")
+        XCTAssertEqual(combined.claimRetries, 0)
+        XCTAssertEqual(LocalToolLoop.Report(generations: [first, second], claimRetries: 1).stats.claimRetries, 1)
 
         XCTAssertNil(LocalToolLoop.combine([first], timeToFirstText: nil).timeToFirstText)
         let empty = LocalToolLoop.combine([], timeToFirstText: nil)
@@ -653,7 +1039,8 @@ final class LocalToolLoopLogicTests: XCTestCase {
 // MARK: - Test tools
 
 /// The tools the loop tests offer: `get_current_time` and `list_reminders` (read-only, with the
-/// `.checking` cue) and `set_timer` (a side effect, no cue), shaped like the app's (plan §5.3).
+/// `.checking` cue), `set_timer` and `create_reminder` (side effects, no cue), shaped like the
+/// app's (plan §5.3).
 enum LoopTools {
     static func make(log: LoopToolLog, onRun: (@Sendable () async -> Void)?) -> [any AssistantTool] {
         [
@@ -683,6 +1070,14 @@ enum LoopTools {
                     ]),
                 effect: .sideEffect, presentation: ToolPresentation(activity: "Starting a timer", cue: nil), log: log, onRun: onRun,
                 output: { input in .ok(["id": "timer-1", "seconds": input["seconds"] ?? .null], summary: "Timer") }),
+            LoopTool(
+                definition: ToolDefinition(
+                    name: "create_reminder", description: "Adds a reminder.",
+                    inputSchema: [
+                        "type": "object", "properties": ["title": ["type": "string"]], "required": ["title"], "additionalProperties": false,
+                    ]),
+                effect: .sideEffect, presentation: ToolPresentation(activity: "Creating a reminder", cue: nil), log: log, onRun: onRun,
+                output: { input in .ok(["id": "reminder-1", "title": input["title"] ?? .null], summary: "Reminder") }),
         ]
     }
 }

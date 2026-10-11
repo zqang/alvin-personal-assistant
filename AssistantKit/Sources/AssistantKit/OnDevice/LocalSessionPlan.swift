@@ -4,9 +4,10 @@ import Foundation
 /// it, the way Husky avoids re-reading a conversation it has already processed.
 ///
 /// A cached session holds the system prompt and every turn it has seen, including the replies it
-/// generated. When a request is exactly that history plus one new user turn, only the new turn
-/// needs a prefill. Anything else (an interrupted or edited reply, another conversation, a
-/// changed system prompt, a history past `maxTurns`) rebuilds from the last `keepTurns` turns.
+/// generated: the whole conversation, or the window it was last rebuilt from and the turns since.
+/// When a request ends with exactly those turns plus one new user turn, only the new turn needs a
+/// prefill. Anything else (an interrupted or edited reply, another conversation, a changed system
+/// prompt, a session holding `maxTurns` turns) rebuilds from the last `keepTurns` turns.
 public struct LocalSessionPlan: Equatable, Sendable {
     public enum Action: Equatable, Sendable {
         /// Append `newTurn` to the cached session.
@@ -34,13 +35,14 @@ public struct LocalSessionPlan: Equatable, Sendable {
         keepTurns: Int = keepTurns
     ) -> LocalSessionPlan? {
         guard let last = turns.last, last.role == .user else { return nil }
+        let earlier = turns.dropLast()
         if let cachedTurns, cachedSystem == system,
-           turns.count == cachedTurns.count + 1, turns.count <= maxTurns,
-           zip(cachedTurns, turns).allSatisfy(sameTurn)
+           cachedTurns.count < maxTurns, earlier.count >= cachedTurns.count,
+           zip(cachedTurns, earlier.suffix(cachedTurns.count)).allSatisfy(sameTurn)
         {
             return LocalSessionPlan(action: .append, newTurn: last)
         }
-        var history = Array(turns.dropLast().suffix(max(0, keepTurns - 1)))
+        var history = Array(earlier.suffix(max(0, keepTurns - 1)))
         // Start on a user turn, as the chat template expects.
         while history.first?.role == .assistant { history.removeFirst() }
         return LocalSessionPlan(action: .rebuild(history: history), newTurn: last)

@@ -14,7 +14,7 @@ public enum HandoffTool {
 
     public static let definition = ToolDefinition(
         name: name,
-        description: "Hand this request to the more capable cloud assistant, which sees the whole conversation. Call this first, instead of answering or calling another tool, when the request needs the internet (news, weather, prices, scores, opening hours), asks about something none of your other tools can read or do (for example how long a timer has left, when your tools can only start timers), or needs long, careful reasoning. Never call another tool as a stand-in for a request it doesn't fit.",
+        description: "Hand this request to the more capable cloud assistant, which sees the whole conversation. Call this first, instead of answering or calling another tool, when the request needs the internet (news, weather, prices, scores, opening hours), asks about something none of your other tools can read or do (for example cancelling a timer, when your tools can only start and list timers), or needs long, careful reasoning. Never call another tool as a stand-in for a request it doesn't fit.",
         inputSchema: [
             "type": "object",
             "properties": [

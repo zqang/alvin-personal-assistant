@@ -57,6 +57,37 @@ final class LocalSessionPlanTests: XCTestCase {
         XCTAssertEqual(plan.newTurn.text, "q5")
     }
 
+    func testLongChatAppendsAgainAfterRebuildingOnce() throws {
+        // As LocalModelHost keeps it: the session holds what it was primed with, then each turn and reply.
+        var cached: [ChatTurn]?
+        var turns: [ChatTurn] = []
+        var rebuiltAt: [Int] = []
+        for index in 0..<15 {
+            turns.append(user("q\(index)"))
+            let plan = try XCTUnwrap(LocalSessionPlan.make(cachedSystem: system, cachedTurns: cached, system: system, turns: turns))
+            var held = cached ?? []
+            if case .rebuild(let history) = plan.action {
+                held = history
+                rebuiltAt.append(turns.count)
+            }
+            turns.append(assistant("a\(index)"))
+            cached = held + [plan.newTurn, assistant("a\(index)")]
+        }
+        // The first turn, then once past `maxTurns`; the 30-turn chat keeps a 16-turn session.
+        XCTAssertEqual(rebuiltAt, [1, 25])
+        XCTAssertEqual(cached?.count, 16)
+
+        // An edit inside the session's window, or another conversation, still rebuilds.
+        var edited = turns
+        edited[26] = user("q13 again")
+        edited.append(user("q15"))
+        let other = (0..<15).flatMap { [user("o\($0)"), assistant("b\($0)")] } + [user("o15")]
+        for request in [edited, other] {
+            let plan = try XCTUnwrap(LocalSessionPlan.make(cachedSystem: system, cachedTurns: cached, system: system, turns: request))
+            XCTAssertNotEqual(plan.action, .append)
+        }
+    }
+
     func testRequestNotEndingWithUserIsRejected() {
         XCTAssertNil(LocalSessionPlan.make(cachedSystem: nil, cachedTurns: nil, system: system, turns: [user("Hi"), assistant("Hello")]))
         XCTAssertNil(LocalSessionPlan.make(cachedSystem: nil, cachedTurns: nil, system: system, turns: []))
@@ -333,16 +364,85 @@ final class ToolExpectationTests: XCTestCase {
         let expectation = ToolExpectation(name: "create_reminder", arguments: ["title": "call mum", "due": "2026-10-07T17:00"])
         XCTAssertEqual(
             expectation.score(name: "create_reminder", arguments: ["title": "Call mum", "due": "2026-10-07T17:00:00", "notes": "x"]),
-            ToolScore(nameMatches: true, argumentsMatch: true, argumentResults: ["title": true, "due": true])
+            ToolScore(expectedName: "create_reminder", nameMatches: true, argumentsMatch: true, argumentResults: ["title": true, "due": true])
         )
         XCTAssertEqual(
             expectation.score(name: "create_reminder", arguments: ["title": "Call mum"]),
-            ToolScore(nameMatches: true, argumentsMatch: false, argumentResults: ["title": true, "due": false])
+            ToolScore(expectedName: "create_reminder", nameMatches: true, argumentsMatch: false, argumentResults: ["title": true, "due": false])
         )
         let wrongTool = expectation.score(name: "create_event", arguments: ["title": "Call mum", "due": "2026-10-07T17:00"])
         XCTAssertFalse(wrongTool.nameMatches)
         XCTAssertFalse(wrongTool.argumentsMatch)
-        XCTAssertEqual(expectation.score(name: nil, arguments: nil), ToolScore(nameMatches: false, argumentsMatch: false))
-        XCTAssertEqual(ToolExpectation(name: "list_timers").score(name: "list_timers", arguments: [:]), ToolScore(nameMatches: true, argumentsMatch: true))
+        XCTAssertEqual(expectation.score(name: nil, arguments: nil), ToolScore(expectedName: "create_reminder", nameMatches: false, argumentsMatch: false))
+        XCTAssertEqual(
+            ToolExpectation(name: "list_timers").score(name: "list_timers", arguments: [:]),
+            ToolScore(expectedName: "list_timers", nameMatches: true, argumentsMatch: true)
+        )
+    }
+
+    /// A turn's calls in every round count: the expected tool after a lookup passes the name, and
+    /// its first call's arguments are scored; without it, the first call is.
+    func testScoreOfATurnsCalls() {
+        let expectation = ToolExpectation(name: "create_event", arguments: ["title": "王经理", "start": "2026-10-12T10:00"])
+        func record(_ name: String, _ input: JSONValue) -> ToolCallRecord {
+            ToolCallRecord(id: name, name: name, input: input, result: "{}")
+        }
+        let time = record("get_current_time", [:])
+        let event = record("create_event", ["title": "和王经理开会", "start": "2026-10-12T10:00:00"])
+        let again = record("create_event", ["title": "会议", "start": "2026-10-13T10:00"])
+        XCTAssertEqual(
+            expectation.score(calls: [time, event, again]),
+            ToolScore(expectedName: "create_event", nameMatches: true, argumentsMatch: true, argumentResults: ["title": true, "start": true])
+        )
+        XCTAssertEqual(expectation.score(calls: [time]), expectation.score(name: "get_current_time", arguments: [:]))
+        XCTAssertFalse(expectation.score(calls: [time]).nameMatches)
+        XCTAssertEqual(expectation.score(calls: []), expectation.score(name: nil, arguments: nil))
+    }
+}
+
+final class BenchmarkToolResultTests: XCTestCase {
+    private let singapore = TimeZone(identifier: "Asia/Singapore")!
+
+    func testTimeOfTheContextTag() throws {
+        let time = try XCTUnwrap(LocalBenchmark.time(ofContext: LocalBenchmark.labSpokenContext))
+        XCTAssertEqual(time.timeZone, singapore)
+        XCTAssertEqual(LocalDateTime.format(time.date, timeZone: singapore), "2026-10-07T16:05")
+        let tagged = PromptBuilder.contextTag(
+            for: StoredMessage(role: .user, text: "Hi", createdAt: time.date, isVoice: false),
+            formatter: PromptBuilder.contextDateFormatter(timeZone: singapore), timeZone: singapore, afterInterruption: true)
+        XCTAssertEqual(LocalBenchmark.time(ofContext: tagged)?.date, time.date, tagged)
+        XCTAssertNil(LocalBenchmark.time(ofContext: LocalBenchmark.spokenContext))
+        XCTAssertNil(LocalBenchmark.time(ofContext: "<context>time: someday Mars/Olympus; input: typed</context>"))
+    }
+
+    /// Believable results in the app's shapes, so the model carries on as after a real call.
+    func testResultsHaveTheToolsShapes() throws {
+        let now = try XCTUnwrap(LocalDateTime.parse("2026-10-07T16:05", timeZone: singapore)).date
+        func result(_ name: String, _ input: JSONValue) -> JSONValue {
+            let output = LocalBenchmark.toolResult(for: PendingToolCall(id: "1", name: name, input: input), now: now, timeZone: singapore)
+            XCTAssertFalse(output.isError, name)
+            return output.content
+        }
+        XCTAssertEqual(
+            result("list_events", ["start": "2026-10-08T00:00:00", "end": "2026-10-09"]),
+            ["from": "2026-10-08T00:00", "to": "2026-10-09", "count": 0, "events": []])
+        XCTAssertEqual(result("list_reminders", ["scope": "Overdue"]), ["scope": "overdue", "count": 0, "reminders": []])
+        XCTAssertEqual(result("list_timers", [:]), ["count": 0, "timers": []])
+        XCTAssertEqual(
+            result("create_reminder", ["title": "Call mum", "due": "2026-10-07T17:00:00"]),
+            ["status": "added", "id": "benchmark", "title": "Call mum", "list": "Reminders", "due": "2026-10-07T17:00"])
+        XCTAssertEqual(
+            result("create_event", ["title": "王经理", "start": "2026-10-12T10:00", "duration_minutes": "30"]),
+            ["status": "added", "title": "王经理", "start": "2026-10-12T10:00", "end": "2026-10-12T10:30", "all_day": false, "calendar": "Calendar"])
+        XCTAssertEqual(
+            result("create_event", ["title": "Holiday", "start": "2026-10-12"]),
+            ["status": "added", "title": "Holiday", "start": "2026-10-12", "end": "2026-10-12", "all_day": true, "calendar": "Calendar"])
+        XCTAssertEqual(
+            result("set_timer", ["seconds": "600", "label": "Pasta"]),
+            ["status": "started", "id": "timer.benchmark", "seconds": 600, "ends": "2026-10-07T16:15", "label": "Pasta"])
+        // A tool the benchmark doesn't offer: the app's error, not a success to build on.
+        XCTAssertEqual(
+            LocalBenchmark.toolResult(for: PendingToolCall(id: "1", name: "launch", input: [:]), now: now, timeZone: singapore),
+            .error(ToolRunner.unknownToolMessage))
     }
 }

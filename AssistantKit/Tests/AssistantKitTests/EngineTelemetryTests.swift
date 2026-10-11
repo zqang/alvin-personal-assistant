@@ -70,30 +70,96 @@ final class EngineTelemetryTests: XCTestCase {
         )
         let stock = LocalGenerationStats(timeToFirstText: 0.9, promptTokens: 860, promptTime: 0.8, generatedTokens: 40, generateTime: 2, engine: "stock")
         let rows = [
-            LocalBenchmark.Row(prompt: "Hi", reply: "Hello", stats: engine),
-            LocalBenchmark.Row(prompt: "Hi", reply: "Hello", stats: stock),
+            LocalBenchmark.Row(prompt: "Hi", reply: "Hello", stats: engine, thermal: .nominal),
+            LocalBenchmark.Row(prompt: "Hi", reply: "Hello", stats: stock, thermal: .serious, lowPowerMode: true),
             LocalBenchmark.Row(prompt: "Old", reply: "Row", stats: LocalGenerationStats()),
         ]
-        let report = LocalBenchmark.report(model: "Woof", device: "iPhone17,1", speculative: "automatic", loadTime: nil, rows: rows, scenario: "Continued chat")
+        let report = LocalBenchmark.report(model: "Woof", device: "iPhone17,1", speculative: "automatic", loadTime: 1, rows: rows, scenario: "Continued chat")
         XCTAssertTrue(report.contains("Scenario: Continued chat"))
-        XCTAssertTrue(report.contains("turn | first text s | prefill tok (tok/s) | gen tok/s | draft accept | cache | peak GB | engine | plan | prefilled/reused | tok/round | acc%"))
-        XCTAssertTrue(report.contains("1 | 0.12 | 48 (600) | 40.0 | – | reused | 2.60 | alvin | append | 48/812 | 2.50 | 38%"), report)
-        XCTAssertTrue(report.contains("2 | 0.90 | 860 (1075) | 20.0 | – | rebuilt | – | stock | – | – | – | –"), report)
-        XCTAssertTrue(report.contains("3 | – | 0 (–) | – | – | rebuilt | – | – | – | – | – | –"), report)
+        XCTAssertTrue(report.contains("turn | first text s | prefill tok (tok/s) | gen tok/s | draft accept | cache | peak GB | engine | plan | prefilled/reused | tok/round | acc% | thermal\n"))
+        XCTAssertTrue(report.contains("1 | 0.12 | 48 (600) | 40.0 | – | reused | 2.60 | alvin | append | 48/812 | 2.50 | 38% | nominal\n"), report)
+        XCTAssertTrue(report.contains("2 | 0.90 | 860 (1075) | 20.0 | – | rebuilt | – | stock | – | – | – | – | serious\n"), report)
+        XCTAssertTrue(report.contains("3 | – | 0 (–) | – | – | rebuilt | – | – | – | – | – | – | –\n"), report)
+        XCTAssertTrue(report.contains("Load time: 1.0 s\nLow Power Mode: on\n"), report)
         XCTAssertFalse(report.contains("Tool calls:"))
+        XCTAssertFalse(report.contains("   tool:"))
     }
 
     func testReportSummarizesToolScores() {
         let expectation = ToolExpectation(name: "set_timer", arguments: ["seconds": 600])
+        func row(_ prompt: String, reply: String = "", _ calls: [ToolCallRecord], stats: LocalGenerationStats = LocalGenerationStats(), scored: Bool = true) -> LocalBenchmark.Row {
+            LocalBenchmark.Row(prompt: prompt, reply: reply, stats: stats, toolScore: scored ? expectation.score(calls: calls) : nil, calls: calls)
+        }
         let rows = [
-            LocalBenchmark.Row(prompt: "Timer", reply: "", stats: LocalGenerationStats(), toolScore: expectation.score(name: "set_timer", arguments: ["seconds": 600])),
-            LocalBenchmark.Row(prompt: "Timer", reply: "", stats: LocalGenerationStats(), toolScore: expectation.score(name: "set_timer", arguments: ["seconds": 60])),
-            LocalBenchmark.Row(prompt: "Timer", reply: "Sure", stats: LocalGenerationStats(), toolScore: expectation.score(name: nil, arguments: nil)),
-            LocalBenchmark.Row(prompt: "Chat", reply: "Hi", stats: LocalGenerationStats()),
+            row("Timer", [call("set_timer", ["seconds": 600])], stats: LocalGenerationStats(toolCallProbability: 0.984)),
+            row("Timer", [call("set_timer", ["seconds": 60])]),
+            row("Timer", reply: "Sure", [], stats: LocalGenerationStats(toolCallProbability: 0.004, claimRetries: 1)),
+            // The expected call after a lookup, in a later round, passes.
+            row("Timer", [call("get_current_time", [:]), call("set_timer", ["seconds": "600"])], stats: LocalGenerationStats(forcedToolCall: true)),
+            // A turn without an expectation shows its calls unscored; one without calls shows none.
+            row("Read it back", reply: "Eggs", [call("list_reminders", ["scope": "all"])], stats: LocalGenerationStats(toolCallProbability: 0.6), scored: false),
+            row("Chat", reply: "Hi", [], scored: false),
         ]
         let report = LocalBenchmark.report(model: "Woof", device: "Mac", speculative: "off", loadTime: nil, rows: rows)
-        XCTAssertTrue(report.contains("\n\nTool calls: name 2/3, arguments 1/3\n"), report)
+        XCTAssertTrue(report.contains("\n\nTool calls: name 3/4, arguments 2/4\n"), report)
         XCTAssertFalse(report.contains("Scenario:"))
+        XCTAssertFalse(report.contains("Low Power Mode"))
+        // Each scored turn says what it called, under its reply.
+        XCTAssertTrue(report.contains("1. Timer\n   → \n   tool: set_timer {seconds: 600} — name ✓, args ✓ · P(tool) 0.98\n"), report)
+        XCTAssertTrue(report.contains("2. Timer\n   → \n   tool: set_timer {seconds: 60} — name ✓, args ✗ (seconds)\n"), report)
+        XCTAssertTrue(report.contains("3. Timer\n   → Sure\n   tool: none — expected set_timer · P(tool) 0.00, retried\n"), report)
+        XCTAssertTrue(report.contains("4. Timer\n   → \n   tool: get_current_time → set_timer {seconds: 600} — name ✓, args ✓ · forced\n"), report)
+        XCTAssertTrue(report.contains("5. Read it back\n   → Eggs\n   tool: list_reminders {scope: all} · P(tool) 0.60\n"), report)
+        XCTAssertTrue(report.hasSuffix("6. Chat\n   → Hi"), report)
+    }
+
+    func testToolLine() {
+        let expectation = ToolExpectation(name: "create_event", arguments: ["title": "dentist", "start": "2026-10-09T15:00"])
+        func line(_ expectation: ToolExpectation, _ calls: [ToolCallRecord], stats: LocalGenerationStats = LocalGenerationStats()) -> String {
+            LocalBenchmark.toolLine(calls: calls, score: expectation.score(calls: calls), stats: stats)
+        }
+        let long = String(repeating: "x", count: 40)
+        XCTAssertEqual(
+            line(expectation, [call("create_event", ["title": .string(long), "start": "2026-10-10T15:00", "all_day": false])]),
+            "create_event {all_day: false, start: 2026-10-10T15:00, title: \(String(repeating: "x", count: 32))…} — name ✓, args ✗ (start, title)"
+        )
+        XCTAssertEqual(
+            line(expectation, [call("create_reminder", ["title": "dentist"])]),
+            "create_reminder {title: dentist} — name ✗ (expected create_event)"
+        )
+        XCTAssertEqual(line(ToolExpectation(name: "list_timers"), [call("list_timers", [:])]), "list_timers — name ✓, args ✓")
+        // The whole sequence, with the expected call scored wherever it is.
+        XCTAssertEqual(
+            line(
+                ToolExpectation(name: "create_event", arguments: ["title": "王经理", "start": "2026-10-12T10:00"]),
+                [call("get_current_time", [:]), call("create_event", ["start": "2026-10-12T10:00:00", "title": "和王经理开会"])],
+                stats: LocalGenerationStats(toolCallProbability: 0.77, forcedToolCall: true)),
+            "get_current_time → create_event {start: 2026-10-12T10:00:00, title: 和王经理开会} — name ✓, args ✓ · P(tool) 0.77, forced"
+        )
+        XCTAssertEqual(
+            line(expectation, [call("get_current_time", [:]), call("list_events", ["start": "2026-10-09"])]),
+            "get_current_time → list_events {start: 2026-10-09} — name ✗ (expected create_event)"
+        )
+        // What the engine measured: the model's own odds of a call, and whether forcing or the
+        // claim retry made it.
+        let reminder = ToolExpectation(name: "create_reminder", arguments: ["title": "parcel"])
+        XCTAssertEqual(
+            line(reminder, [call("create_reminder", ["title": "parcel"])], stats: LocalGenerationStats(toolCallProbability: 0.031, forcedToolCall: true, claimRetries: 1)),
+            "create_reminder {title: parcel} — name ✓, args ✓ · P(tool) 0.03, forced, retried"
+        )
+        XCTAssertEqual(
+            line(reminder, [call("create_event", [:])], stats: LocalGenerationStats(forcedToolCall: true)),
+            "create_event — name ✗ (expected create_reminder) · forced"
+        )
+        // Unscored: the calls alone.
+        XCTAssertEqual(
+            LocalBenchmark.toolLine(calls: [call("get_current_time", [:]), call("set_timer", ["seconds": 60])], score: nil),
+            "get_current_time → set_timer {seconds: 60}"
+        )
+    }
+
+    private func call(_ name: String, _ input: JSONValue) -> ToolCallRecord {
+        ToolCallRecord(id: "call_\(name)", name: name, input: input, result: "{\"ok\":true}")
     }
 
     func testPrefilledReusedColumn() {

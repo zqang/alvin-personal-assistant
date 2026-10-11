@@ -31,10 +31,11 @@ public final class ExemplarDrafter: Drafter {
     /// Whether the drafter has any skeleton.
     public var isEmpty: Bool { seeds.sequences.isEmpty }
 
-    /// The skeleton texts of `tools` in `format`, in tool order.
-    public static func skeletons(tools: [ToolDefinition], format: ToolCallFormat) -> [String] {
+    /// The skeleton texts of `tools` in `format`, in tool order. Without `withParameter` they stop
+    /// before the arguments (the engine's tool-call openings).
+    public static func skeletons(tools: [ToolDefinition], format: ToolCallFormat, withParameter: Bool = true) -> [String] {
         tools.compactMap { tool in
-            let parameter = firstRequiredParameter(tool.inputSchema)
+            let parameter = withParameter ? firstRequiredParameter(tool.inputSchema) : nil
             switch format {
             case .xmlFunction:
                 var text = "<tool_call>\n<function=\(tool.name)>\n"

@@ -128,12 +128,44 @@ public struct EngineRequest: Sendable {
     public var maxTokens: Int? = nil
     /// Decode greedily whatever the configured temperature (self-test, benchmarks).
     public var greedy = false
+    /// Whether the reply must open with a tool call. Applies to the reply's first generation
+    /// only: a tool-round continuation takes its own (`InferenceEngine.continueReply`).
+    public var toolChoice: ToolChoice = .auto
 
-    public init(system: String, tools: [ToolDefinition] = [], turns: [ChatTurn], maxTokens: Int? = nil, greedy: Bool = false) {
+    public init(
+        system: String, tools: [ToolDefinition] = [], turns: [ChatTurn], maxTokens: Int? = nil, greedy: Bool = false,
+        toolChoice: ToolChoice = .auto
+    ) {
         self.system = system
         self.tools = tools
         self.turns = turns
         self.maxTokens = maxTokens
         self.greedy = greedy
+        self.toolChoice = toolChoice
+    }
+}
+
+/// Whether a reply to a request with tools must open with a tool call. The engine decides the
+/// reply's first token by it; a call's function name is then picked among the request's tools.
+public enum ToolChoice: Sendable, Equatable {
+    /// The model decides.
+    case auto
+    /// Always a tool call.
+    case required
+    /// A tool call when the model gives the call's start token at least this probability at the
+    /// first position (raw softmax, before temperature and top-p): one it considered at all.
+    case requiredIfLikely(Double)
+    /// The model decides the first token and writes any function name itself, unconstrained (the
+    /// engine before tool choice; a continuation's default; the benchmark's "native" modes).
+    /// `LocalToolLoop` adds no claim guard to such a request.
+    case native
+
+    /// Whether the reply must open with a call when the model gives one `probability`.
+    func forcesCall(probability: Double) -> Bool {
+        switch self {
+        case .auto, .native: return false
+        case .required: return true
+        case .requiredIfLikely(let floor): return probability >= floor
+        }
     }
 }

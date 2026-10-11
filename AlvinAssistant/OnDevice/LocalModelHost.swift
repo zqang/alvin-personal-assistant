@@ -389,8 +389,12 @@ final class LocalModelHost {
             try checkStillWanted()
 
             let needed = option.approximateBytes + (wanted.draft ? option.draftApproximateBytes : 0) + Self.memoryMargin
-            guard os_proc_available_memory() > needed else {
-                return fail("Not enough free memory for \(option.displayName) right now. Close other apps, turn off Qwen3-ASR listening, or pick a smaller model.")
+            // The app's own iOS limit minus what it holds, not the phone's free memory: closing
+            // other apps doesn't raise it (the increased-memory-limit entitlement does).
+            let available = os_proc_available_memory()
+            guard available > needed else {
+                let gb = { (bytes: Int) in String(format: "%.1f GB", Double(bytes) / 1e9) }
+                return fail("Not enough memory for \(option.displayName): it needs \(gb(needed)) and the app has \(gb(available)) left. Turn off Qwen3-ASR listening or pick a smaller model.")
             }
             status = .loading(1)
             let started = ContinuousClock.now
@@ -887,12 +891,21 @@ final class LocalModelHost {
 
     // MARK: - Replies
 
+    /// How an engine reply leaves tool calls to the model; the benchmark's "Compare tool modes"
+    /// plays each.
+    enum ToolMode: String, CaseIterable {
+        /// The app's: the claim guard, forced call openings and the name selector.
+        case guided
+        /// The model alone (`ToolChoice.native`, no claim guard), with the same system prompt.
+        case native
+    }
+
     /// Streams a reply to the last user turn and returns the visible text and measurements.
     ///
     /// - With the engine (see `usesEngine`): `LocalToolLoop` over the engine, with `tools` (none
     ///   when nil), `handoff_to_cloud` per `handoffAvailable`, side effects waiting on
-    ///   `commitGate`, and `PromptBuilder.localSystemPrompt(base: system, …)` as the system prompt.
-    ///   Events: the engine's progress marks, text, cues, activity, tool rounds, then
+    ///   `commitGate`, and `PromptBuilder.localSystemPrompt(base: system, …)` as the system prompt,
+    ///   per `toolMode`. Events: the engine's progress marks, text, cues, activity, tool rounds, then
     ///   `.reply(.finished)`. Throws `ReplyHandoff` when the model hands the request to the cloud
     ///   before showing anything.
     /// - With the stock session: no tools; only `.reply` events and progress marks.
@@ -904,6 +917,7 @@ final class LocalModelHost {
         tools: (any ToolExecutor)? = nil,
         handoffAvailable: Bool = false,
         commitGate: CommitGate? = nil,
+        toolMode: ToolMode = .guided,
         emit: (AssistantEvent) -> Void
     ) async throws -> (text: String, stats: LocalGenerationStats) {
         let requested = ContinuousClock.now
@@ -935,7 +949,7 @@ final class LocalModelHost {
         do {
             return try await respondWithEngine(
                 engine, system: system, turns: turns, tools: tools, handoffAvailable: handoffAvailable,
-                commitGate: commitGate, requested: requested, emit: emit)
+                commitGate: commitGate, toolMode: toolMode, requested: requested, emit: emit)
         } catch let failure as EngineFailure {
             // Nothing was decoded yet: answer this reply with the stock session over the same
             // model, and let the engine start its session over.
@@ -958,13 +972,15 @@ final class LocalModelHost {
         tools: (any ToolExecutor)?,
         handoffAvailable: Bool,
         commitGate: CommitGate?,
+        toolMode: ToolMode,
         requested: ContinuousClock.Instant,
         emit: (AssistantEvent) -> Void
     ) async throws -> (text: String, stats: LocalGenerationStats) {
         let request = EngineRequest(
             system: PromptBuilder.localSystemPrompt(base: system, handoffAvailable: handoffAvailable),
             tools: tools?.definitions ?? [],
-            turns: turns
+            turns: turns,
+            toolChoice: toolMode == .guided ? .auto : .native
         )
         let online = Self.isOnline()
         let loop = LocalToolLoop(
@@ -1025,7 +1041,8 @@ final class LocalModelHost {
         requested: ContinuousClock.Instant,
         emit: (AssistantEvent) -> Void
     ) async throws -> (text: String, stats: LocalGenerationStats) {
-        guard var plan = LocalSessionPlan.make(cachedSystem: sessionSystem, cachedTurns: sessionTurns, system: system, turns: turns) else {
+        let cachedTurns = sessionTurns
+        guard var plan = LocalSessionPlan.make(cachedSystem: sessionSystem, cachedTurns: cachedTurns, system: system, turns: turns) else {
             throw AssistantError.invalidResponse("There's no question to answer.")
         }
         // The session runs outside the engine's queue: let any engine job (a prewarm that has
@@ -1047,11 +1064,15 @@ final class LocalModelHost {
         }
         let source: StockSource
         var speculation: SpeculativeDecodingConfig?
+        // The turns the session holds before the new one: a rebuilt session only its window.
+        let held: [ChatTurn]
         if plan.action == .append, let cached = session {
             source = .session(cached, prompt: prompt)
+            held = cachedTurns ?? []
         } else {
             let history: [ChatTurn]
             if case .rebuild(let turns) = plan.action { history = turns } else { history = [] }
+            held = history
             // What a ChatSession built from this history would render. The system prompt goes in
             // as the first history message, which the session reads once; as `instructions` it
             // would be prefilled again before every turn (F1).
@@ -1142,7 +1163,7 @@ final class LocalModelHost {
                         additionalContext: Self.chatContext
                     )
                 }
-                sessionTurns = turns + [ChatTurn(role: .assistant, text: text)]
+                sessionTurns = held + [plan.newTurn, ChatTurn(role: .assistant, text: text)]
             }
             emit(.reply(.finished(.completed)))
         case .length:
