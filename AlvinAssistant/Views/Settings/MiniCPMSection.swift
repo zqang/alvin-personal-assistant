@@ -60,8 +60,9 @@ struct AccurateOnDeviceSection: View {
         }
         let fallback = LocalModelCatalog.option(for: store.settings.localModelID)?.displayName ?? "the on-device model"
         let size = ByteCountFormatter.string(fromByteCount: MiniCPM35BArtifacts.totalBytes, countStyle: .file)
-        // The speed figures are estimates until the iPhone runs D21–D24 (architecture plan §11).
-        let text = "MiniCPM-V 4.7 35B is a much larger model than \(fallback) and may handle harder questions better, but it's slower: its first words take 2–5 s, then about 5–6 tokens a second, and in a long conversation, every few replies, it first re-reads the latest turns, which can take a minute. It warms the iPhone, so \(fallback) answers instead when it's hot or in Low Power Mode, and always handles reminders, calendar and timers. Photos are still read by the photo reader. The download is about \(size), over Wi-Fi only; keep the app open while it downloads, and finished files are kept if you leave."
+        // Measured on an iPhone 17 Pro Max: speed in D22 and D23, the file check in D21 (architecture
+        // plan §11). Heat and battery (D24) are still to be measured.
+        let text = "MiniCPM-V 4.7 35B is a much larger model than \(fallback) and may handle harder questions better, but it's much slower. In a chat its first words take about 5 s, longer for a long message. In voice mode it starts speaking about 7–9 s after you finish, and up to about 12 s after you interrupt it. It then writes about 6 tokens a second. Its very first answer, and the first after you change your name or instructions, can take about 25 s. After a photo, and every few replies in a long conversation, it re-reads the conversation first, which can take a minute or more. It warms the iPhone, so \(fallback) answers instead when it's hot or in Low Power Mode, and always handles reminders, calendar and timers. Photos are still read by the photo reader. The download is about \(size), over Wi-Fi only; keep the app open while it downloads, and finished files are kept if you leave. Checking them afterwards takes about 10 s."
         return fallbackDownloaded ? text : "Download \(fallback) first: it answers whenever the 35B can't. " + text
     }
 }

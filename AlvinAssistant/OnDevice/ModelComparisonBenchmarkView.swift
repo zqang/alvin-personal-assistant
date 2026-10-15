@@ -327,7 +327,7 @@ final class ModelComparisonBenchmarkRunner {
         let methodology: String
         let runKind: String
         let requestedArms: [MiniCPMArm]
-        let preparationPolicy = "Before every block: reclaim model memory for up to 10 seconds, requiring idle footprint <= max(startup+256 MB, 512 MB); then wait up to 120 seconds for nominal thermal state. Preparation is outside load/reply timings. Both backends use the same policy, and a model counts as released only once its engine is gone and the footprint is back under the same ceiling."
+        let preparationPolicy = "Before every block: reclaim model memory for up to 300 seconds (the 35B's later releases took 2-90+ s on the iPhone, D20), requiring idle footprint <= max(startup+256 MB, 512 MB); then wait up to 120 seconds for nominal thermal state. Preparation is outside load/reply timings. Both backends use the same policy, and a model counts as released only once its engine is gone and the footprint is back under the same ceiling."
         let nativeRuntimeCommit = "96bbf61710d44421ea54e63f5194f9b17c20d877"
         let nativeRuntimePatches = ["minicpm-metal-worker-autorelease-v1": "60c9974a467c716eda01b1f22e5839f7d1b01ea27e7ee7cab1079349b27c505a"]
         var status = Status.running
@@ -594,7 +594,7 @@ final class ModelComparisonBenchmarkRunner {
     private func prepareBlock(index: Int) async throws {
         let started = ContinuousClock.now
         export?.blocks[index - 1].footprintBeforePreparation = ProcessMemory.now.footprint
-        for _ in 0..<100 {
+        for _ in 0..<3000 {
             try checkForeground()
             await Task.detached {
                 autoreleasepool {
@@ -609,7 +609,7 @@ final class ModelComparisonBenchmarkRunner {
             try await Task.sleep(for: .milliseconds(100))
         }
         guard ProcessMemory.now.footprint <= idleCeiling else {
-            throw ComparisonError.message("The previous model's process memory did not retire within 10 seconds; the next model was not loaded.")
+            throw ComparisonError.message("The previous model's process memory did not retire within 300 seconds; the next model was not loaded.")
         }
         let cooling = ContinuousClock.now
         while ProcessInfo.processInfo.thermalState != .nominal && Self.seconds(cooling.duration(to: .now)) < 120 {
@@ -827,12 +827,13 @@ final class ModelComparisonBenchmarkRunner {
 
     /// Whether both models are gone: their objects deinitialized, MLX's buffers back to the
     /// baseline, and the process footprint, which holds the native runtime's Metal buffers, back
-    /// under `idleCeiling`. Waits up to 10 seconds.
+    /// under `idleCeiling`. Waits up to 300 seconds: on the iPhone the 35B's memory often
+    /// stays counted for 2–90+ s after a later unload in a process (D20, D22).
     private func releaseModels() async -> Bool {
         weak let retiringEngine = engine
         weak let retiringNative = native
         await detachModels()
-        for attempt in 0..<100 {
+        for attempt in 0..<3000 {
             let memory = await Task.detached {
                 autoreleasepool {
                     Stream.gpu.synchronize()
@@ -846,7 +847,7 @@ final class ModelComparisonBenchmarkRunner {
             let released = retiringEngine == nil && retiringNative == nil
                 && memory.active <= mlxMemoryBaseline + 64_000_000 && memory.cached <= 64_000_000
                 && process.footprint <= idleCeiling
-            if released || attempt == 0 || attempt == 99 {
+            if released || attempt == 0 || attempt == 2999 {
                 Self.log("Model release: engineReleased=\(retiringEngine == nil), nativeReleased=\(retiringNative == nil), MLX active=\(memory.active / 1_000_000) MB, cached=\(memory.cached / 1_000_000) MB, footprint=\(process.footprint / 1_000_000) MB, resident=\(process.resident / 1_000_000) MB, available=\(os_proc_available_memory() / 1_000_000) MB.")
             }
             if released { return true }

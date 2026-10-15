@@ -50,14 +50,19 @@ public struct MiniCPMRuntimeConfiguration: Codable, Equatable, Sendable {
     public static let threads4 = Self(name: "threads4", checkpointLayerInterval: 4, draftMaximum: 3, expertCacheSize: 48, directGreedy: true, cpuThreads: 4)
     public static let profiles: [Self] = [.baseline, .checkpoints4, .cache48, .balanced, .checkpoints8, .draft2, .cache64, .io1, .io8, .threads4]
 
-    /// What the app runs the 35B with: target-only, with the measured `baseline` execution, until
-    /// the device ABBA run (D22) adopts DSpark `baseline` or `balanced` (decision 13). A fresh
-    /// install can't download the draft yet.
+    /// What the app runs the 35B with: target-only, with the measured `baseline` execution. The
+    /// device ABBA run (D22) kept it: neither DSpark profile met decision 13 (first text 3.5–4.2 %
+    /// slower, Swift decode −4.1 % or +6.9 % against the +10 % bar, peak resident 5.2–6.0 GB against
+    /// 4.5 GB). So the draft isn't hosted and its manifest entry keeps no `sourceURL`: a fresh
+    /// install never downloads it, and a draft already on the phone stays unused.
     public static let production: (configuration: MiniCPMRuntimeConfiguration, useDraft: Bool) = (.baseline, false)
 
     /// The native runtime this package links: llama.cpp-omni's commit and the first 8 hex digits of
     /// the local patch's SHA-256 (`scripts/prepare_minicpm.sh`). A prefix file another runtime wrote
     /// never loads. Change it with the `llama` binary target.
+    // ponytail: the patch (Metal autorelease pools) made no difference on the iPhone (D20 A/B,
+    // p = 0.82); drop it with the next runtime release, which needs a new asset, tag and checksum
+    // (owner gate G1).
     public static let runtimeRevision = "96bbf61710d44421ea54e63f5194f9b17c20d877-p60c9974a"
 }
 
@@ -673,9 +678,10 @@ public actor MiniCPMSession {
                 if needsPrefixSave, position == systemEnd {
                     // ponytail: writes the prefix (about 73 MB for the 35B, plus a buffer of that size
                     // at its memory peak) on the reply's path, once per system prompt and only when no
-                    // prewarm saved it. D23 times a cold first reply with and without the file; if it
-                    // costs, save after the reply from the slot-0 checkpoint and the attention cells
-                    // below `systemEnd` (a token-count variant of minicpm_prefix_save).
+                    // prewarm saved it. On the iPhone the write took 48–175 ms (D19) and a cold reply
+                    // without the file 22.8–27.2 s to first audio, mostly the system prefill (D23). If
+                    // the write ever costs, save after the reply from the slot-0 checkpoint and the
+                    // attention cells below `systemEnd` (a token-count variant of minicpm_prefix_save).
                     savePrefix(handle, to: prefixFile)
                 }
             }

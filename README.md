@@ -103,8 +103,9 @@ Tips:
   minute of audio. If it fails, the app falls back to the built-in voice.
 - The simulator can run the app, but voice mode needs a real iPhone for the microphone and echo cancellation.
   The MiniCPM-V models don't load on the simulator.
-- The app always embeds the MiniCPM-V runtime, whether or not you download a MiniCPM model. The framework is
-  about 9.6 MB uncompressed; its installed size on a phone hasn't been measured yet (pending D14).
+- The app always embeds the MiniCPM-V runtime, whether or not you download a MiniCPM model. It makes the
+  installed app about 10.8 MB larger (the framework is 9.75 MB of that) and the download about 3.8 MB larger
+  (measured on an iPhone 17 Pro Max, D14).
 - **On-device replies** download 1.5–2.7 GB the first time (Wi-Fi only) and run only while the app is open. Run
   the benchmark from a **Release** build and copy the results. Qwen3-ASR listening loads after the reply model
   and gives way to it if memory is short.
@@ -135,8 +136,8 @@ The result streams in under the thumbnail as **What the iPhone read**.
 - **Getting it.** Go to **Settings › Photo reading › Download**. It's about 1.8 GB over Wi-Fi, and the files
   are kept for later. The photo and camera buttons appear only once the download is finished. Delete it in
   the same place to get the space back.
-- **Speed.** Not measured yet (pending D16). The target is a complete reading within 6 s for a typical
-  photo (p50).
+- **Speed.** On an iPhone 17 Pro Max a reading is complete in about 2.6–2.9 s (median; p90 about 3.5 s).
+  The first photo after the app starts takes about 4.6 s, because that includes loading the model (D16).
 - **Limits.**
   - It's a small model. It can misread text, and although it's asked to write "unclear" rather than guess,
     it may still guess.
@@ -166,32 +167,37 @@ much slower than Woof and warms the phone. It's a much larger model and may hand
   - about 15.5 GB of storage, plus 1 GB free.
 
   The download is Wi-Fi only, and the app has to stay open while it runs. Files that have finished are
-  kept if you leave the app. Delete them in the same section.
+  kept if you leave the app, and checking them afterwards takes about 10 s. Delete them in the same section.
+- **Speed.** In a chat its first words take about 5 s for a short message, longer for a long one. In voice
+  mode it starts speaking about 7–9 s after you finish, and up to about 12 s after you interrupt it. Then it
+  writes about 6 tokens a second. The very first answer, and the first after you change your name or
+  instructions, can take about 25 s.
 - **Engine.** It runs a second, prebuilt runtime, llama.cpp-omni. The model keeps the conversation in its
-  cache between turns and keeps the system prompt on disk, so each reply reads only the new text. A
-  conversation that outgrows the model's 4,096-token context is rebuilt from its latest turns every few
-  replies, and that reply starts much later (pending D23).
+  cache between turns and keeps the system prompt on disk, so each reply reads only the new text. After a
+  photo it reads the whole conversation again, which took 28–114 s in testing, because the photo reader needs
+  its memory. A conversation that outgrows the model's 4,096-token context is rebuilt from its latest turns
+  every few replies, and that reply starts much later (not measured yet).
 
-What was measured so far comes from runs `7C253525` and `75E359AD`; [the evaluation](docs/minicpm-evaluation.md)
-has the details. Those runs started each prompt fresh, with no reuse and no system prompt. The production
-settings haven't been measured yet.
+These are the production settings, measured on an iPhone 17 Pro Max on 15–16 October 2026 (D22 and D23).
+Times are taken where the app receives the text; [the evaluation](docs/minicpm-evaluation.md) has the
+details.
 
 | | Woof 4B | MiniCPM-V 35B-A3B |
 |---|---|---|
-| 24 small bilingual tasks | 22/24 | 24/24. The gap is two arithmetic items and is **not significant** (p = 0.5) |
-| First text, prompt of about 20 tokens | 0.26–0.50 s | 2.35 s, rising by about 40 ms per extra prompt token (4.97 s at 99 tokens) |
-| Decode speed | about 23–24 tok/s | 5.58 tok/s. OpenBMB quotes 13+ tok/s, and the gap is unexplained |
-| Memory | 2.6–2.9 GB, weights included | 3.1–3.65 GB, **plus** about 2.2 GiB of memory-mapped weights that this figure leaves out |
-| Heat | 8 of 40 prompts started at `serious` (its last block ran after the 35B's) | 21 of 40 prompts started at `serious` |
-| First words in voice, battery use, production profile | — | pending (D22–D24) |
+| 24 small bilingual tasks | 22/24 | 24/24 in every run. The gap is two arithmetic items and is **not significant** (p = 0.5) |
+| First text, short benchmark prompt | 0.16 s | 2.30 s (p90 2.44 s) |
+| First text, prompt of about 500 / 1,000 / 2,000 tokens | 1.1 / 2.2 / 4.2 s | 20–24 / 40–47 / 83–94 s: about 40 ms per prompt token |
+| First text, next turn of a conversation | 0.26 s | 4.9 s |
+| Decode speed | about 23–24 tok/s | 5.9 tok/s. OpenBMB quotes 13+ tok/s, and the gap is unexplained |
+| First audio in voice mode | 1.5 s after you stop speaking ([D8](docs/architecture-plan-on-device-and-orchestration.md#11-device-checklist)) | 7.5 s after the request (p90 8.5 s), about 8.6 s after you stop speaking; 9.3 s after a barge-in (p90 11.8 s) |
+| Memory | 2.6–2.9 GB, weights included | 2.78 GB, **plus** 1.65 GB of memory-mapped weights that this figure leaves out (4.41 GB resident) |
+| Heat and battery | — | Every benchmark run ended at `serious`. Battery use is not measured yet (D24) |
 
-These times were taken in different places. The 35B's first-text times were measured inside the old
-bridge, which handed text to Swift only when the whole reply had finished (a median of 10.2 s). Woof's times
-were measured where the app receives the text. The new bridge streams text as it's generated. The 35B's
-default profile runs without the DSpark draft model until D22 shows that the draft helps on the phone. A
-3-prompt pilot of the `balanced` profile hasn't shown that it's faster where it matters: its first text was
-no better, and it used 3.65 GB instead of 2.70 GB. The runtime carries a small Metal patch that adds
-autorelease pools, meant to help it release memory on time. The phone hasn't shown that it does (D20).
+The 35B runs without the DSpark draft model: on the phone the draft made the first text slower, didn't
+speed up decoding by the 10% required, and pushed resident memory to 5.2–6.0 GB. **In voice mode the 35B
+misses the target** of first audio within 5 s (p50), so the owner decides whether it is re-tuned or hidden
+before this ships. The runtime still carries a small Metal patch that adds autorelease pools; it made no
+measurable difference on the iPhone (D20 A/B), so it goes with the next runtime release.
 
 The full record is in [docs/minicpm-evaluation.md](docs/minicpm-evaluation.md): every run, the memory
 accounting, the device checks that are still pending, and how to run the benchmarks yourself.

@@ -42,20 +42,25 @@ import UIKit
         Copy every legible text in this photo exactly, in its language and line order, under "Text:". \
         Then write at most three sentences on what the photo shows. Write "unclear" rather than guess.
         """
-    /// Image slices per photo: D16 picks 1 or 4.
+    /// Image slices per photo. D16 on the iPhone: both 1 and 4 read every key string of the four
+    /// test cards (p50 1.4 s vs 2.6 s), but with the same cards smaller in the frame, 1 slice
+    /// dropped to 87.5 % at half size and 62.5 % at a third, misreading prices without saying
+    /// "unclear", while 4 stayed at 100 %. So 4, pending the owner's real photos.
     nonisolated static let photoSlices = 4
     /// The longest photo note, in tokens (decision 12).
     nonisolated static let photoMaxTokens = 384
     /// How long the 1B stays loaded after its last read.
     nonisolated static let photoIdleUnload: Duration = .seconds(180)
-    /// What a run on a loaded model leaves free for the rest of the app. D18 tunes it.
-    nonisolated static let runBytes = 600_000_000
+    /// What a run on a loaded model leaves free for the rest of the app (D18): iOS sends the app a
+    /// memory warning, and the app then unloads every model, at about 1.41 GB left, and a Qwen3-ASR
+    /// pass beside a loaded model takes up to 0.33 GB more.
+    nonisolated static let runBytes = 1_750_000_000
 
     /// What `model` needs free to load, as `os_proc_available_memory` counts it (mapped weights
-    /// aside): its measured peak footprint plus `runBytes` (decision 21: 4.3 GB for the 35B). D18
-    /// tunes the peaks.
+    /// aside): its measured peak footprint plus `runBytes`, so 4.5 GB for the 35B and 3.2 GB for the
+    /// 1B. Peaks from D18: the 35B (target-only) 2.12–2.73 GB, the 1B 1.26–1.38 GB.
     nonisolated static func loadBytes(_ model: Model) -> Int {
-        (model == .accurate ? 3_700_000_000 : 1_600_000_000) + runBytes
+        (model == .accurate ? 2_750_000_000 : 1_450_000_000) + runBytes
     }
 
     private let photoReaderDirectory: URL
@@ -370,6 +375,15 @@ import UIKit
                     let other: Model = m == .accurate ? .photoReader : .accurate
                     if os_proc_available_memory() < Self.loadBytes(m), !runs.values.contains(where: { $0.model == other }) {
                         await unload(other)
+                    }
+                    // Memory being released still counts for a moment: Woof's for up to 0.32 s after
+                    // the lease's eviction returns, and a model a memory warning unloaded (D18, D20).
+                    // ponytail: waits at most 5 s, which also covers the 3.5–5 s seen after an app
+                    // switch (D19); the 35B's own release after a later unload in a process took
+                    // 2–90 s (D20), so such a load is still refused. Watching the footprint is the upgrade.
+                    let deadline = ContinuousClock.now + .seconds(5)
+                    while os_proc_available_memory() < Self.loadBytes(m), sessions[m] === session, ContinuousClock.now < deadline {
+                        try await Task.sleep(for: .milliseconds(100))
                     }
                     let available = os_proc_available_memory()
                     guard available >= Self.loadBytes(m) else {
