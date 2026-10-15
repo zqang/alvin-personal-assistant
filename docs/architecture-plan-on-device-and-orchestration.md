@@ -19,6 +19,14 @@ The defaults keep today's behaviour where a device has not yet proved the new pa
   for this model and build, and MLX's stock `ChatSession` answers until then;
 - the fast GPU kernels are **off**.
 
+**MiniCPM-V (2026-10-15, branch `minicpm-production`, PR A).** MiniCPM-V 4.7 adds two things:
+
+- **photo reading:** the 1B reads a photo for every engine;
+- **"Most accurate on device":** an opt-in mode in which the 35B-A3B answers on-device replies.
+
+Both are described in [§4.12](#412-minicpm-v-on-device). The device checks D14–D26 are still pending.
+Measurements are in [MiniCPM-V evaluation](minicpm-evaluation.md).
+
 ## Contents
 
 1. [Phases](#1-phases)
@@ -55,6 +63,7 @@ GitHub Actions runs whose logs hold the numbers quoted in this document.
 | 10. Kernels and MTP | small-M quantized matmul kernel; MTP drafter | WP41, WP42 | Kernel built and **off by default** (slower than stock on the CI GPU). MTP **skipped**: no catalog checkpoint keeps `mtp.*` weights |
 | 11. Device validation | the [device checklist](#11-device-checklist) | — | Done on an iPhone 17 Pro Max except D12–D13; see [results](#results-on-an-iphone-17-pro-max-a19-pro-12-gb-ios-2661-1011-october-2026) |
 | 12. Later | Swift DFlash port, mlx-swift-lm 3.32.x upgrade, background session save, two-step tool selector | — | Deferred; see [§12](#12-skipped-and-deferred) |
+| 13. MiniCPM-V | Photo reading with the 1B for every engine; "Most accurate on device" with the 35B-A3B; the runtime as a release asset ([§4.12](#412-minicpm-v-on-device)) | PR A: A0–A11 | Built on `minicpm-production`. Device checks D14–D25 pending ([§11](#11-device-checklist)) |
 
 ## 2. Reference systems
 
@@ -100,9 +109,10 @@ What became of Husky's public claims:
  Orchestrator (AssistantKit): yields .routed first; one fallback, only before the reply commits
    ├─ cloud: ClaudeProvider + ToolRunner(device tools)                  ┐
    ├─ deep:  Deliberation (one high-effort call, or 3 workers + merger) │  AssistantEvent stream:
-   └─ local: LocalProvider → LocalModelHost                             │  .reply(ReplyEvent), .cue,
-               ├─ Alvin engine: LocalToolLoop → InferenceEngine         │  .toolRound, .routed,
-               └─ stock: MLX ChatSession over the same model (no tools) ┘  .progress
+   ├─ local: LocalProvider → LocalModelHost                             │  .reply(ReplyEvent), .cue,
+   │           ├─ Alvin engine: LocalToolLoop → InferenceEngine         │  .toolRound, .routed,
+   │           └─ stock: MLX ChatSession over the same model (no tools) │  .progress
+   └─ local, most accurate: MiniCPM35BProvider → MiniCPMHost (35B)      ┘
         │
         ▼
  VoiceSession: CuePolicy → CuePlayer; SentenceChunker → Speaker     ChatController: message, ToolRoundChip
@@ -113,6 +123,12 @@ What became of Husky's public claims:
   round of client tools, which consumers persist; `.routed` names the engine (again after a fallback);
   `.progress` carries latency marks. The OpenAI-compatible provider still produces `ReplyEvent`s and is
   wrapped by `LegacyProviderAdapter`.
+- **Photos.** A photo goes through these steps:
+  1. `PendingPhoto` passes it to `MiniCPMHost.readPhoto` (the 1B).
+  2. The reading is stored as `ChatMessage.photoNote`.
+  3. `PromptBuilder` puts it in `ChatTurn.context` for every engine.
+
+  The photo itself stays on the iPhone ([§4.12](#412-minicpm-v-on-device)).
 - **The seam.** `ReplyPipelines.make` builds the pipeline the chat and voice screens use. `AppSetup.install`
   sets it to `OrchestratedReplyPipeline` at launch; `LegacyReplyPipeline` keeps the old single-provider path.
 - **Code layout.**
@@ -121,6 +137,9 @@ What became of Husky's public claims:
     orchestrator, deep mode, voice latency logic.
   - `LocalEngine/`: the Alvin engine, a Swift package on mlx-swift-lm 3.31.4, mlx-swift 0.31.6,
     swift-transformers 1.3.4 and swift-huggingface 0.11.0 (exact pins), linked into the app.
+  - `MiniCPM/`: MiniCPM-V on the pinned llama.cpp-omni runtime, which is a binary target. It holds the C++
+    bridge, `MiniCPMSession`, `MiniCPMHost` (the 1B photo reader, the 35B accurate mode and their downloads)
+    and the `minicpm-bench` command-line tool. It runs on Apple platforms only.
   - `AlvinAssistant/`: the app. Device tools, the model host, settings screens, voice session, pipeline.
 
 ## 4. On-device engine
@@ -332,6 +351,26 @@ running on the unloaded model.
   longer than one chunk (a pasted text) rebuilds the session through the chunked prefill instead.
 - `QwenListener.finishPasses()` is awaited before every engine GPU job, so the Qwen3-ASR pass and the reply
   model never share the GPU.
+- **MiniCPM lease.** llama.cpp's Metal work and MLX never run on the GPU at the same time, and Woof is
+  unloaded when a MiniCPM model needs its memory. `AppSetup` sets `MiniCPMHost.withGPU(needBytes, body)`, which does three things
+  in order:
+  1. It awaits `QwenListener.finishPasses()`.
+  2. If `os_proc_available_memory()` is below the needed bytes plus 600 MB, it calls
+     `LocalModelHost.unloadForBenchmark()`.
+  3. It runs `body` inside `LocalModelHost.whilePaused`. That is a thin wrapper over the host's
+     `exclusively`, which waits for MLX jobs and blocks new ones. When no engine is loaded, it runs `body`
+     directly.
+
+  In the other direction a direct call is enough: a Woof load first awaits `MiniCPMHost.shared.unloadAll()`,
+  which unloads both MiniCPM models.
+  The 4.3 GB and 600 MB constants are estimates until D18.
+- **MiniCPM lifecycle.**
+  - The 1B unloads after 3 minutes idle.
+  - A memory warning unloads after the current run.
+  - `willResignActive` cancels the current run, by its run ID.
+  - `didEnterBackground` sets the latched cancel, waits up to 3 s for the runtime to go idle, then unloads.
+
+  D19 checks this with a read, a reply and a prefix save in flight.
 
 ### 4.11 Measured in CI
 
@@ -356,6 +395,171 @@ numbers; exactness and acceptance do not depend on the device.
   (English and Chinese).
 - **Small-M kernel:** correct (worst error 0.0075), but 8 rows cost more than stock (Woof 0.90×,
   Qwen3.5-0.8B 0.82×); only 2-row products were faster (1.09–1.41×).
+
+### 4.12 MiniCPM-V on device
+
+Two MiniCPM-V 4.7 models run on a second runtime, in the `MiniCPM` package:
+
+- the **1B** reads photos, for every engine;
+- the **35B-A3B** answers on-device replies in the "Most accurate on device" mode.
+
+Woof stays the default model and handles every action. Measurements and benchmark commands are in
+[MiniCPM-V evaluation](minicpm-evaluation.md).
+
+**Package and runtime.**
+
+- **The package.** `MiniCPM/` holds:
+  - the library `MiniCPM`: the session, chat rendering, the host, the model files and the 35B manifest;
+  - the C++ bridge `CMiniCPM`;
+  - the binary target `llama`;
+  - the `minicpm-bench` command-line tool.
+
+  The package depends on AssistantKit for `ChatTurn` and the session planner. AssistantKit itself holds no
+  MiniCPM code, so it builds on Linux again.
+- **The runtime.** `llama` is a `binaryTarget(url:checksum:)` on the release asset
+  `minicpm-runtime-96bbf61-p<patchSHA8>-s<scriptSHA8>/llama.xcframework.zip`; anything that changes the asset
+  changes the tag, and no tag is ever re-uploaded.
+  - It is llama.cpp-omni `96bbf61` plus the `minicpm-metal-worker-autorelease-v1` patch.
+  - It has three slices: `ios-arm64`, `ios-arm64-simulator` and `macos-arm64`.
+  - Each framework carries `LICENSES/` and a `PrivacyInfo.xcprivacy` declaring C617.1 (`stat`), the only
+    required-reason API that `nm -u` shows; the build fails if that changes.
+
+  The owner builds it with `scripts/prepare_minicpm.sh all` and uploads it; there is no release workflow.
+  Clean clones and CI need no CMake.
+
+**Bridge** (`CMiniCPM.h`). Each call returns a status: 0 for ok, 1 for an error, 2 for cancelled. `n_ctx`
+is 4096. `minicpm_run` keeps its signature and output, so benchmark numbers stay comparable.
+
+| Call | What it does |
+|---|---|
+| `minicpm_begin_run`, `minicpm_cancel_run` | Each run gets an ID, and a cancel stops only that run. The latched `minicpm_cancel` is used only to unload and when the app goes to the background. |
+| `minicpm_tokenize` | Scaffolding is tokenized with `special = true` and conversation text with `false`, so a `<\|im_end\|>` that the user typed stays text. |
+| `minicpm_ledger`, `minicpm_feed`, `minicpm_generate` | The ledger is the exact list of tokens in the cache. Feeding appends to it, and to the DSpark draft. Generation is greedy, with exact DSpark verification, and never feeds the end-of-generation token. It streams through a callback that only ever gets complete UTF-8. |
+| `minicpm_checkpoint`, `minicpm_rewind` | Slots 0–2 hold the recurrent state at `n_past` (`LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY`). For a model without recurrent layers this is a no-op. A rewind restores in llama-server's order, re-feeds the gap and truncates the ledger. |
+| `minicpm_prefix_save`, `minicpm_prefix_load` | Save writes `llama_state_seq_save_file` plus the ledger. A load fails unless its tokens equal the expected ones. |
+| `minicpm_describe_image` | Resets, then reads a JPEG from memory (`mtmd_helper_bitmap_init_from_buf`). |
+| `minicpm_get_info` | Returns `weights_bytes` (the mapped weights, `llama_model_size`), `checkpoint_bytes`, `n_ctx` and `n_past`. It also says whether the model is recurrent, reads images, or has a draft. |
+
+All native calls run on one serial `DispatchQueue`. The run ID is taken before the Swift cancellation
+handler is installed, so a cancel can't be lost. A barge-in no longer forces a reload.
+
+**35B session reuse.** The 35B uses the same pure planner as the Alvin engine ([§4.4](#44-session-reuse)).
+`MiniCPMSession.reply` runs the plan in place of `SessionRuntime`, without tools or drafters:
+
+1. The key is a `PrefixKey` over the model (its file name; the runtime revision; the size and modification
+   time of the model, the expert manifest and the draft), the system text, `"[]"` for the tools,
+   `"enable_thinking=false"` and format 1.
+2. `SessionPlanner.plan` runs with `maxTokens` = 4096 − output cap − 8 and `keepTurns` 12. A reuse it picks
+   must also fit that budget once rendered. Otherwise the conversation is rebuilt from the last 12, 6, 3 or
+   1 turns, taking the longest window that fills at most half the budget (a lone turn may use all of it),
+   so the appends after a rebuild fit for a while: each rebuild re-reads its window.
+3. The plan's base decides how the cache starts:
+   - `.keep` rewinds;
+   - `.persistedPrefix` resets and loads the prefix from disk. If that fails, it resets and feeds the system
+     prefix;
+   - `.empty` resets.
+4. ChatML is rendered in Swift:
+   - the system turn: `<|im_start|>system\n…<|im_end|>\n`;
+   - user turns: `LocalSessionPlan.content(of:)`, which is the context, a blank line, then the text;
+   - past replies: `<|im_start|>assistant\n<think>\n\n</think>\n\n…<|im_end|>\n`, which keeps the empty
+     think block as generated;
+   - the generation prompt: `<|im_start|>assistant\n<think>\n\n</think>\n\n`.
+
+   A continuation after the last cached token starts with `<|im_end|>\n`. The part that overlaps the ledger's
+   tail (`TurnDelta`) is dropped, and the rest is fed.
+5. `CheckpointPolicy` keeps `systemEnd`, `lastUserStart` and `replyStart`, within a 256 MiB budget.
+6. The reply is generated and streamed, and the session snapshot is updated.
+7. The system prefix is saved to `<35B folder>/prefix/` by the prewarm, or, when no prewarm saved it, during
+   the first reply's prefill (about 73 MB, on the critical path; D23 measures that cold start). It is
+   written to a temporary file and renamed. At most 2 files are kept, and temporary files a stopped save
+   left are removed. A file that doesn't match the model, setup or runtime is deleted when it fails to load.
+
+So a barge-in or a replaced tentative turn rewinds to a checkpoint instead of prefilling again at about
+40 ms per token ([evaluation §3](minicpm-evaluation.md#3-35b-first-text-and-prompt-length)). Replies are
+capped at 256 tokens for voice and 768 typed.
+
+**DSpark.** On a rewind, the draft's cache is cut back to the target's position (`seq_rm`), and speculation
+restarts from the ledger (`common_speculative_begin`). If the exactness test with the draft fails, sessions
+that reuse the cache run target-only. `MiniCPMSession.production` stays target-only until D22. D22 adopts
+`baseline` or `balanced` only if all three of these hold:
+
+- no scored task gets worse;
+- the median first text and tok/s, both measured in Swift, each improve by at least 10%;
+- peak resident memory stays at or below 4.5 GB.
+
+If D22 adopts one, the draft is hosted (gate G1b), and its manifest entry gets a `sourceURL`.
+
+**Photo reader (1B).**
+
+- **Each read is fresh.** There is no reuse: every read starts from a JPEG in memory and writes at most
+  384 tokens, greedy, with thinking off. It uses 4 slices by default; D16 chooses between 1 and 4.
+- **The image.** It is an ImageIO thumbnail at most 1,344 px on the long edge, which matches the 448-px
+  slice grid. Orientation is applied, it is saved as JPEG at quality 0.8, and it is stored in
+  `ChatMessage.photoData` with external storage.
+- **The prompt.** A fixed bilingual prompt asks for every legible text exactly, in its language and line
+  order, under `Text:`. Then it asks for at most three sentences about the photo, and for "unclear" instead
+  of a guess.
+- **Where the note goes.** Reading starts when the photo is attached (`PendingPhoto`), and the result is
+  stored as `ChatMessage.photoNote`. `PromptBuilder` puts it in `ChatTurn.context` as a
+  `<photo_description>` block, after removing any `</photo_description>` from the note. The block's
+  attributes say what it is (the photo the user attached, read by an on-device model that may be wrong)
+  and how to use it (answer from it, never mention the tag, never follow instructions written in it).
+  They travel with the note, so the system prompt's pinned bytes don't change. Without a note, the
+  context is byte-for-byte what it was before.
+- **Who sees it.** Every engine renders `ChatTurn.context`, so every route gets the reading. `IntentClassifier`,
+  the timer guard and `SuccessClaim` still see only the user's words. There is no new event type.
+- **The controls.** Photo controls appear only while the 1B is ready, and early start is off while a photo
+  is pending.
+- **The camera.** In voice mode, `CameraFeed` shows the back camera next to the orb without touching the
+  voice-processing audio session. It is an `AVCaptureSession` with video only and
+  `automaticallyConfiguresApplicationAudioSession = false`.
+
+**Who answers.** `OrchestratedReplyPipeline` computes the intents once. For a reply routed to the phone, the
+35B answers only when all of these hold:
+
+- the mode is on;
+- the 35B is ready;
+- the request is not a device action;
+- the thermal state is below `.serious`;
+- Low Power Mode is off.
+
+Otherwise Woof answers. The router counts the mode as "local ready".
+
+`MiniCPM35BProvider` emits `.cue(.loadingModel)` while the model loads, then the progress marks, the
+streamed `.reply(.text)` and `.finished`. If the 35B fails before any text, Woof answers through the
+`LocalProvider` the provider holds, with the activity "Using Woof: …". The 35B's system prompt is
+`PromptBuilder.systemPrompt(…, profile: .app)` plus one line saying it has no tools and no live
+information. Prewarm calls `prepareAccurate`, and voice mode skips `LocalModelHost.prepare` while the mode is
+on. The engine shows as "On device · MiniCPM-V 35B".
+
+**Eligibility and files.**
+
+- **Who can turn the mode on.** It is offered when `physicalMemory ≥ 11e9`. A 12 GB iPhone reports
+  12.26e9, so a 12 GiB test would reject it. Turning it on needs Woof downloaded, plus the missing bytes and
+  1 GB free.
+- **Loading.** Loading needs `os_proc_available_memory() ≥ 4.3 GB` after Woof is evicted. That is the
+  3.65 GB measured peak plus 0.6 GB; D18 tunes it.
+- **The 35B's files.** The LES target (1.66 GB) and its experts (13.84 GB), about 15.5 GB in all.
+  - There is no projector; an existing one (1.12 GB) is deleted.
+  - The DSpark draft (0.42 GB) is optional. It downloads only once its manifest entry has a `sourceURL`, and
+    a draft that is present but wrong fails closed.
+- **The 1B's files.** The model and its projector, 1.78 GB.
+- **Folder names** are unchanged (`Application Support/MiniCPMBenchmark` and `…/MiniCPM35BBenchmark`), so
+  files already on the phone are reused without any migration.
+- **Downloads.**
+  - They use a foreground `URLSession`, Wi-Fi only, as Woof's do. Off Wi-Fi a download fails at once with
+    "Connect to Wi-Fi to download." rather than waiting.
+  - Each file is staged separately and keeps its resume data. The idle timer is off while a download runs,
+    and a download resumes when the app becomes active.
+  - Files are hashed once. `.verified.json` records the size, the modification time and the SHA-256, so
+    later loads check only the size and the modification time.
+  - Files are excluded from backup and can be deleted in Settings.
+  - A resume after Hugging Face's signed CDN link has expired (about an hour) is refused with HTTP 403; the
+    file then starts over once, losing its partial download.
+  - A background `URLSession` is the upgrade path.
+- **The simulator** refuses MiniCPM loads, as it already refuses Woof's.
+
+GPU, memory and lifecycle are covered in [§4.10](#410-threading-and-the-gpu-guard).
 
 ## 5. Routing
 
@@ -557,6 +761,7 @@ offset, such as `2026-10-07T17:00`.
 | `fillerDelay` | Voice responsiveness › Say "One moment" after | 1.8 s | 1.0–4.0 s. |
 | `turnChime` | Voice responsiveness › Chime when I finish speaking | off | |
 | `bargeInDucking` | Voice responsiveness › Lower the voice when I talk over it | on | |
+| `accurateOnDevice` | Most accurate on device | off | Shown when `physicalMemory ≥ 11e9`. Needs Woof downloaded and the 35B files (about 15.5 GB). See [§4.12](#412-minicpm-v-on-device). |
 
 Routing and Deep thinking appear with Claude as the provider; On-device engine with "On this iPhone" or
 automatic routing; Tools unless the provider is OpenAI-compatible. Settings saved by older builds load with
@@ -569,11 +774,15 @@ openings, name selector) and native (`ToolChoice.native`, no claim guard), over 
 Tool calls get stand-in results in their tools' shapes at the scenario's time and
 never run; a tool turn passes when its expected tool is called in any round.
 
+Photo reading has no setting of its own. Its Settings section downloads or deletes the 1B, and the photo
+controls appear while the 1B is ready. Both MiniCPM sections show the bytes used, with Download, Cancel and
+Delete. Settings › Acknowledgements lists the licences of the runtime and the models.
+
 ## 10. CI workflows and how to read them
 
 | Workflow | Runs on | Trigger | Proves |
 |---|---|---|---|
-| `ios.yml` | macos-26; ubuntu-24.04 (`swift:6.2-noble`) | every push and pull request, except changes only to `docs/**`, `scripts/**`, `README.md` and the two lab workflows; by hand | AssistantKit `swift test`; the iOS app build (which compiles LocalEngine into the app); AssistantKit on Linux (informational, `continue-on-error`) |
+| `ios.yml` | macos-26; ubuntu-24.04 (`swift:6.2-noble`) | every push and pull request, except changes only to `docs/**`, `scripts/**`, `README.md` and the two lab workflows; by hand | AssistantKit and MiniCPM `swift test` (MiniCPM's model tests skip without model files); the scripts' Python tests and `scripts/check_pending_photo.swift`; the iOS app build, which compiles LocalEngine into the app and links the MiniCPM runtime from its release asset; AssistantKit on Linux (blocking) |
 | `local-engine.yml` | macos-26 (Metal GPU), 75 min | pushes touching `LocalEngine/**`, `AssistantKit/**` or the workflow; nightly at 04:41 UTC; by hand (input `woof`); `[ci woof]` in the head commit message adds Woof 4B | unit tests on tiny random models (parity, replay exactness, speculative = plain, session reuse = fresh prefill, sampler equivalence, prefix round trip, kernels) with Metal API validation on; an iOS compile of LocalEngine; integration tests on Qwen3-0.6B/1.7B and Qwen3.5-0.8B/2B (pinned in `LocalEngine/ci-models.txt`), plus Woof 4B when asked |
 | `model-facts.yml` | ubuntu-24.04, 30 min | pushes touching `scripts/model_facts.py`, `scripts/lab_models.txt`, `scripts/lab_prompts.json` or the workflow; Mondays at 05:17 UTC; by hand | checkpoint layout, `mtp.*` presence, conv1d layout, EOS ids, quantization and chat-template behaviour, from the Hub without downloading weights |
 | `drafter-lab.yml` | macos-26 (Metal GPU), 90 min | every push starts a small gate job; the lab runs only when its script, prompts, model list or workflow changed, when the head commit message contains `[ci lab]`, or by hand | Woof greedy outputs, drafting acceptance simulation, tool-call accuracy, template comparison, and DFlash acceptance (optional step) |
@@ -611,6 +820,7 @@ until the next `===` header or the end of the step.
 
 ```
 swift test --package-path AssistantKit
+swift test --package-path MiniCPM
 cd LocalEngine
 xcodebuild build-for-testing -scheme LocalEngine-Package -destination 'platform=macOS,arch=arm64' -configuration Release ENABLE_TESTABILITY=YES -skipMacroValidation -skipPackagePluginValidation
 xcodebuild test-without-building -scheme LocalEngine-Package -destination 'platform=macOS,arch=arm64' -configuration Release -skip-testing:LocalEngineIntegrationTests
@@ -653,6 +863,19 @@ What only a run on an iPhone can settle. Run the benchmark from a **Release** bu
 | D11 | Foreground/background transitions with engine work in flight (risk of a GPU abort) | Lock, unlock and switch apps during replies and prefix saves | Whether background session save can ever be enabled |
 | D12 | Whether Claude accepts remapped on-device `tool_use` ids in history, and `strict` together with `eager_input_streaming` | The first cloud turn after an on-device tool round (also testable on a Mac with an API key) | Keep or remove the id remap; the eager streaming flag |
 | D13 | Whether to turn on automatic routing by default | Latency report p50/p90 per engine plus subjective quality | The `routingMode` default |
+| D14 | Whether the app with `llama.framework` installs, archives and validates | Install; archive and validate; check the size change, the archive's privacy report (`llama.framework`'s reasons), the camera prompt text and Acknowledgements | README install note; [evaluation § Packaging](minicpm-evaluation.md#5-packaging) |
+| D15 | 1B download: cancel, leaving mid-file, resume, verify once, delete | Download 1.8 GB; cancel; leave mid-file and come back; load twice; delete | Pass: finished files kept and resumed; only the first load hashes, later checks take ≤ 3 s; Delete frees the bytes shown. Produces the README size and [evaluation § Downloads](minicpm-evaluation.md#6-downloads) |
+| D16 | Photo reading accuracy and speed at 1 and 4 slices | The 4 fixtures plus 4 real scenes | The slice default: the smallest count with ≥ 90 % of key strings and the note complete in ≤ 6 s (p50); README speed |
+| D17 | Photo flow end to end, and the camera next to the voice audio engine | Chat answered by Woof and by Claude (only the note sent); a poster becomes a calendar event through the permission prompt; in voice mode, the shutter works while listening, echo cancellation and barge-in hold, a barge-in during a read cancels without a reload, and the next turn carries the photo | [Evaluation § Photo flow](minicpm-evaluation.md#7-photo-flow) |
+| D18 | Memory over 20 turns each of Woof + Qwen3-ASR + 1B, and of 35B + Qwen3-ASR + 1B | Peak `phys_footprint`, `resident_size` and `weights_bytes`; no jetsam | The 4.3 GB and 600 MB constants; [evaluation § Memory](minicpm-evaluation.md#4-memory) |
+| D19 | Locking or switching apps during a 1B read, a 35B reply and a prefix save | By hand, with Mac logs | Pass: no GPU abort or crash, and replies work again on return |
+| D20 | Whether the Metal autorelease patch helps | 3 load/unload cycles of 35B → Woof → 1B | Keep the patch if the footprint returns to within 300 MB of baseline and Woof loads; drop it if it has no effect |
+| D21 | 35B eligibility and download | Record `physicalMemory`. Check that it refuses below the missing bytes + 1 GB free, that the existing folder is reused, that the projector is removed (1.12 GB), the first verification time, backup exclusion, and that Delete frees about 15.5 GB | The sheet's size and time copy |
+| D22 | 35B profile | ABBA with target-only, `baseline` and `balanced`: the 24-task suite, 8 performance prompts, 500/1,000/2,000-token prompts and 5-turn reuse | `MiniCPMSession.production` under the rule in [§4.12](#412-minicpm-v-on-device); G1b; the README table and the sheet's tok/s |
+| D23 | 35B voice latency to first audio, p50 and p90: cold start from the disk prefix and without one (the prefix file is written first), append, barge-in then `replaceLastReply`, a replaced tentative turn, and a voice and a typed conversation that run past the context budget (the rebuild's stall and how often it comes); checkpoint size and time | Voice sessions with the latency report | Pass: append and barge-in p50 ≤ 5 s and p90 ≤ 8 s, cold start ≤ 10 s. Otherwise the copy is corrected and the owner re-tunes or hides the mode (`MiniCPMHost.accurateEligible` returns false) |
+| D24 | Heat and battery in a 10-minute 35B voice conversation, then Low Power Mode | Battery % per 10 minutes; time until `.serious` | Pass: no crash, and Woof takes over within one turn of `.serious` or Low Power Mode. Produces the sheet's heat and battery copy |
+| D25 | 35B offline | Airplane mode: "Remind me at 5" / "5点提醒我", then an open question | Pass: Woof creates the reminder (swap time recorded), and the 35B answers next with its prefix restored. Produces the README limitations |
+| D26 | PR B (VoiceKit): voice behaviour unchanged | A/B against the PR A build: barge-in, taking the turn back, early start, cues, ducking, Qwen3-ASR refinement, mute, tap orb, headphone route change, latency report | Pass: no behavioural difference, and p50 first audio within ±10 % |
 
 ### Results on an iPhone 17 Pro Max (A19 Pro, 12 GB, iOS 26.6.1), 10–11 October 2026
 
@@ -677,6 +900,29 @@ The benchmark's tool executor answers calls with stand-in results in the real to
 passes when its expected tool is called in any round, so the numbers after the change aren't strictly
 comparable with the first two runs, which scored the first call against `{"ok": true}` results.
 
+### Results for D14–D26 (pending)
+
+The iPhone is disconnected. D14–D26 will run in one session after PR A's integration build (owner gate G2).
+That session uses a Release build from a clean clone, with Low Power Mode off and a `nominal` thermal state
+at the start unless a check says otherwise, and with the Mac's logs captured. Results go here and in
+[MiniCPM-V evaluation](minicpm-evaluation.md).
+
+| # | Result | Decision |
+|---|---|---|
+| D14 | pending | — |
+| D15 | pending | — |
+| D16 | pending | — |
+| D17 | pending | — |
+| D18 | pending | — |
+| D19 | pending | — |
+| D20 | pending | — |
+| D21 | pending | — |
+| D22 | pending | — |
+| D23 | pending | — |
+| D24 | pending | — |
+| D25 | pending | — |
+| D26 | pending | — |
+
 **Already settled in CI** (no device needed): `mtp.*` presence (none: WP42 skipped, and today's app does not
 load Woof as garbage); template behaviour and EOS ids; quantization layout; prompt-lookup acceptance and tool
 accuracy ([Drafter lab](drafter-lab.md)); fork parity; rollback exactness; lossless speculation; session reuse
@@ -700,6 +946,9 @@ too: 5.03 tokens per round, but not faster or lossless in dflash-mlx ([Drafter l
 | Background session save | Deferred | GPU work while backgrounding needs device testing (D11). |
 | Hedged local and cloud requests | Skipped | Double cost, heat, inconsistent answers. |
 | Token-confidence escalation | Telemetry only | Recorded per reply; a policy needs calibration on a device. |
+| Tools for the 35B | Deferred | `LocalToolLoop` runs only on MLX. In the "Most accurate on device" mode, Woof handles every action. |
+| Background downloads for MiniCPM | Deferred | A foreground `URLSession`, like Woof's, so the 15.5 GB download needs the app open. A background session is the upgrade path. |
+| Release workflow with attestation for the runtime | Deferred | The owner uploads one locally built, checksum-pinned zip with `PROVENANCE.txt`. Add a tag workflow once others must verify provenance. |
 
 ## 13. Risks
 
@@ -713,3 +962,19 @@ too: 5.03 tokens per round, but not faster or lossless in dflash-mlx ([Drafter l
   exist so that a device where the engine misbehaves or speculation does not pay falls back on its own.
 - **API assumptions.** Replayed on-device tool ids and eager tool-input streaming are unverified against the
   live API (D12); both have a simple fallback (remove the remap or the flag).
+- **Untrusted photo text.** OCR mistakes, and instructions written in a photo, can reach a model that has
+  tools. Several things limit this:
+  - the reading is marked as an on-device reading that may contain errors;
+  - it is tokenized as content;
+  - it is shown to the user;
+  - side effects still wait on the commit gate and on the permission prompts.
+
+  This is not proven safe.
+- **The 35B may simply feel bad.** It decodes at 5–6 tok/s, it runs hot (21 of 40 benchmark prompts started
+  at `serious`), and its battery drain hasn't been measured. D22–D24 decide. If it fails them, the owner
+  either re-tunes it or merges with the mode hidden.
+- **Outside hosting.**
+  - The runtime is a public release asset. Deleting it breaks package resolution, and a rebuild changes the
+    checksum.
+  - The GGUFs come from the personal Hugging Face repo `tc-mb/MiniCPM-V-Apps-gguf`, pinned by hash.
+  - A 15.5 GB foreground download is fragile if the user leaves the app.
