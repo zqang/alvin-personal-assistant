@@ -1,6 +1,7 @@
 import AssistantKit
 import AVFoundation
 import Foundation
+import MiniCPM
 import Observation
 import UIKit
 
@@ -43,6 +44,10 @@ final class VoiceSession: Identifiable {
     @ObservationIgnored private var replyDeep = false
     /// The latency trace of the last finished turn.
     private(set) var lastTrace: TurnLatencyTrace?
+    /// The photo for the user's next turn, taken with the camera and read while they talk.
+    private(set) var pendingPhoto: PendingPhoto?
+    /// The live camera preview is open.
+    private(set) var cameraOpen = false
 
     private let conversation: Conversation
     private let store: SettingsStore
@@ -82,10 +87,17 @@ final class VoiceSession: Identifiable {
     @ObservationIgnored private var duckingEnabled = false
     /// The latency trace of the turn in progress, from its commit to the end of its reply.
     @ObservationIgnored private var trace: TurnLatencyTrace?
+    /// The photo of the committed turn, so taking the turn back takes its photo back too.
+    @ObservationIgnored private var lastUserPhoto: PendingPhoto?
+    /// When the camera was last used (opened, a photo, a turn); it closes `cameraIdleLimit` after.
+    @ObservationIgnored private var cameraUsedAt: TimeInterval = 0
 
     /// Playback volume while the user seems to talk over the assistant.
     private static let duckedGain: Float = 0.3
     private static let duckRamp: TimeInterval = 0.08
+    private static let cameraIdleLimit: TimeInterval = 120
+    /// The activity while a turn waits for its photo's read.
+    static let readingPhoto = "Reading the photo…"
 
     init(conversation: Conversation, store: SettingsStore) {
         self.conversation = conversation
@@ -139,15 +151,19 @@ final class VoiceSession: Identifiable {
         }
         recognizer.onEvent = { [weak self] event in self?.handle(event) }
         self.recognizer = recognizer
-        if settings.provider == .onDevice {
+        // "Most accurate on device" loads its own model, through the pipeline's prewarm.
+        if settings.provider == .onDevice, !settings.accurateOnDevice {
             LocalModelHost.shared.prepare(settings)
         }
         if settings.usesQwenListening {
             QwenListener.shared.isWanted = true
-            if settings.provider == .onDevice {
-                // One model loads at a time, and the reply model gets the memory first.
+            if settings.provider == .onDevice || settings.accurateOnDevice {
+                // One model loads at a time, and the reply model gets the memory first: the
+                // on-device model, or MiniCPM-V 35B, which `listen()`'s prewarm starts loading
+                // before this task runs.
                 Task {
                     await LocalModelHost.shared.settle()
+                    await MiniCPMHost.shared.settle()
                     if QwenListener.shared.isWanted { QwenListener.shared.load() }
                 }
             } else {
@@ -214,6 +230,10 @@ final class VoiceSession: Identifiable {
         speaker?.stop()
         cuePlayer?.cancel()
         recognizer?.stopTurn()
+        cameraOpen = false
+        pendingPhoto?.cancel()
+        pendingPhoto = nil
+        lastUserPhoto = nil
         QwenListener.shared.isWanted = false
         QwenListener.shared.unload()
         audio.stop()
@@ -234,11 +254,16 @@ final class VoiceSession: Identifiable {
 
     // MARK: - Controls
 
-    /// Tapping the orb sends what's been said so far, or cuts the assistant off.
+    /// Tapping the orb sends what's been said so far (with no words but a photo, it asks what's in
+    /// the photo), or cuts the assistant off.
     func tapOrb() {
         switch phase {
         case .listening:
-            if !userCaption.trimmed.isEmpty { commitUserTurn() }
+            if !userCaption.trimmed.isEmpty {
+                commitUserTurn()
+            } else if pendingPhoto != nil {
+                commitUserTurn(asking: PendingPhoto.defaultQuestion(localeIdentifier: store.settings.speechLocale))
+            }
         case .thinking, .speaking:
             cancelReply()
             listen()
@@ -264,6 +289,38 @@ final class VoiceSession: Identifiable {
         if let tentative, tentative.deep != wanted {
             discardTentative()
         }
+    }
+
+    // MARK: - Photos
+
+    /// Photos can be attached once the on-device photo reader is ready.
+    var canAttachPhoto: Bool {
+        MiniCPMHost.shared.status[.photoReader] == .ready
+    }
+
+    func toggleCamera() {
+        cameraOpen.toggle()
+        cameraUsedAt = now
+    }
+
+    /// Attaches a photo the camera took to the user's next turn, replacing any other, and starts
+    /// reading it.
+    func attachPhoto(_ data: Data) async {
+        // A large photo takes a moment to decode, so off the main actor.
+        guard let photo = await Task.detached(priority: .userInitiated, operation: { PendingPhoto(imageData: data) }).value, isLive else { return }
+        pendingPhoto?.cancel()
+        photo.startReading { MiniCPMHost.shared.readPhoto($0) }
+        pendingPhoto = photo
+        cameraUsedAt = now
+        // A reply started early didn't see the photo, and none starts while a photo is pending.
+        discardTentative()
+        updateEarlyStart()
+    }
+
+    func removePhoto() {
+        pendingPhoto?.cancel()
+        pendingPhoto = nil
+        updateEarlyStart()
     }
 
     // MARK: - Listening
@@ -376,12 +433,14 @@ final class VoiceSession: Identifiable {
         phase == .listening || phase == .thinking || phase == .speaking
     }
 
-    private func commitUserTurn() {
-        let text = userCaption.trimmed
+    /// Commits the user's turn: what they said, or `question` in its place.
+    private func commitUserTurn(asking question: String? = nil) {
+        let text = question ?? userCaption.trimmed
         guard !text.isEmpty else {
             restartRecognition()
             return
         }
+        if question != nil { userCaption = text }
         let time = now
         var trace = TurnLatencyTrace()
         trace.mark(.speechEnded, at: min(turn.lastChange ?? time, time))
@@ -392,6 +451,11 @@ final class VoiceSession: Identifiable {
         if store.settings.turnChime { audio.playChime() }
 
         let message = ChatMessage(role: .user, text: text, isVoice: true)
+        let photo = pendingPhoto
+        message.photoData = photo?.jpeg
+        pendingPhoto = nil
+        lastUserPhoto = photo
+        cameraUsedAt = now
         conversation.append(message)
         lastUserMessage = message
         // Take the turn's audio before the next request clears it.
@@ -399,7 +463,7 @@ final class VoiceSession: Identifiable {
         if let speechStart, let feeder = recognizer?.feeder {
             samples = feeder.turnClip(speechStart: speechStart, maxLength: QwenListener.maxSamples)
         }
-        startReply(refining: message, carried: carriedText, samples: samples)
+        startReply(refining: message, carried: carriedText, samples: samples, photo: photo)
         carriedText = ""
         // Keep listening while the assistant thinks and talks, so the user can cut in.
         beginRecognition()
@@ -419,6 +483,11 @@ final class VoiceSession: Identifiable {
         let earlier = user.text
         conversation.remove(user)
         lastUserMessage = nil
+        // Its photo comes back too, unless a newer one was taken; a read the cancel cut short
+        // starts again.
+        pendingPhoto = pendingPhoto ?? lastUserPhoto
+        pendingPhoto?.startReading { MiniCPMHost.shared.readPhoto($0) }
+        lastUserPhoto = nil
         phase = .listening
         carriedText = earlier
         userCaption = Self.join(earlier, text)
@@ -455,9 +524,10 @@ final class VoiceSession: Identifiable {
     }
 
     /// Lets the coordinator start tentative replies when allowed. Never for a deep reply: a
-    /// discarded one would still spend deep-mode work and budget.
+    /// discarded one would still spend deep-mode work and budget. Never while a photo is pending:
+    /// the turn's request waits for its note.
     private func updateEarlyStart() {
-        early.enabled = earlyStartAllowed && !deepNextTurn
+        early.enabled = earlyStartAllowed && !deepNextTurn && pendingPhoto == nil
     }
 
     /// Starts following a new user turn whose transcript so far is `text`.
@@ -543,9 +613,10 @@ final class VoiceSession: Identifiable {
 
     // MARK: - Replying
 
-    /// Replies to `user`, first swapping in Qwen3-ASR's reading of the turn's audio when it's on.
+    /// Replies to `user`, first waiting for the note of its `photo` (and of any photo whose read was
+    /// cut short), then swapping in Qwen3-ASR's reading of the turn's audio when it's on.
     /// `carried` is earlier text of the turn that `samples` don't cover.
-    private func startReply(refining user: ChatMessage, carried: String, samples: [Float]) {
+    private func startReply(refining user: ChatMessage, carried: String, samples: [Float], photo: PendingPhoto?) {
         phase = .thinking
         activity = nil
         notice = nil
@@ -565,7 +636,21 @@ final class VoiceSession: Identifiable {
         conversation.append(reply)
         self.reply = reply
         let locale = store.settings.speechLocale
+        let messages = conversation.orderedMessages
         replyTask = Task { [weak self] in
+            // The photo was being read since it was taken; the note goes in with the turn.
+            var photoFailure: Error?
+            do {
+                try await PendingPhoto.noteUnread(messages, attached: photo.map { (user, $0) }, read: { MiniCPMHost.shared.readPhoto($0) }) {
+                    self?.waitForPhoto()
+                }
+            } catch {
+                photoFailure = error
+            }
+            // The photo is read: "Reading the photo…" would no longer be true.
+            if photoFailure == nil, let self, reply === self.reply, self.activity == Self.readingPhoto {
+                self.activity = nil
+            }
             let live = user.text
             if !samples.isEmpty, let heard = await QwenListener.shared.transcribe(samples, locale: locale), !Task.isCancelled {
                 user.text = FinalTranscript.pick(live: live, carried: carried, refined: heard)
@@ -575,7 +660,12 @@ final class VoiceSession: Identifiable {
             }
             guard let self, !Task.isCancelled, reply === self.reply else { return }
             // Decided only now: after any refinement, and reading the conversation as it is.
-            let events = self.replyEvents(for: user, deep: deep)
+            let events: AsyncThrowingStream<AssistantEvent, Error>
+            if let photoFailure {
+                events = AsyncThrowingStream { $0.finish(throwing: photoFailure) }
+            } else {
+                events = self.replyEvents(for: user, deep: deep)
+            }
             if user.text != live {
                 if self.conversation.title == Conversation.makeTitle(from: live) {
                     self.conversation.title = Conversation.makeTitle(from: user.text)
@@ -583,6 +673,14 @@ final class VoiceSession: Identifiable {
                 if self.phase == .thinking { self.userCaption = user.text }
             }
             await self.consume(events, into: reply)
+        }
+    }
+
+    /// The turn waits for its photo's read: say so, with the "Let me check" cue when cues play.
+    private func waitForPhoto() {
+        activity = Self.readingPhoto
+        if let cue = cuePolicy.received(.cue(.checking), at: now) {
+            cuePlayer?.play(cue)
         }
     }
 
@@ -675,6 +773,7 @@ final class VoiceSession: Identifiable {
         endTrace(interrupted: false)
         reply = nil
         lastUserMessage = nil
+        lastUserPhoto = nil
         save()
         listen()
     }
@@ -776,6 +875,9 @@ final class VoiceSession: Identifiable {
     }
 
     private func tick() {
+        if cameraOpen, now - cameraUsedAt > Self.cameraIdleLimit {
+            cameraOpen = false
+        }
         if phase == .thinking || isMuted {
             level *= 0.85
         }

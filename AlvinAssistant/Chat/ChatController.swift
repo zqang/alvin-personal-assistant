@@ -1,5 +1,6 @@
 import AssistantKit
 import Foundation
+import MiniCPM
 import Observation
 
 /// Sends typed messages and streams the replies into the conversation, through the app's
@@ -15,6 +16,8 @@ final class ChatController {
     /// The last route of each reply this controller streamed, by message id, for the "On device"
     /// badge. Only replies streamed while this chat is open have one.
     private(set) var routes: [UUID: RouteDecision] = [:]
+    /// The photo sent with the latest user message while its read finishes, for the live note.
+    private(set) var reading: (message: UUID, photo: PendingPhoto)?
     /// Replies this controller streamed for a "Think deeper" request, so a retry asks again.
     @ObservationIgnored private var deepReplies: Set<UUID> = []
     @ObservationIgnored private var task: Task<Void, Never>?
@@ -30,28 +33,33 @@ final class ChatController {
         return made
     }
 
-    /// Sends `text` and streams the reply. Returns false (and sends nothing) while a reply is in
-    /// progress or when `text` is blank.
+    /// Sends `text`, with `photo` when one is attached, and streams the reply. A photo without
+    /// words asks what's in it. Returns false (and sends nothing) while a reply is in progress or
+    /// when there's neither text nor a photo.
     @discardableResult
-    func send(_ text: String, in conversation: Conversation, store: SettingsStore) -> Bool {
-        send(text, deep: false, in: conversation, store: store)
+    func send(_ text: String, photo: PendingPhoto? = nil, in conversation: Conversation, store: SettingsStore) -> Bool {
+        send(text, photo: photo, deep: false, in: conversation, store: store)
     }
 
     /// Sends `text` and asks for a deep-mode reply ("Think deeper"). The router still decides:
     /// without a cloud key, offline, or with today's deep replies used up, the reply is a standard
     /// one.
     @discardableResult
-    func sendDeep(_ text: String, in conversation: Conversation, store: SettingsStore) -> Bool {
-        send(text, deep: true, in: conversation, store: store)
+    func sendDeep(_ text: String, photo: PendingPhoto? = nil, in conversation: Conversation, store: SettingsStore) -> Bool {
+        send(text, photo: photo, deep: true, in: conversation, store: store)
     }
 
     /// Answers again after a failed reply. A failed reply that ran tool rounds stays, as an
     /// interrupted reply without text: its actions happened, so the history keeps them. Any other
     /// failed reply is removed. A reply that asked for deep mode, or was routed to it, asks again;
-    /// the router still checks the budget and the connection. Does nothing when `canRetry` is
-    /// false.
+    /// the router still checks the budget and the connection. A photo whose read didn't finish, or
+    /// failed (perhaps for want of memory, or before its model was downloaded), is read again.
+    /// Does nothing when `canRetry` is false.
     func retry(_ failed: ChatMessage, in conversation: Conversation, store: SettingsStore) {
         guard !isResponding, canRetry(failed) else { return }
+        for message in conversation.orderedMessages where message.photoNote == PendingPhoto.unreadable {
+            message.photoNote = nil
+        }
         let deep = deepReplies.contains(failed.id) || routes[failed.id]?.mode == .deep
         deepReplies.remove(failed.id)
         if failed.toolRounds.isEmpty {
@@ -97,17 +105,27 @@ final class ChatController {
         routes[message.id]?.engine
     }
 
-    private func send(_ text: String, deep: Bool, in conversation: Conversation, store: SettingsStore) -> Bool {
-        let text = text.trimmed
+    /// What the iPhone has read so far in `message`'s photo, while the read runs.
+    func livePhotoNote(for message: ChatMessage) -> String? {
+        reading?.message == message.id ? reading?.photo.note : nil
+    }
+
+    private func send(_ text: String, photo: PendingPhoto?, deep: Bool, in conversation: Conversation, store: SettingsStore) -> Bool {
+        var text = text.trimmed
+        if text.isEmpty, photo != nil {
+            text = PendingPhoto.defaultQuestion(localeIdentifier: store.settings.speechLocale)
+        }
         guard !text.isEmpty, !isResponding else { return false }
-        conversation.append(ChatMessage(role: .user, text: text, isVoice: false))
-        respond(in: conversation, store: store, deep: deep)
+        let message = ChatMessage(role: .user, text: text, isVoice: false)
+        message.photoData = photo?.jpeg
+        conversation.append(message)
+        respond(in: conversation, store: store, deep: deep, attached: photo.map { (message, $0) })
         return true
     }
 
-    private func respond(in conversation: Conversation, store: SettingsStore, deep: Bool) {
-        // Reads the conversation now, before the empty reply below joins it.
-        let stream = pipeline(for: store).stream(ReplyRequest(conversation: conversation, inputIsVoice: false, deep: deep))
+    private func respond(in conversation: Conversation, store: SettingsStore, deep: Bool, attached: (user: ChatMessage, photo: PendingPhoto)? = nil) {
+        let pipeline = pipeline(for: store)
+        let messages = conversation.orderedMessages
         let reply = ChatMessage(role: .assistant, text: "", isVoice: false, status: .streaming)
         conversation.append(reply)
         if deep {
@@ -116,10 +134,19 @@ final class ChatController {
         isResponding = true
         activity = nil
         routedEngine = nil
+        reading = attached.map { ($0.user.id, $0.photo) }
 
         task = Task {
             var failure: Error?
             do {
+                // A photo's note goes in with its turn, so the request waits for the read.
+                try await PendingPhoto.noteUnread(messages, attached: attached, read: { MiniCPMHost.shared.readPhoto($0) }) {
+                    activity = "Reading the photo…"
+                }
+                reading = nil
+                activity = nil
+                // Reads the conversation now; the empty reply above is no turn of its own yet.
+                let stream = pipeline.stream(ReplyRequest(conversation: conversation, inputIsVoice: false, deep: deep))
                 for try await event in stream {
                     switch event {
                     case .reply(.text(let text)):
@@ -152,6 +179,7 @@ final class ChatController {
                 reply.status = .complete
             }
             activity = nil
+            reading = nil
             isResponding = false
             conversation.updatedAt = .now
             try? conversation.modelContext?.save()
