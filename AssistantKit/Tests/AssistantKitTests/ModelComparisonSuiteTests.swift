@@ -20,6 +20,24 @@ final class ModelComparisonSuiteTests: XCTestCase {
         }
     }
 
+    func testLongPromptsDoubleAndAskAboutExactlyOneRecord() throws {
+        let prompts = ModelComparisonSuite.longPrompts
+        XCTAssertEqual(prompts.map(\.id), ["long-500", "long-1000", "long-2000"])
+        for (shorter, longer) in zip(prompts, prompts.dropFirst()) {
+            XCTAssertEqual(Double(longer.prompt.utf8.count) / Double(shorter.prompt.utf8.count), 2, accuracy: 0.15)
+        }
+        for item in prompts {
+            let lines = item.prompt.split(separator: "\n")
+            let question = try XCTUnwrap(lines.last)
+            let parcel = try XCTUnwrap(question.components(separatedBy: "parcel ").last?.prefix { $0 != "?" })
+            let asked = lines.filter { $0.contains("parcel \(parcel) left") }
+            XCTAssertEqual(asked.count, 1, item.id)
+            XCTAssertTrue(asked[0].hasSuffix("courier \(item.expected)."), item.id)
+            XCTAssertTrue(ModelComparisonSuite.evaluate(item, reply: item.expected).passed, item.id)
+            XCTAssertFalse(ModelComparisonSuite.evaluate(item, reply: "Courier \(item.expected).").passed, item.id)
+        }
+    }
+
     func testExactAnswerRejectsCorrectSubstringInsideWrongOrVerboseReply() throws {
         let arithmetic = try prompt("arithmetic-en-1")
         for answer in ["143", "43 pencils", "The answer is 43.", "43\n44", "43.", "\"43\"", "<think>3 * 12 + 7</think>43"] {

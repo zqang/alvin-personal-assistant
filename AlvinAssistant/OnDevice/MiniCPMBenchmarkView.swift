@@ -1,6 +1,6 @@
 import AssistantKit
 import Darwin
-import MiniCPMBenchmark
+import MiniCPM
 import Observation
 import SwiftUI
 import UIKit
@@ -61,13 +61,7 @@ struct MiniCPMBenchmarkView: View {
                     Text(progress).font(.footnote).foregroundStyle(.secondary)
                 }
             } footer: {
-                Text("First run downloads about 1.8 GB over Wi-Fi. Each prompt starts with an empty conversation, thinking off, and a 128-token limit. Image tests use one overview slice. Keep the app open and use a Release build on a real iPhone for useful timings.")
-            }
-            Section {
-                Button("Delete MiniCPM download", role: .destructive) { runner.deleteDownload() }
-                    .disabled(runner.isRunning || LocalModelHost.shared.externalBenchmarkInProgress)
-            } footer: {
-                Text("MiniCPM's download is stored separately from the chat and listening models. Delete it here to reclaim about 1.8 GB.")
+                Text("Uses the photo reader's model, and downloads it (about 1.8 GB over Wi-Fi) if it isn't on this iPhone yet; delete it in Settings › Photo reading. Each prompt starts with an empty conversation, thinking off, and a 128-token limit. Image tests use one overview slice. Keep the app open and use a Release build on a real iPhone for useful timings.")
             }
             if !runner.report.isEmpty {
                 Section("Results") {
@@ -116,11 +110,13 @@ struct MiniCPMBenchmarkView: View {
 @Observable
 final class MiniCPMBenchmarkRunner {
     enum Scenario: String, Codable { case text, image }
-    private enum Status: String, Codable { case pending, started, completed, failed, cancelled }
+    private enum Status: String, Codable { case pending, running, completed, failed, cancelled }
     private struct PromptExport: Encodable {
         let index: Int
         let prompt: String
         let thermalState: String
+        /// When the Swift caller received the first visible text.
+        let firstTextSeconds: Double?
         let tokensPerSecond: Double
         let metrics: MiniCPMBenchmarkResult
     }
@@ -131,12 +127,15 @@ final class MiniCPMBenchmarkRunner {
         var finishedAt: Date?
         var loadSeconds: Double?
         var peakProcessFootprintBytes: UInt64 = 0
+        var peakResidentBytes: UInt64 = 0
+        /// The memory-mapped weights (`weights_bytes`), which `phys_footprint` doesn't count.
+        var weightsBytes: UInt64?
         var prompts: [PromptExport] = []
         var report = ""
         var error: String?
     }
     private struct BenchmarkExport: Encodable {
-        let schemaVersion = 1
+        let schemaVersion = 2
         let runID: String
         let device: String
         let systemVersion: String
@@ -146,7 +145,7 @@ final class MiniCPMBenchmarkRunner {
         let lowPowerMode: Bool
         let startedAt: Date
         var finishedAt: Date?
-        var status = Status.started
+        var status = Status.running
         var scenarios: [ScenarioExport]
     }
     private(set) var isRunning = false
@@ -163,7 +162,7 @@ final class MiniCPMBenchmarkRunner {
         if isRunning {
             progress = "Stopping…"
             export?.status = .cancelled
-            if let index = export?.scenarios.firstIndex(where: { $0.status == .started }) {
+            if let index = export?.scenarios.firstIndex(where: { $0.status == .running }) {
                 export?.scenarios[index].status = .cancelled
             }
             // Save the interruption before iOS can suspend the app. finishedAt remains
@@ -180,23 +179,6 @@ final class MiniCPMBenchmarkRunner {
         // Native cancellation stops future GPU submissions. Drain the current operation before
         // iOS removes GPU access; the native wait does not depend on the main actor.
         _ = session?.waitUntilIdle(timeout: 3)
-    }
-
-    func deleteDownload() {
-        guard !isRunning, !LocalModelHost.shared.externalBenchmarkInProgress else { return }
-        do {
-            let directory = try Self.modelDirectory()
-            if FileManager.default.fileExists(atPath: directory.path) {
-                try FileManager.default.removeItem(at: directory)
-            }
-            progress = "MiniCPM download deleted."
-        } catch { progress = error.localizedDescription }
-    }
-
-    private static func modelDirectory() throws -> URL {
-        try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                                    appropriateFor: nil, create: true)
-            .appendingPathComponent("MiniCPMBenchmark", isDirectory: true)
     }
 
     func run(_ scenario: Scenario) {
@@ -258,7 +240,7 @@ final class MiniCPMBenchmarkRunner {
         var rows: [String] = []
         var answers: [String] = []
         var sampleTask: Task<Void, Never>?
-        var peakBytes: UInt64 = 0
+        var peak = ProcessMemory()
         var ownsGPU = false
         let working = FileManager.default.temporaryDirectory.appendingPathComponent("minicpm-bench-\(UUID().uuidString)")
         defer {
@@ -268,18 +250,19 @@ final class MiniCPMBenchmarkRunner {
         }
         do {
             Self.log("Scenario \(scenario.rawValue): checking model files")
-            export?.scenarios[exportIndex].status = .started
+            export?.scenarios[exportIndex].status = .running
             export?.scenarios[exportIndex].startedAt = Date()
             try persistExport()
+            try await waitForMiniCPMFiles(.photoReader) { progress = $0 }
             progress = "Releasing the reply and speech models…"
             guard await LocalModelHost.shared.beginExternalBenchmark() else { throw BenchmarkError.busy }
             ownsGPU = true
             await QwenListener.shared.unloadForBenchmark()
+            await MiniCPMHost.shared.unloadAll()
             try Task.checkCancellation()
 
-            let directory = try Self.modelDirectory()
             progress = "Checking or downloading model files…"
-            let artifacts = MiniCPMArtifacts(directory: directory)
+            let artifacts = MiniCPMArtifacts()
             let files = try await artifacts.prepare { [weak self] fraction in
                 Task { @MainActor in
                     guard let self, self.isRunning, self.task?.isCancelled == false, self.session == nil else { return }
@@ -293,19 +276,16 @@ final class MiniCPMBenchmarkRunner {
             guard os_proc_available_memory() >= 2_300_000_000 else {
                 throw BenchmarkError.memory
             }
-            try FileManager.default.createDirectory(at: working, withIntermediateDirectories: true)
-            var imageURL: URL?
+            var image: Data?
             if scenario == .image {
-                let file = working.appendingPathComponent("fixture.png")
                 guard let png = Self.fixture().pngData() else { throw BenchmarkError.fixture }
-                try png.write(to: file, options: .atomic)
-                imageURL = file
+                image = png
             }
             let native = MiniCPMSession()
             session = native
             sampleTask = Task {
                 while !Task.isCancelled {
-                    peakBytes = max(peakBytes, Self.memoryFootprint())
+                    peak.raise(to: .now)
                     do { try await Task.sleep(for: .milliseconds(100)) } catch { break }
                 }
             }
@@ -314,7 +294,9 @@ final class MiniCPMBenchmarkRunner {
             let loadStart = ContinuousClock.now
             try await native.load(modelURL: files.model, projectorURL: files.projector)
             let loadSeconds = Self.seconds(loadStart.duration(to: .now))
+            let weightsBytes = await native.info.weightsBytes
             export?.scenarios[exportIndex].loadSeconds = loadSeconds
+            export?.scenarios[exportIndex].weightsBytes = weightsBytes
             let prompts = scenario == .text ? LocalBenchmark.prompts : Array(repeating:
                 "Read the text at the top exactly. Name the red and blue shapes. How many green bars are there? Answer briefly.", count: 3)
             report = Self.header(loadSeconds: loadSeconds, scenario: scenario)
@@ -322,21 +304,30 @@ final class MiniCPMBenchmarkRunner {
                 try Task.checkCancellation()
                 guard UIApplication.shared.applicationState == .active else { throw CancellationError() }
                 progress = "Prompt \(index + 1) of \(prompts.count)…"
-                let result = try await native.run(prompt: prompt, imageURL: imageURL, maxTokens: 128)
-                peakBytes = max(peakBytes, Self.memoryFootprint())
+                // Through the streams the app reads from, so first text is when Swift receives it.
+                let streamed = try await MiniCPMStream.measure {
+                    if let image {
+                        return native.describePhoto(jpeg: image, system: "", instruction: prompt, maxTokens: 128, maxSlices: 1)
+                    }
+                    return native.reply(system: "", turns: [ChatTurn(role: .user, text: prompt)], maxTokens: 128, prefixDirectory: working)
+                }
+                let result = streamed.result
+                peak.raise(to: .now)
                 let thermal = String(describing: ProcessInfo.processInfo.thermalState)
-                let firstText = result.firstTextSeconds >= 0 ? Self.format(result.firstTextSeconds) : "–"
+                let firstText = streamed.firstTextSeconds.map(Self.format) ?? "–"
                 rows.append("\(index + 1) | \(firstText) | \(result.promptTokens) | \(Self.format(result.prefillSeconds)) | \(result.generatedTokens) | \(Self.format(result.tokensPerSecond)) | \(result.finishReason) | \(thermal)")
                 answers.append("\(index + 1). \(prompt)\n→ \(result.text)")
                 report = Self.header(loadSeconds: loadSeconds, scenario: scenario)
                     + rows.joined(separator: "\n")
-                    + "\n\nSampled peak process footprint: \(Self.format(Double(peakBytes) / 1e9)) GB\n"
+                    + "\n\nSampled peaks: phys_footprint \(Self.format(Double(peak.footprint) / 1e9)) GB, resident_size \(Self.format(Double(peak.resident) / 1e9)) GB\n"
+                    + "Mapped weights (weights_bytes, not in phys_footprint): \(Self.format(Double(weightsBytes) / 1e9)) GB\n"
                     + "Includes the app and native buffers; sampled every 100 ms, not MLX's allocation metric.\n\n"
                     + answers.joined(separator: "\n\n")
                 export?.scenarios[exportIndex].prompts.append(PromptExport(
-                    index: index + 1, prompt: prompt, thermalState: thermal,
+                    index: index + 1, prompt: prompt, thermalState: thermal, firstTextSeconds: streamed.firstTextSeconds,
                     tokensPerSecond: result.tokensPerSecond, metrics: result))
-                export?.scenarios[exportIndex].peakProcessFootprintBytes = peakBytes
+                export?.scenarios[exportIndex].peakProcessFootprintBytes = peak.footprint
+                export?.scenarios[exportIndex].peakResidentBytes = peak.resident
                 export?.scenarios[exportIndex].report = report
                 try persistExport()
                 Self.log("\(scenario.rawValue) prompt \(index + 1)/\(prompts.count): first text \(firstText) s, \(Self.format(result.tokensPerSecond)) tokens/s, \(thermal)")
@@ -360,7 +351,8 @@ final class MiniCPMBenchmarkRunner {
             report += "\n\n\(reason)"
             export?.scenarios[exportIndex].status = cancelled ? .cancelled : .failed
             export?.scenarios[exportIndex].finishedAt = Date()
-            export?.scenarios[exportIndex].peakProcessFootprintBytes = peakBytes
+            export?.scenarios[exportIndex].peakProcessFootprintBytes = peak.footprint
+            export?.scenarios[exportIndex].peakResidentBytes = peak.resident
             export?.scenarios[exportIndex].report = report
             export?.scenarios[exportIndex].error = reason
             Self.log("Scenario \(scenario.rawValue): \(reason)")
@@ -430,6 +422,8 @@ final class MiniCPMBenchmarkRunner {
         Scenario: \(scenario == .image ? "fixed image, 3 independent repeats" : "8 independent English/Chinese prompts")
         Greedy decoding · thinking off · context 4096 · max output 128 · image slices 1
         No conversation reuse, tools, or speculative decoding. First prompt includes cold kernel work.
+        Streamed as the app reads it: first text is when Swift receives the first visible text
+        (the runtime's own time is nativeFirstTextSeconds in the JSON).
         GPU layer cancellation checkpoints enabled; decode rate counts synchronized forward passes.
         Load time (download and verification excluded): \(format(loadSeconds)) s
 
@@ -446,17 +440,6 @@ final class MiniCPMBenchmarkRunner {
     private static func format(_ value: Double) -> String { String(format: "%.2f", value) }
     private static func seconds(_ duration: Duration) -> Double {
         Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
-    }
-
-    private static func memoryFootprint() -> UInt64 {
-        var info = task_vm_info_data_t()
-        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
-        let result = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
-            }
-        }
-        return result == KERN_SUCCESS ? info.phys_footprint : 0
     }
 
     static func fixture() -> UIImage {

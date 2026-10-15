@@ -118,6 +118,39 @@ public enum ModelComparisonSuite {
               rule: .exact("不能")),
     ]
 
+    /// Versions `longPrompts` and `reuseTurns`; `version` stays the 24-case suite's.
+    public static let extendedVersion = "local-comparison-long-v1"
+
+    /// Prompts of about 500, 1,000 and 2,000 tokens, for how first text grows with prompt length:
+    /// numbered delivery records, then one question about the record in the middle, scored like
+    /// the exact cases.
+    public static let longPrompts = [500, 1000, 2000].map { longPrompt(tokens: $0) }
+
+    /// A spoken 5-turn conversation, each turn building on the replies before it, for session reuse.
+    public static let reuseTurns = [
+        "I'm planning a weekend in Melaka with two friends. What should we see on Saturday?",
+        "We arrive in Singapore on Friday night. Is the bus or driving easier on Saturday morning?",
+        "好的，我们坐巴士。早上几点出发比较好？",
+        "Where should we have dinner on Saturday near Jonker Street?",
+        "Sum up the plan we've made in three short sentences.",
+    ]
+
+    static func longPrompt(tokens: Int) -> Prompt {
+        let couriers = ["Tan", "Lim", "Ong", "Goh", "Koh", "Chua", "Teo", "Yeo"]
+        let places = ["Tampines", "Jurong", "Woodlands", "Bedok", "Bishan", "Clementi", "Punggol"]
+        // About 36 tokens a record with MiniCPM-V 4.7's tokenizer (a token per digit): the three
+        // prompts measured 515, 1,035 and 2,073 tokens with its chat template.
+        let count = tokens / 36
+        let asked = count / 2 + 1
+        let records = (1...count).map { i in
+            "Record \(i): parcel P-\(100 + i) left the \(places[i % 7]) depot at \(String(format: "%02d:%02d", 8 + i % 10, i * 7 % 60)) and was delivered to the \(places[(i * 3 + 1) % 7]) office by courier \(couriers[i * 5 % 8])."
+        }
+        let text = "Use only these delivery records.\n" + records.joined(separator: "\n")
+            + "\nWhich courier delivered parcel P-\(100 + asked)? Reply with only the courier's surname, no punctuation or explanation."
+        return Prompt(id: "long-\(tokens)", category: "Long prompt", language: "en", prompt: text,
+                      rule: .exact(couriers[asked * 5 % 8]))
+    }
+
     /// Surrounding whitespace is ignored. Exact cases otherwise require the entire answer;
     /// JSON cases allow key order/whitespace differences but require identical values and types.
     /// Fences, explanations, missing/extra keys, and extra answers are not accepted.

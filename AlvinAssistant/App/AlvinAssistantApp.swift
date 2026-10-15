@@ -23,7 +23,7 @@ struct AlvinAssistantApp: App {
                     BenchmarkDeviceProbeView()
                 } else if compareLocalModels || compare35B {
                     NavigationStack {
-                        ModelComparisonBenchmarkView(settings: store.settings, variant: compare35B ? .moe35BLESDSpark : .dense1B)
+                        ModelComparisonBenchmarkView(settings: store.settings, variant: compare35B ? .moe35B : .dense1B)
                     }
                 } else if let benchmarkLaunchMode {
                     NavigationStack {
