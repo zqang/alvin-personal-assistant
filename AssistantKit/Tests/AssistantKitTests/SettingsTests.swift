@@ -15,6 +15,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertTrue(settings.localPrefixCache)
         XCTAssertFalse(settings.localFastKernels)
         XCTAssertTrue(settings.localMTP)
+        XCTAssertFalse(settings.accurateOnDevice)
         XCTAssertEqual(settings.routingMode, .single)
         XCTAssertFalse(settings.preferOnDevice)
         XCTAssertTrue(settings.fastLocalSmallTalk)
@@ -67,6 +68,7 @@ final class SettingsTests: XCTestCase {
         settings.localPrefixCache = false
         settings.localFastKernels = true
         settings.localMTP = false
+        settings.accurateOnDevice = true
         settings.routingMode = .automatic
         settings.preferOnDevice = true
         settings.fastLocalSmallTalk = false

@@ -12,7 +12,7 @@ let package = Package(
         .library(name: "AlvinProfile", targets: ["AlvinProfile"]),
     ],
     targets: [
-        .target(name: "AssistantKit", resources: [.copy("OnDevice/MiniCPM35BManifest.json")]),
+        .target(name: "AssistantKit"),
         // This app's own domain (AssistantProfile), which another app replaces with its own and
         // never links. ponytail: it sits in this package only because AssistantKitTests and
         // LocalEngine's test targets use it and the app has no test target. Once a second app

@@ -17,7 +17,7 @@
 		A10000000000000000000035 /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000002F /* Tokenizers */; };
 		A10000000000000000000038 /* LocalEngine in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000037 /* LocalEngine */; };
 		A1000000000000000000003A /* AlvinProfile in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000039 /* AlvinProfile */; };
-		A1000000000000000000003D /* MiniCPMBenchmark in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000003C /* MiniCPMBenchmark */; };
+		A1000000000000000000003D /* MiniCPM in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000003C /* MiniCPM */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -48,7 +48,7 @@
 				A10000000000000000000035 /* Tokenizers in Frameworks */,
 				A10000000000000000000038 /* LocalEngine in Frameworks */,
 				A1000000000000000000003A /* AlvinProfile in Frameworks */,
-				A1000000000000000000003D /* MiniCPMBenchmark in Frameworks */,
+				A1000000000000000000003D /* MiniCPM in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -110,7 +110,7 @@
 				A1000000000000000000002F /* Tokenizers */,
 				A10000000000000000000037 /* LocalEngine */,
 				A10000000000000000000039 /* AlvinProfile */,
-				A1000000000000000000003C /* MiniCPMBenchmark */,
+				A1000000000000000000003C /* MiniCPM */,
 			);
 			productName = AlvinAssistant;
 			productReference = A10000000000000000000004 /* AlvinAssistant.app */;
@@ -148,7 +148,7 @@
 				A1000000000000000000002B /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
 				A1000000000000000000002C /* XCRemoteSwiftPackageReference "swift-transformers" */,
 				A10000000000000000000036 /* XCLocalSwiftPackageReference "LocalEngine" */,
-				A1000000000000000000003B /* XCLocalSwiftPackageReference "MiniCPMBenchmark" */,
+				A1000000000000000000003B /* XCLocalSwiftPackageReference "MiniCPM" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000003 /* Products */;
@@ -310,6 +310,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_PREVIEWS = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Assistant;
@@ -343,6 +344,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_PREVIEWS = YES;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Assistant;
@@ -398,9 +400,9 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = LocalEngine;
 		};
-		A1000000000000000000003B /* XCLocalSwiftPackageReference "MiniCPMBenchmark" */ = {
+		A1000000000000000000003B /* XCLocalSwiftPackageReference "MiniCPM" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = MiniCPMBenchmark;
+			relativePath = MiniCPM;
 		};
 /* End XCLocalSwiftPackageReference section */
 
@@ -495,9 +497,9 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = AlvinProfile;
 		};
-		A1000000000000000000003C /* MiniCPMBenchmark */ = {
+		A1000000000000000000003C /* MiniCPM */ = {
 			isa = XCSwiftPackageProductDependency;
-			productName = MiniCPMBenchmark;
+			productName = MiniCPM;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
