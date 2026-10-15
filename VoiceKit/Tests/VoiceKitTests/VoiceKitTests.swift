@@ -154,6 +154,42 @@ final class VoiceKitTests: XCTestCase {
         XCTAssertEqual(chat.messages.count, 4)
     }
 
+    /// The two spoken apologies are in the speech language, as the cues are.
+    func testApologiesAreSpokenInTheSpeechLanguage() {
+        XCTAssertEqual(VoiceSession.apology(refused: false, localeIdentifier: "en-US"), "Sorry, something went wrong.")
+        XCTAssertEqual(VoiceSession.apology(refused: true, localeIdentifier: "en-GB"), "Sorry, I can't help with that one.")
+        XCTAssertEqual(VoiceSession.apology(refused: false, localeIdentifier: "zh-CN"), "抱歉，出了点问题。")
+        XCTAssertEqual(VoiceSession.apology(refused: true, localeIdentifier: "zh_TW"), "抱歉，这个我帮不上忙。")
+    }
+
+    /// The screen's text follows the speech language when the app declares it, whatever the
+    /// iPhone's language: Roam's own setting wins, and an English-only app stays English.
+    func testScreenTextFollowsTheSpeechLanguageTheAppDeclares() {
+        let roam = ["en", "zh-Hans"]
+        XCTAssertEqual(Bundle.voiceKitStrings(for: "zh-CN", appLanguages: roam).bundleURL.lastPathComponent, "zh-Hans.lproj")
+        // English is the catalog's en.lproj too, never left to the iPhone's language.
+        XCTAssertEqual(Bundle.voiceKitStrings(for: "en-US", appLanguages: roam).bundleURL.lastPathComponent, "en.lproj")
+        XCTAssertEqual(Bundle.voiceKitStrings(for: "zh-CN", appLanguages: ["en"]).bundleURL.lastPathComponent, "en.lproj")
+        XCTAssertEqual(String(localized: "Thinking…", bundle: Bundle.voiceKitStrings(for: "zh-CN", appLanguages: roam)), "正在思考…")
+        XCTAssertEqual(String(localized: "Couldn't start the microphone: \("x")", bundle: Bundle.voiceKitStrings(for: "zh-CN", appLanguages: roam)), "无法启动麦克风：x")
+
+        // A session points VoiceKit's strings at its host's speech language, in an app that
+        // declares it (the test runner declares only English).
+        let saved = (Bundle.voiceKit, Bundle.voiceKitAppLanguages)
+        defer {
+            Bundle.voiceKitCurrent.withLock { $0 = saved.0 }
+            Bundle.voiceKitAppLanguages = saved.1
+        }
+        Bundle.voiceKitAppLanguages = roam
+        let host = Host()
+        host.settings.speechLocale = "zh-CN"
+        _ = VoiceSession(conversation: Chat(), pipeline: Pipeline(), host: host)
+        XCTAssertEqual(Bundle.voiceKit.bundleURL.lastPathComponent, "zh-Hans.lproj")
+        host.settings.speechLocale = "en-US"
+        _ = VoiceSession(conversation: Chat(), pipeline: Pipeline(), host: host)
+        XCTAssertEqual(Bundle.voiceKit.bundleURL.lastPathComponent, "en.lproj")
+    }
+
     /// Every string in the catalog has Simplified Chinese, and the built bundle serves it.
     func testEveryCatalogKeyHasChinese() throws {
         struct Catalog: Decodable {

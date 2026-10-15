@@ -28,7 +28,7 @@ final class CameraFeed {
     func start() async {
         wanted = true
         guard await AVCaptureDevice.requestAccess(for: .video) else {
-            problem = String(localized: "Camera access is off. Turn it on in Settings › Privacy & Security › Camera.", bundle: .module)
+            problem = String(localized: "Camera access is off. Turn it on in Settings › Privacy & Security › Camera.", bundle: .voiceKit)
             return
         }
         guard wanted, !isRunning else { return }
@@ -37,7 +37,7 @@ final class CameraFeed {
                   let input = try? AVCaptureDeviceInput(device: device),
                   session.canAddInput(input), session.canAddOutput(output)
             else {
-                problem = String(localized: "The camera isn't available.", bundle: .module)
+                problem = String(localized: "The camera isn't available.", bundle: .voiceKit)
                 return
             }
             session.beginConfiguration()
@@ -122,7 +122,7 @@ public struct CameraFeedView: View {
                         .multilineTextAlignment(.center)
                     if AVCaptureDevice.authorizationStatus(for: .video) == .denied,
                        let settings = URL(string: UIApplication.openSettingsURLString) {
-                        Link(destination: settings) { Text("Open Settings", bundle: .module) }
+                        Link(destination: settings) { Text("Open Settings", bundle: .voiceKit) }
                             .font(.footnote.weight(.semibold))
                     }
                 }
@@ -130,10 +130,10 @@ public struct CameraFeedView: View {
                 .frame(maxHeight: .infinity)
             } else if let feed {
                 CameraPreview(session: feed.session)
-                    .accessibilityLabel(Text("Camera preview", bundle: .module))
+                    .accessibilityLabel(Text("Camera preview", bundle: .voiceKit))
                 VStack(spacing: 12) {
                     if shotFailed {
-                        Text("Couldn't take the photo. Try again.", bundle: .module)
+                        Text("Couldn't take the photo. Try again.", bundle: .voiceKit)
                             .font(.footnote)
                             .foregroundStyle(.white)
                             .padding(.horizontal, 12)
@@ -150,7 +150,7 @@ public struct CameraFeedView: View {
                             .frame(width: 68, height: 68)
                     }
                     .disabled(!feed.isRunning || capturing)
-                    .accessibilityLabel(Text("Take photo", bundle: .module))
+                    .accessibilityLabel(Text("Take photo", bundle: .voiceKit))
                 }
                 .padding(.bottom, 16)
             }

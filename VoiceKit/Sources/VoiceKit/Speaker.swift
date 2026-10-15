@@ -24,9 +24,9 @@ public enum VoiceCatalog {
 
     public static func qualityLabel(_ voice: AVSpeechSynthesisVoice) -> String {
         switch voice.quality {
-        case .premium: return String(localized: "Premium", bundle: .module)
-        case .enhanced: return String(localized: "Enhanced", bundle: .module)
-        default: return String(localized: "Standard", bundle: .module)
+        case .premium: return String(localized: "Premium", bundle: .voiceKit)
+        case .enhanced: return String(localized: "Enhanced", bundle: .voiceKit)
+        default: return String(localized: "Standard", bundle: .voiceKit)
         }
     }
 
@@ -452,7 +452,7 @@ final class Speaker {
                             if body.count >= 4096 { break }
                         }
                         let message = (try? JSONValue.parse(body))?["error"]?["message"]?.stringValue ?? "HTTP \(status)"
-                        throw SpeechSynthesisError(message: String(localized: "OpenAI voice failed: \(message)", bundle: .module))
+                        throw SpeechSynthesisError(message: String(localized: "OpenAI voice failed: \(message)", bundle: .voiceKit))
                     }
                     let chunkBytes = 9_600
                     var decoder = PCM16Decoder()

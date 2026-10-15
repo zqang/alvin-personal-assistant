@@ -73,7 +73,7 @@ final class RecognitionFeeder: @unchecked Sendable {
 }
 
 struct SpeechRecognitionUnavailable: LocalizedError {
-    var errorDescription: String? { String(localized: "Speech recognition isn't available right now.", bundle: .module) }
+    var errorDescription: String? { String(localized: "Speech recognition isn't available right now.", bundle: .voiceKit) }
 }
 
 /// Live speech-to-text with Apple's recognizer (on-device when the language supports it),

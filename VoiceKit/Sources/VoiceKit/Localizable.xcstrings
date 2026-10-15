@@ -442,7 +442,14 @@
       }
     },
     "Thinking…" : {
+      "comment" : "Its English entry gives the built bundle an en.lproj, so an app's English setting wins over a Chinese iPhone (Bundle.voiceKitStrings).",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thinking…"
+          }
+        },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",

@@ -143,7 +143,7 @@ public final class PendingPhoto {
 
 /// A photo's read stopped before it finished, so its turn has no note yet.
 struct PhotoReadStopped: LocalizedError {
-    var errorDescription: String? { String(localized: "Reading the photo stopped before it finished. Try again.", bundle: .module) }
+    var errorDescription: String? { String(localized: "Reading the photo stopped before it finished. Try again.", bundle: .voiceKit) }
 }
 
 /// A stored photo, decoded once at a small size.
@@ -160,7 +160,7 @@ public struct PhotoThumbnail: View {
     public var body: some View {
         Group {
             if let image {
-                Image(image, scale: 1, label: Text("Attached photo", bundle: .module))
+                Image(image, scale: 1, label: Text("Attached photo", bundle: .voiceKit))
                     .resizable()
                     .aspectRatio(contentMode: contentMode)
             } else {
