@@ -55,7 +55,7 @@ GitHub Actions runs whose logs hold the numbers quoted in this document.
 | Phase | Deliverable | WPs | Status |
 |---|---|---|---|
 | 0. Spike | Settings › Benchmark: time to first token, tokens/s and memory on a phone | — | Built earlier; now the scenario benchmark of phase 9 |
-| 1. Local provider | `Provider.onDevice`, `LocalProvider` and `LocalModelHost`, the GPU and memory hand-off with Qwen3-ASR, download flow | — | Built earlier |
+| 1. Local provider | `Provider.onDevice`, `LocalProvider` and `LocalEngineHost`, the GPU and memory hand-off with Qwen3-ASR, download flow | — | Built earlier |
 | 2. Contracts, CI lab, engine skeleton | `AssistantEvent`, tool and route types, `CommitGate`, the new settings, the `ReplyPipeline` seam; the model-facts and drafter-lab workflows; the `LocalEngine` package with a GPU canary | WP00, WP01, WP02 | Built. Verified in CI on `ca75f08`: iOS 37705247621, Local engine 37705247676, Model facts 37705247655, Drafter lab 37705247648 |
 | 3. Engine core | session planning (AssistantKit); the `HybridQwen35` fork with exact rollback; the engine runtime (session reuse, checkpoints, pipelined decode, prefix on disk) | WP10, WP16, WP20 | Built. Verified in CI: Local engine 37861143970 (`c16ec26`) |
 | 4. Speculation and self-test | drafters, draft policy, acceptance rule (AssistantKit); speculative loop, cost probe, self-test (LocalEngine) | WP11, WP30 | Built. Verified in CI: Local engine 37867824542 (`51b0eaf`); Woof 4B in 37875179123 (`d3779c3`) |
@@ -113,7 +113,7 @@ What became of Husky's public claims:
  Orchestrator (AssistantKit): yields .routed first; one fallback, only before the reply commits
    ├─ cloud: ClaudeProvider + ToolRunner(device tools)                  ┐
    ├─ deep:  Deliberation (one high-effort call, or 3 workers + merger) │  AssistantEvent stream:
-   ├─ local: LocalProvider → LocalModelHost                             │  .reply(ReplyEvent), .cue,
+   ├─ local: LocalProvider → LocalEngineHost                            │  .reply(ReplyEvent), .cue,
    │           ├─ Alvin engine: LocalToolLoop → InferenceEngine         │  .toolRound, .routed,
    │           └─ stock: MLX ChatSession over the same model (no tools) │  .progress
    └─ local, most accurate: MiniCPM35BProvider → MiniCPMHost (35B)      ┘
@@ -167,7 +167,7 @@ What became of Husky's public claims:
 | `SpeculativeLoop`, drafters, `CostProbe`, `EngineSelfTest` | `LocalEngine/Speculation`, `LocalEngine/Drafters` | Speculative decoding, the on-device cost curve, the self-test. |
 | `LocalToolLoop` | `LocalEngine/Tools` | Native tool calls on device, with handoff to the cloud. |
 | Small-M kernel | `LocalEngine/Kernels` | Optional `MLXFast.metalKernel` for 2–9-row 4-bit matmuls, behind a self-test and a measured gain. |
-| `LocalModelHost`, `EngineSetup`, `EngineVerificationStore` | `AlvinAssistant/OnDevice` | Download, load, warm-up, self-test and cost probe at load, mode choice per reply, fallback to stock. |
+| `LocalEngineHost`, `LocalProvider`, `EngineSetup`, `EngineVerificationStore` | `LocalEngine/Sources/LocalEngineHost` (the `LocalEngineHost` product; the app's ties are launch hooks) | Download, load, warm-up, self-test and cost probe at load, mode choice per reply, fallback to stock. |
 
 ### 4.2 Loading
 
@@ -363,9 +363,9 @@ running on the unloaded model.
   in order:
   1. It awaits `QwenListener.finishPasses()`.
   2. If `os_proc_available_memory()` is below what the run needs, it calls
-     `LocalModelHost.unloadForBenchmark()`. A run on a loaded model needs `runBytes` (600 MB); a load needs
+     `LocalEngineHost.unloadForBenchmark()`. A run on a loaded model needs `runBytes` (600 MB); a load needs
      the model's peak plus `runBytes`: 2.2 GB for the 1B, 4.3 GB for the 35B (decision 21).
-  3. It runs `body` inside `LocalModelHost.whilePaused`. That is a thin wrapper over the host's
+  3. It runs `body` inside `LocalEngineHost.whilePaused`. That is a thin wrapper over the host's
      `exclusively`, which waits for MLX jobs and blocks new ones. When no engine is loaded, it runs `body`
      directly.
 
@@ -547,7 +547,7 @@ Otherwise Woof answers. The router counts the mode as "local ready".
 streamed `.reply(.text)` and `.finished`. If the 35B fails before any text, Woof answers through the
 `LocalProvider` the provider holds, with the activity "Using Woof: …". The 35B's system prompt is
 `PromptBuilder.systemPrompt(…, profile: .app)` plus one line saying it has no tools and no live
-information. Prewarm calls `prepareAccurate`, and voice mode skips `LocalModelHost.prepare` while the mode is
+information. Prewarm calls `prepareAccurate`, and voice mode skips `LocalEngineHost.prepare` while the mode is
 on. The engine shows as "On device · MiniCPM-V 35B".
 
 **Eligibility and files.**
