@@ -1,5 +1,6 @@
 import AssistantKit
 import SwiftUI
+import VoiceKit
 
 /// Settings for how soon voice mode answers: early start, spoken cues, the turn chime, ducking,
 /// and a report of recent voice turns' latency.
