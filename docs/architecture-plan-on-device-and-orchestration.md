@@ -133,8 +133,8 @@ What became of Husky's public claims:
   3. `PromptBuilder` puts it in `ChatTurn.context` for every engine.
 
   The photo itself stays on the iPhone ([§4.12](#412-minicpm-v-on-device)).
-- **The seam.** `ReplyPipelines.make` builds the pipeline the chat and voice screens use. `AppSetup.install`
-  sets it to `OrchestratedReplyPipeline` at launch; `LegacyReplyPipeline` keeps the old single-provider path.
+- **The seam.** `ReplyPipeline` and `ReplyRequest(messages:)` live in VoiceKit. `ChatController` and `ChatView`
+  construct `OrchestratedReplyPipeline(store:)` directly, and `VoiceSession` takes the pipeline in its init.
 - **Code layout.**
   - `AssistantKit/`: Foundation-only Swift, tested on macOS and Linux. Events, settings, prompt building,
     session planning and drafting logic for the engine, tools runtime, Claude client and agent loop, router,
@@ -144,7 +144,10 @@ What became of Husky's public claims:
   - `MiniCPM/`: MiniCPM-V on the pinned llama.cpp-omni runtime, which is a binary target. It holds the C++
     bridge, `MiniCPMSession`, `MiniCPMHost` (the 1B photo reader, the 35B accurate mode and their downloads)
     and the `minicpm-bench` command-line tool. It runs on Apple platforms only.
-  - `AlvinAssistant/`: the app. Device tools, the model host, settings screens, voice session, pipeline.
+  - `VoiceKit/`: hands-free voice mode as a package another app can embed: the voice session, the voice
+    screen, the camera and the latency log ([VoiceKit guide](voice-kit.md)). The app hosts it through
+    `App/VoiceHosting.swift`.
+  - `AlvinAssistant/`: the app. Device tools, the model host, settings screens, the reply pipeline.
 
 ## 4. On-device engine
 
@@ -804,7 +807,7 @@ Delete; while the 35B mode is hidden, its files section has Delete only. Setting
 
 | Workflow | Runs on | Trigger | Proves |
 |---|---|---|---|
-| `ios.yml` | macos-26; ubuntu-24.04 (`swift:6.2-noble`) | every push and pull request, except changes only to `docs/**`, `scripts/**`, `README.md` and the two lab workflows; by hand | AssistantKit and MiniCPM `swift test` (MiniCPM's model tests skip without model files); the scripts' Python tests and `scripts/check_pending_photo.swift`; the iOS app build, which compiles LocalEngine into the app and links the MiniCPM runtime from its release asset; AssistantKit on Linux (blocking) |
+| `ios.yml` | macos-26; ubuntu-24.04 (`swift:6.2-noble`) | every push and pull request, except changes only to `docs/**`, `scripts/**`, `README.md` and the two lab workflows; by hand | AssistantKit and MiniCPM `swift test` (MiniCPM's model tests skip without model files); the scripts' Python tests; the VoiceKit tests on an iPhone simulator, which include the attached-photo checks; the iOS app build, which compiles LocalEngine into the app and links the MiniCPM runtime from its release asset; AssistantKit on Linux (blocking) |
 | `local-engine.yml` | macos-26 (Metal GPU), 75 min | pushes touching `LocalEngine/**`, `AssistantKit/**` or the workflow; nightly at 04:41 UTC; by hand (input `woof`); `[ci woof]` in the head commit message adds Woof 4B | unit tests on tiny random models (parity, replay exactness, speculative = plain, session reuse = fresh prefill, sampler equivalence, prefix round trip, kernels) with Metal API validation on; an iOS compile of LocalEngine; integration tests on Qwen3-0.6B/1.7B and Qwen3.5-0.8B/2B (pinned in `LocalEngine/ci-models.txt`), plus Woof 4B when asked |
 | `model-facts.yml` | ubuntu-24.04, 30 min | pushes touching `scripts/model_facts.py`, `scripts/lab_models.txt`, `scripts/lab_prompts.json` or the workflow; Mondays at 05:17 UTC; by hand | checkpoint layout, `mtp.*` presence, conv1d layout, EOS ids, quantization and chat-template behaviour, from the Hub without downloading weights |
 | `drafter-lab.yml` | macos-26 (Metal GPU), 90 min | every push starts a small gate job; the lab runs only when its script, prompts, model list or workflow changed, when the head commit message contains `[ci lab]`, or by hand | Woof greedy outputs, drafting acceptance simulation, tool-call accuracy, template comparison, and DFlash acceptance (optional step) |

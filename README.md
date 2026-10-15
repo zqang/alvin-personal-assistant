@@ -251,7 +251,7 @@ Web search is only available with Claude.
           └──────────── AVAudioPlayerNode ◀┘ ─▶ speaker
 ```
 
-The code is split in four:
+The code is split in five:
 
 - **`AssistantKit/`** is a Swift package with everything that isn't iOS-specific, all covered by unit tests:
   - the Claude streaming client with its tool loop, and the OpenAI-compatible client
@@ -269,11 +269,15 @@ The code is split in four:
   - the 35B behind "Most accurate on device" (hidden in this version);
   - their downloads;
   - a benchmark command-line tool.
+- **`VoiceKit/`** is hands-free voice mode as a package another app can embed:
+  - the audio engine, speech recognition, and speech playback
+  - `VoiceSession`, the state machine that ties them together, and the voice screen
+  - its strings, in English and Simplified Chinese
 - **`AlvinAssistant/`** is the iOS app:
   - SwiftUI views
   - SwiftData storage
-  - the audio engine, speech recognition, and speech playback
-  - `VoiceSession`, the state machine that ties them together
+  - the reply pipeline, the tools and the on-device models
+  - how it hosts voice mode (`App/VoiceHosting.swift`)
 
 AssistantKit and LocalEngine know nothing about reminders, calendars or timers. This app's domain lives in one
 value, `AssistantProfile.app` (`AlvinAssistant/App/AppSetup.swift`), which comes from the `AlvinProfile` module
@@ -315,6 +319,11 @@ To measure your tools on a phone, define a tool-call scenario with stand-in resu
 screen that plays it (`LocalBenchmarkRunner` and `BenchmarkToolExecutor` in `AlvinAssistant/OnDevice/LocalBenchmarkView.swift`)
 is app code tied to `LocalModelHost`, so copy and adapt it.
 
+For hands-free voice mode, add the `VoiceKit` package too. Give it your conversation, your reply pipeline and a
+small host; everything else is optional. [The VoiceKit guide](docs/voice-kit.md) shows how, with a complete
+host that the package's tests compile. It also shows how Roam, a travel app, plugs in: its tools, on-device
+answers for its own actions, its backend for open questions, and its two languages.
+
 ### Claude API details
 
 Swift has no official Anthropic SDK, so `ClaudeProvider` calls the Messages API over HTTP with streaming.
@@ -338,8 +347,8 @@ Swift has no official Anthropic SDK, so `ClaudeProvider` calls the Messages API 
 swift test --package-path AssistantKit
 swift test --package-path MiniCPM      # the model tests skip unless model files are given
 python3 -m unittest discover -s scripts -p 'test_*.py'
-swiftc -parse-as-library AlvinAssistant/Chat/PendingPhoto.swift scripts/check_pending_photo.swift \
-  -o /tmp/check_pending_photo && /tmp/check_pending_photo    # the attached-photo logic; the app has no test target
+cd VoiceKit && xcodebuild test -scheme VoiceKit \
+  -destination 'platform=iOS Simulator,name=iPhone 17'    # voice mode and attached photos; iOS only, so on a simulator
 ```
 
 `.github/workflows/ios.yml` runs on every push and pull request, except ones that change only docs or
