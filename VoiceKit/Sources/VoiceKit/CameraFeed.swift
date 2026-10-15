@@ -28,7 +28,7 @@ final class CameraFeed {
     func start() async {
         wanted = true
         guard await AVCaptureDevice.requestAccess(for: .video) else {
-            problem = "Camera access is off. Turn it on in Settings › Privacy & Security › Camera."
+            problem = String(localized: "Camera access is off. Turn it on in Settings › Privacy & Security › Camera.", bundle: .module)
             return
         }
         guard wanted, !isRunning else { return }
@@ -37,7 +37,7 @@ final class CameraFeed {
                   let input = try? AVCaptureDeviceInput(device: device),
                   session.canAddInput(input), session.canAddOutput(output)
             else {
-                problem = "The camera isn't available."
+                problem = String(localized: "The camera isn't available.", bundle: .module)
                 return
             }
             session.beginConfiguration()
@@ -63,7 +63,8 @@ final class CameraFeed {
     /// the camera isn't running yet or the capture failed.
     func takePhoto() async -> Data? {
         guard isRunning, capture == nil, let connection = output.connection(with: .video), connection.isActive, connection.isEnabled else { return nil }
-        // Portrait, the app's only orientation.
+        // Portrait: hosts show voice mode in portrait only (docs/voice-kit.md, section 2).
+        // ponytail: a fixed angle; a host that allows landscape here needs AVCaptureDevice.RotationCoordinator.
         if connection.isVideoRotationAngleSupported(90) {
             connection.videoRotationAngle = 90
         }
@@ -98,7 +99,7 @@ private final class PhotoCapture: NSObject, AVCapturePhotoCaptureDelegate {
 
 /// A live back-camera preview with a shutter. The camera runs while the view is on screen, and
 /// each photo taken goes to `onPhoto`.
-struct CameraFeedView: View {
+public struct CameraFeedView: View {
     var onPhoto: (Data) -> Void
     /// Made on first appearance: a capture session is too heavy to build on every redraw.
     @State private var feed: CameraFeed?
@@ -106,7 +107,11 @@ struct CameraFeedView: View {
     /// The last shutter press gave no photo (the camera wasn't running yet, or was interrupted).
     @State private var shotFailed = false
 
-    var body: some View {
+    public init(onPhoto: @escaping (Data) -> Void) {
+        self.onPhoto = onPhoto
+    }
+
+    public var body: some View {
         ZStack(alignment: .bottom) {
             Color.black
             if let problem = feed?.problem {
@@ -117,7 +122,7 @@ struct CameraFeedView: View {
                         .multilineTextAlignment(.center)
                     if AVCaptureDevice.authorizationStatus(for: .video) == .denied,
                        let settings = URL(string: UIApplication.openSettingsURLString) {
-                        Link("Open Settings", destination: settings)
+                        Link(destination: settings) { Text("Open Settings", bundle: .module) }
                             .font(.footnote.weight(.semibold))
                     }
                 }
@@ -125,10 +130,10 @@ struct CameraFeedView: View {
                 .frame(maxHeight: .infinity)
             } else if let feed {
                 CameraPreview(session: feed.session)
-                    .accessibilityLabel("Camera preview")
+                    .accessibilityLabel(Text("Camera preview", bundle: .module))
                 VStack(spacing: 12) {
                     if shotFailed {
-                        Text("Couldn't take the photo. Try again.")
+                        Text("Couldn't take the photo. Try again.", bundle: .module)
                             .font(.footnote)
                             .foregroundStyle(.white)
                             .padding(.horizontal, 12)
@@ -145,7 +150,7 @@ struct CameraFeedView: View {
                             .frame(width: 68, height: 68)
                     }
                     .disabled(!feed.isRunning || capturing)
-                    .accessibilityLabel("Take photo")
+                    .accessibilityLabel(Text("Take photo", bundle: .module))
                 }
                 .padding(.bottom, 16)
             }

@@ -1,6 +1,6 @@
 import SwiftUI
 
-enum OrbMood: Equatable {
+public enum OrbMood: Equatable {
     case idle
     case listening
     case thinking
@@ -44,11 +44,16 @@ enum OrbMood: Equatable {
 }
 
 /// An animated orb that breathes, swirls, and swells with the voice level.
-struct OrbView: View {
+public struct OrbView: View {
     var level: CGFloat
     var mood: OrbMood
 
-    var body: some View {
+    public init(level: CGFloat, mood: OrbMood) {
+        self.level = level
+        self.mood = mood
+    }
+
+    public var body: some View {
         TimelineView(.animation) { timeline in
             let time = timeline.date.timeIntervalSinceReferenceDate
             GeometryReader { proxy in

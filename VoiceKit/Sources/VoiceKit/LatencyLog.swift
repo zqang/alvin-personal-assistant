@@ -6,12 +6,12 @@ import Observation
 /// Kept across launches, so a report can cover several voice sessions.
 @MainActor
 @Observable
-final class LatencyLog {
-    static let shared = LatencyLog()
+public final class LatencyLog {
+    public static let shared = LatencyLog()
     /// Traces kept; older ones are dropped.
     static let capacity = 50
 
-    private(set) var traces: [TurnLatencyTrace]
+    public private(set) var traces: [TurnLatencyTrace]
 
     private let defaults: UserDefaults
     private static let storageKey = "assistant.latencyTraces"
@@ -36,13 +36,13 @@ final class LatencyLog {
         save()
     }
 
-    func clear() {
+    public func clear() {
         traces.removeAll()
         save()
     }
 
     /// p50 and p90 of the recorded turns, per engine.
-    func summary() -> String {
+    public func summary() -> String {
         LatencyReport.summary(traces)
     }
 
