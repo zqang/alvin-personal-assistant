@@ -1,5 +1,6 @@
 import AssistantKit
 import Foundation
+import LocalEngineHost
 import MiniCPM
 import VoiceKit
 
@@ -80,7 +81,7 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
             }
         }
         // Voice waits less for a silent cloud when the on-device model can answer at once.
-        let localLoaded = accurate ? MiniCPMHost.shared.isLoaded(.accurate) : LocalModelHost.shared.status == .ready
+        let localLoaded = accurate ? MiniCPMHost.shared.isLoaded(.accurate) : LocalEngineHost.shared.status == .ready
         let watchdog: Duration = request.inputIsVoice && localLoaded ? .seconds(3) : .seconds(8)
         let orchestrator = Orchestrator(decision: decision, engines: engines, firstEventTimeout: watchdog)
         // The OpenAI-compatible service isn't one of the router's engines; its times would skew
@@ -179,7 +180,7 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
         case .anthropic:
             break
         }
-        let host = LocalModelHost.shared
+        let host = LocalEngineHost.shared
         let automatic = settings.routingMode == .automatic
         var signals = RouteSignals(
             policy: automatic ? .automatic(preferLocal: settings.preferOnDevice) : .cloudOnly,
@@ -274,15 +275,15 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
             // Loads a downloaded model and makes its system prompt resident; never downloads. Not
             // while MiniCPM-V runs: the load would stop it, a photo being read included.
             if settings.routingMode == .automatic, localAvailable(settings), !prewarmAccurate(settings), !MiniCPMHost.shared.isBusy {
-                LocalModelHost.shared.prewarm(settings: settings)
+                LocalEngineHost.shared.prewarm(settings: settings)
             }
         case .onDevice:
             if prewarmAccurate(settings) || MiniCPMHost.shared.isBusy { break }
             if inputIsVoice {
                 // As before: voice mode gets the model ready, downloading it if needed.
-                LocalModelHost.shared.prepare(settings)
+                LocalEngineHost.shared.prepare(settings)
             } else {
-                LocalModelHost.shared.prewarm(settings: settings)
+                LocalEngineHost.shared.prewarm(settings: settings)
             }
         case .openAICompatible:
             break
@@ -294,7 +295,7 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
     /// Not while that model loads or answers: the 35B's lease would take its memory mid-reply.
     private func prewarmAccurate(_ settings: AssistantSettings) -> Bool {
         guard accurateAnswers(settings, intents: []) else { return false }
-        if !LocalModelHost.shared.isBusy {
+        if !LocalEngineHost.shared.isBusy {
             let base = PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: settings.customInstructions, profile: .app)
             MiniCPMHost.shared.prepareAccurate(system: MiniCPM35BProvider.system(base: base))
         }
@@ -325,12 +326,12 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
     private func localAvailable(_ settings: AssistantSettings) -> Bool {
         guard LocalModelCatalog.option(for: settings.localModelID) != nil else { return false }
         // Read first, so a view calling this redraws when a download finishes.
-        if LocalModelHost.shared.status == .ready { return true }
+        if LocalEngineHost.shared.status == .ready { return true }
         let now = Date()
         if let check = downloadCheck, check.modelID == settings.localModelID, now.timeIntervalSince(check.at) < 5 {
             return check.downloaded
         }
-        let downloaded = LocalModelHost.shared.isDownloaded(settings.localModelID)
+        let downloaded = LocalEngineHost.shared.isDownloaded(settings.localModelID)
         downloadCheck = (settings.localModelID, downloaded, now)
         return downloaded
     }

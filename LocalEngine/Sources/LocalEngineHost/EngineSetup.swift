@@ -2,23 +2,10 @@ import AssistantKit
 import Foundation
 import LocalEngine
 
-/// LocalEngine's fast kernels (`FastKernelsExtension`, plan WP41) as the app drives them: the
+/// LocalEngine's fast kernels (`FastKernelsExtension`, plan WP41) as the host drives them: the
 /// request in the engine configuration, the verdict of the extension's `prepare` (run in
-/// `warmUp()`), and a dry-run comparison for Settings.
-///
-/// The kernels reach LocalEngine in the same wave as the app's engine files, so only launch setup
-/// names them. It puts one `FastKernelsExtension` in `EngineSetup.extraExtensions` and declares
-/// the conformances at file scope; the extension's `report` and `measure(_:)` and every member
-/// of its report already match:
-///
-/// ```swift
-/// extension FastKernelsExtension: FastKernelsProviding {
-///     func request(_ requested: Bool, in configuration: inout EngineConfiguration) {
-///         configuration.fastKernelsRequested = requested
-///     }
-/// }
-/// extension FastKernelsReport: FastKernelsVerdict {}
-/// ```
+/// `warmUp()`), and a dry-run comparison for Settings. They're used only when launch setup puts a
+/// `FastKernelsExtension` in `EngineSetup.extraExtensions`.
 protocol FastKernelsProviding: EngineExtension, Sendable {
     associatedtype Verdict: FastKernelsVerdict
 
@@ -46,19 +33,31 @@ protocol FastKernelsVerdict: Sendable {
     var summary: String { get }
 }
 
-/// How the app configures the on-device engine (plan §4, WP40 instruction 4).
+// The fast kernels as `EngineSetup` drives them: the request lives in the engine configuration,
+// and the extension's report is the verdict.
+extension FastKernelsExtension: FastKernelsProviding {
+    typealias Verdict = FastKernelsReport
+
+    func request(_ requested: Bool, in configuration: inout EngineConfiguration) {
+        configuration.fastKernelsRequested = requested
+    }
+}
+
+extension FastKernelsReport: FastKernelsVerdict {}
+
+/// How the host configures the on-device engine (plan §4, WP40 instruction 4).
 @MainActor
-enum EngineSetup {
+public enum EngineSetup {
     /// Engine extensions added at launch (the fast kernels, an MTP drafter). Every load passes
     /// those `wantsExtension` keeps.
-    static var extraExtensions: [any EngineExtension] = []
+    public static var extraExtensions: [any EngineExtension] = []
 
     /// Whether `extraExtensions` member `engineExtension` is used under `settings`; by default
     /// every one is. The extensions can't read the settings, so launch setup uses this to keep an
     /// MTP drafter to `localMTP`; such a change applies from the next reply. The fast kernels
     /// need no filter: they read `localFastKernels` from the configuration's request
     /// (`FastKernelsProviding`), and a change of it reloads the model.
-    static var wantsExtension: @MainActor (_ engineExtension: any EngineExtension, _ settings: AssistantSettings) -> Bool = { _, _ in true }
+    public static var wantsExtension: @MainActor (_ engineExtension: any EngineExtension, _ settings: AssistantSettings) -> Bool = { _, _ in true }
 
     /// The fast kernels among `extraExtensions`, when launch setup put them there.
     static var fastKernels: (any FastKernelsProviding)? {
@@ -73,11 +72,11 @@ enum EngineSetup {
     /// The fast kernels count as helping when they make an 8-row forward at least this much
     /// cheaper (plan WP41: c(8) improved by ≥ 25%, `FastKernelsExtension`'s default
     /// `requiredGain`).
-    static let kernelGainThreshold = 0.25
+    public static let kernelGainThreshold = 0.25
 
     /// The engine configuration for `settings`, with `host`'s measured cost curve, loaded draft
     /// model and GPU hooks.
-    static func configuration(settings: AssistantSettings, host: LocalModelHost) -> EngineConfiguration {
+    public static func configuration(settings: AssistantSettings, host: LocalEngineHost) -> EngineConfiguration {
         var configuration = EngineConfiguration()
         // The app's sampling, as the stock path uses it.
         configuration.temperature = 0.7
@@ -89,7 +88,7 @@ enum EngineSetup {
         configuration.extensions = extensions(for: settings)
         // After `extensions`: assigning them drops the request.
         fastKernels?.request(settings.localFastKernels, in: &configuration)
-        configuration.hooks = LocalModelHost.engineHooks
+        configuration.hooks = LocalEngineHost.engineHooks
         return configuration
     }
 
@@ -99,7 +98,7 @@ enum EngineSetup {
     /// `localSpeculativeDecoding` is on). More than 4 drafts per round are allowed only while the
     /// model runs the fast kernels and the curve was measured with them; the draft policy then
     /// still caps them at 4 unless the curve gives c(9)/c(1) ≤ 2.
-    static func generatorFactory(settings: AssistantSettings, host: LocalModelHost) -> SpeculativeGeneratorFactory {
+    public static func generatorFactory(settings: AssistantSettings, host: LocalEngineHost) -> SpeculativeGeneratorFactory {
         let measured = host.costCurve
         return SpeculativeGeneratorFactory(
             mode: settings.localSpeculation,
@@ -124,7 +123,7 @@ enum EngineSetup {
     // MARK: Files
 
     /// `Application Support/EngineCache`, created and excluded from backup.
-    nonisolated static func cacheDirectory() -> URL {
+    nonisolated public static func cacheDirectory() -> URL {
         var folder = URL.applicationSupportDirectory.appending(path: "EngineCache", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         var values = URLResourceValues()

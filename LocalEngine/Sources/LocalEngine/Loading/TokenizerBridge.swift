@@ -3,7 +3,6 @@ import MLXLMCommon
 import Tokenizers
 
 /// Loads tokenizers with swift-transformers, as MLXHuggingFace's macro would, without the macro.
-/// Copied from the app's `LocalModelHost.swift`.
 public struct TransformersTokenizerLoader: MLXLMCommon.TokenizerLoader {
     public init() {}
 

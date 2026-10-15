@@ -1,5 +1,6 @@
 import AssistantKit
 import Foundation
+import LocalEngineHost
 import MiniCPM
 import VoiceKit
 
@@ -39,7 +40,7 @@ extension SettingsStore: VoiceSessionHost {
     func voiceSessionWillStart(_ settings: AssistantSettings) {
         // "Most accurate on device" loads its own model, through the pipeline's prewarm.
         if settings.provider == .onDevice, !settings.accurateOnDevice {
-            LocalModelHost.shared.prepare(settings)
+            LocalEngineHost.shared.prepare(settings)
         }
         guard settings.usesQwenListening else { return }
         QwenListener.shared.isWanted = true
@@ -48,7 +49,7 @@ extension SettingsStore: VoiceSessionHost {
             // model, or MiniCPM-V 35B, which the session's first prewarm starts loading before
             // this task runs.
             Task {
-                await LocalModelHost.shared.settle()
+                await LocalEngineHost.shared.settle()
                 await MiniCPMHost.shared.settle()
                 if QwenListener.shared.isWanted { QwenListener.shared.load() }
             }

@@ -1,4 +1,5 @@
 import AssistantKit
+import LocalEngineHost
 import SwiftUI
 
 /// Settings › On-device engine: which generator answers on-device replies, speculative decoding,
@@ -10,7 +11,7 @@ struct OnDeviceEngineSection: View {
     /// A per-device view preference, not an engine setting.
     @AppStorage("showsEngineSettings") private var showsAdvanced = false
 
-    private var host: LocalModelHost { LocalModelHost.shared }
+    private var host: LocalEngineHost { LocalEngineHost.shared }
 
     var body: some View {
         Section {

@@ -1,4 +1,5 @@
 import LocalEngine
+import LocalEngineHost
 import SwiftData
 import SwiftUI
 

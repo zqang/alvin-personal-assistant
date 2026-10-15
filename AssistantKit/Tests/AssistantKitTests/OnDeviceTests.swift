@@ -59,7 +59,7 @@ final class LocalSessionPlanTests: XCTestCase {
     }
 
     func testLongChatAppendsAgainAfterRebuildingOnce() throws {
-        // As LocalModelHost keeps it: the session holds what it was primed with, then each turn and reply.
+        // As LocalEngineHost keeps it: the session holds what it was primed with, then each turn and reply.
         var cached: [ChatTurn]?
         var turns: [ChatTurn] = []
         var rebuiltAt: [Int] = []

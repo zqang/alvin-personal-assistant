@@ -1,19 +1,27 @@
 import AssistantKit
 import Foundation
 
-/// Replies from the model running on the iPhone (see `LocalModelHost`).
+/// Replies from the model running on the iPhone (see `LocalEngineHost`), the one
+/// `settings.localModelID` picks.
 ///
 /// With the Alvin engine, `tools` are offered to the model and run in up to three rounds per
 /// reply; side-effect tools wait for `commitGate` when one is given. `handoff_to_cloud` hands the
 /// request to the cloud assistant (the stream throws `ReplyHandoff`) only when
 /// `handoffAvailable`. The stock session offers no tools.
-struct LocalProvider: AssistantProvider {
-    let settings: AssistantSettings
-    let tools: (any ToolExecutor)?
-    let handoffAvailable: Bool
-    let commitGate: CommitGate?
+public struct LocalProvider: AssistantProvider {
+    public let settings: AssistantSettings
+    public let tools: (any ToolExecutor)?
+    public let handoffAvailable: Bool
+    public let commitGate: CommitGate?
 
-    func streamEvents(system: String, turns: [ChatTurn]) -> AsyncThrowingStream<AssistantEvent, Error> {
+    public init(settings: AssistantSettings, tools: (any ToolExecutor)?, handoffAvailable: Bool, commitGate: CommitGate?) {
+        self.settings = settings
+        self.tools = tools
+        self.handoffAvailable = handoffAvailable
+        self.commitGate = commitGate
+    }
+
+    public func streamEvents(system: String, turns: [ChatTurn]) -> AsyncThrowingStream<AssistantEvent, Error> {
         let settings = settings
         let tools = tools
         let handoffAvailable = handoffAvailable
@@ -21,7 +29,7 @@ struct LocalProvider: AssistantProvider {
         return AsyncThrowingStream { continuation in
             let task = Task { @MainActor in
                 do {
-                    try await LocalModelHost.shared.respond(
+                    try await LocalEngineHost.shared.respond(
                         system: system,
                         turns: turns,
                         settings: settings,

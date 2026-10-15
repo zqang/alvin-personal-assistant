@@ -1,5 +1,6 @@
 import AssistantKit
 import AVFoundation
+import LocalEngineHost
 import MiniCPM
 import Speech
 import SwiftUI
@@ -43,7 +44,7 @@ struct SettingsView: View {
             }
         }
         .onAppear {
-            downloadedBytes = LocalModelHost.downloadedBytes()
+            downloadedBytes = Self.bytesOnDevice()
             anthropicKey = store.secret(.anthropic)
             compatibleKey = store.secret(.compatible)
             openAIKey = store.secret(.openAI)
@@ -52,12 +53,12 @@ struct SettingsView: View {
             store.save()
             // A different model, draft model or kernel setting unloads the model; the engine's
             // other options change on the running engine.
-            LocalModelHost.shared.apply(store.settings)
+            LocalEngineHost.shared.apply(store.settings)
         }
-        .onChange(of: LocalModelHost.shared.status) { downloadedBytes = LocalModelHost.downloadedBytes() }
-        .onChange(of: MiniCPMHost.shared.status) { downloadedBytes = LocalModelHost.downloadedBytes() }
+        .onChange(of: LocalEngineHost.shared.status) { downloadedBytes = Self.bytesOnDevice() }
+        .onChange(of: MiniCPMHost.shared.status) { downloadedBytes = Self.bytesOnDevice() }
         // While the 35B mode is hidden its status never changes, so its Delete shows up only here.
-        .onChange(of: MiniCPMHost.shared.bytesOnDisk(.accurate) > 0) { downloadedBytes = LocalModelHost.downloadedBytes() }
+        .onChange(of: MiniCPMHost.shared.bytesOnDisk(.accurate) > 0) { downloadedBytes = Self.bytesOnDevice() }
         .onChange(of: anthropicKey) { store.setSecret(anthropicKey, for: .anthropic) }
         .onChange(of: compatibleKey) { store.setSecret(compatibleKey, for: .compatible) }
         .onChange(of: openAIKey) { store.setSecret(openAIKey, for: .openAI) }
@@ -167,8 +168,8 @@ struct SettingsView: View {
         Text(localStatus)
             .font(.footnote)
             .foregroundStyle(.secondary)
-        if LocalModelHost.shared.status == .off || isLocalFailure {
-            Button("Download and load now") { LocalModelHost.shared.prepare(store.settings) }
+        if LocalEngineHost.shared.status == .off || isLocalFailure {
+            Button("Download and load now") { LocalEngineHost.shared.prepare(store.settings) }
         }
     }
 
@@ -307,12 +308,16 @@ struct SettingsView: View {
                 }
                 .confirmationDialog("Delete the downloaded models?", isPresented: $confirmingDelete, titleVisibility: .visible) {
                     Button("Delete", role: .destructive) {
-                        let deleting = LocalModelHost.shared.deleteDownloads()
-                        downloadedBytes = LocalModelHost.downloadedBytes()
-                        // MiniCPM-V's folders go once its models have stopped.
+                        // Qwen3-ASR keeps its files in the host's folders.
+                        QwenListener.shared.unload(stopDownload: true)
+                        LocalEngineHost.shared.deleteDownloads()
+                        downloadedBytes = Self.bytesOnDevice()
+                        // MiniCPM-V's folders go once its models have stopped (MiniCPMHost stops
+                        // their downloads and unloads them first).
                         Task {
-                            await deleting.value
-                            downloadedBytes = LocalModelHost.downloadedBytes()
+                            _ = await MiniCPMHost.shared.delete(.photoReader)
+                            _ = await MiniCPMHost.shared.delete(.accurate)
+                            downloadedBytes = Self.bytesOnDevice()
                         }
                     }
                 } message: {
@@ -326,6 +331,13 @@ struct SettingsView: View {
     }
 
     // MARK: - Helpers
+
+    /// What the downloaded models and the engine's caches take on the iPhone, Qwen3-ASR's and
+    /// MiniCPM-V's included.
+    private static func bytesOnDevice() -> Int64 {
+        (LocalEngineHost.downloadFolders + [MiniCPMArtifacts.directory, MiniCPM35BArtifacts.directory])
+            .reduce(0) { $0 + MiniCPMArtifacts.bytesOnDisk(in: $1) }
+    }
 
     private var qwenStatus: String {
         guard store.settings.usesQwenListening else {
@@ -344,12 +356,12 @@ struct SettingsView: View {
     }
 
     private var isLocalFailure: Bool {
-        if case .failed = LocalModelHost.shared.status { return true }
+        if case .failed = LocalEngineHost.shared.status { return true }
         return false
     }
 
     private var localStatus: String {
-        let host = LocalModelHost.shared
+        let host = LocalEngineHost.shared
         switch host.status {
         case .off:
             return host.isDownloaded(store.settings.localModelID)

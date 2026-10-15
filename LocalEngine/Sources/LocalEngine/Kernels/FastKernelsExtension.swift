@@ -74,9 +74,8 @@ public struct FastKernelsReport: Sendable, Equatable {
     /// costs (one row costs 1). 0.25 means an 8-row forward costs a quarter less.
     public var gain: Double?
     /// The same comparison as a speed-up: `c(8) before / c(8) after` (1.33 means an 8-row
-    /// forward runs 1.33× as fast). This is the value the app stores as its kernel gain
-    /// (`LocalModelHost.recordKernelGain`, "c(8) without ÷ with") and compares with
-    /// `requiredSpeedup`.
+    /// forward runs 1.33× as fast). A caller that stores the speed-up ("c(8) without ÷ with")
+    /// compares it with `requiredSpeedup`; `LocalEngineHost` stores `gain` instead.
     public var speedup: Double?
     /// The `gain` the kernels need to be kept.
     public var requiredGain: Double
