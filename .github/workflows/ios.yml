@@ -2,9 +2,9 @@ name: iOS
 
 on:
   push:
-    paths-ignore: ["docs/**", "README.md", ".github/workflows/model-facts.yml", ".github/workflows/drafter-lab.yml"]
+    paths-ignore: ["docs/**", "scripts/**", "README.md", ".github/workflows/model-facts.yml", ".github/workflows/drafter-lab.yml"]
   pull_request:
-    paths-ignore: ["docs/**", "README.md", ".github/workflows/model-facts.yml", ".github/workflows/drafter-lab.yml"]
+    paths-ignore: ["docs/**", "scripts/**", "README.md", ".github/workflows/model-facts.yml", ".github/workflows/drafter-lab.yml"]
   workflow_dispatch:
 
 concurrency:
@@ -30,21 +30,21 @@ jobs:
       - name: Unit tests (AssistantKit)
         run: swift test --package-path AssistantKit
 
+      - name: Unit tests (MiniCPM)
+        run: swift test --package-path MiniCPM
+
+      # scripts/** is in paths-ignore, so these run with the code they check.
+      - name: Script and photo checks
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+          swiftc -parse-as-library AlvinAssistant/Chat/PendingPhoto.swift scripts/check_pending_photo.swift \
+            -o "$RUNNER_TEMP/check_pending_photo"
+          "$RUNNER_TEMP/check_pending_photo"
+
       - name: Install the Metal Toolchain
         run: |
           xcodebuild -showComponent MetalToolchain | grep -q "Status: installed" \
             || xcodebuild -downloadComponent MetalToolchain
-
-      - name: Cache MiniCPM runtime
-        id: minicpm
-        uses: actions/cache@v4
-        with:
-          path: MiniCPMBenchmark/Frameworks/llama.xcframework
-          key: minicpm-ios-${{ runner.arch }}-${{ hashFiles('scripts/prepare_minicpm.sh') }}
-
-      - name: Build MiniCPM benchmark runtime
-        if: steps.minicpm.outputs.cache-hit != 'true'
-        run: scripts/prepare_minicpm.sh ios
 
       - name: Build the iOS app
         run: |
@@ -61,11 +61,10 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
   linux:
-    name: AssistantKit on Linux (informational)
+    name: AssistantKit on Linux
     runs-on: ubuntu-24.04
     container: swift:6.2-noble
     timeout-minutes: 20
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - run: swift test --package-path AssistantKit

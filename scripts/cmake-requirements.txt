@@ -1,0 +1,4 @@
+# CMake for scripts/prepare_minicpm.sh, installed into build/cmake-venv with
+# pip install --require-hashes --only-binary=:all: (the macOS universal2 wheel).
+cmake==3.31.6 \
+    --hash=sha256:da9d4fd9abd571fd016ddb27da0428b10277010b23bb21e3678f8b9e96e1686e
