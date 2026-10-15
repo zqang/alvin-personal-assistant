@@ -22,12 +22,14 @@ The defaults keep today's behaviour where a device has not yet proved the new pa
 **MiniCPM-V (2026-10-15, branch `minicpm-production`, PR A).** MiniCPM-V 4.7 adds two things:
 
 - **photo reading:** the 1B reads a photo for every engine;
-- **"Most accurate on device":** an opt-in mode in which the 35B-A3B answers on-device replies.
+- **"Most accurate on device":** an opt-in mode in which the 35B-A3B answers on-device replies. It is
+  built but hidden in this version.
 
 Both are described in [§4.12](#412-minicpm-v-on-device). The device gate ran its automated checks on
-15–16 October ([§11](#11-device-checklist)): the 35B failed D23's voice-latency line, so the owner decides
-whether to re-tune it or merge with the mode hidden, and the manual checks are still to do.
-Measurements are in [MiniCPM-V evaluation](minicpm-evaluation.md).
+15–16 October ([§11](#11-device-checklist)). The 35B failed D23's voice-latency line, so on 16 October the
+owner hid the mode (decision 31): `MiniCPMHost.accurateEligible` returns false. The owner also kept the
+memory thresholds that D18 passed with, and the published runtime with its Metal patch. The manual checks
+for photo reading are still to do. Measurements are in [MiniCPM-V evaluation](minicpm-evaluation.md).
 
 ## Contents
 
@@ -65,7 +67,7 @@ GitHub Actions runs whose logs hold the numbers quoted in this document.
 | 10. Kernels and MTP | small-M quantized matmul kernel; MTP drafter | WP41, WP42 | Kernel built and **off by default** (slower than stock on the CI GPU). MTP **skipped**: no catalog checkpoint keeps `mtp.*` weights |
 | 11. Device validation | the [device checklist](#11-device-checklist) | — | Done on an iPhone 17 Pro Max except D12–D13; see [results](#results-on-an-iphone-17-pro-max-a19-pro-12-gb-ios-2661-1011-october-2026) |
 | 12. Later | Swift DFlash port, mlx-swift-lm 3.32.x upgrade, background session save, two-step tool selector | — | Deferred; see [§12](#12-skipped-and-deferred) |
-| 13. MiniCPM-V | Photo reading with the 1B for every engine; "Most accurate on device" with the 35B-A3B; the runtime as a release asset ([§4.12](#412-minicpm-v-on-device)) | PR A: A0–A11 | Built on `minicpm-production`. Device gate run; D23 failed (owner decision), manual checks pending ([§11](#11-device-checklist)) |
+| 13. MiniCPM-V | Photo reading with the 1B for every engine; "Most accurate on device" with the 35B-A3B; the runtime as a release asset ([§4.12](#412-minicpm-v-on-device)) | PR A: A0–A11 | Built on `minicpm-production`. Device gate run; D23 failed, so the 35B mode is hidden (decision 31); photo reading's manual checks pending ([§11](#11-device-checklist)) |
 
 ## 2. Reference systems
 
@@ -358,18 +360,18 @@ running on the unloaded model.
   in order:
   1. It awaits `QwenListener.finishPasses()`.
   2. If `os_proc_available_memory()` is below what the run needs, it calls
-     `LocalModelHost.unloadForBenchmark()`. A run on a loaded model needs `runBytes` (1.75 GB); a load needs
-     the model's measured peak plus `runBytes`: 3.2 GB for the 1B, 4.5 GB for the 35B.
+     `LocalModelHost.unloadForBenchmark()`. A run on a loaded model needs `runBytes` (600 MB); a load needs
+     the model's peak plus `runBytes`: 2.2 GB for the 1B, 4.3 GB for the 35B (decision 21).
   3. It runs `body` inside `LocalModelHost.whilePaused`. That is a thin wrapper over the host's
      `exclusively`, which waits for MLX jobs and blocks new ones. When no engine is loaded, it runs `body`
      directly.
 
   In the other direction a direct call is enough: a Woof load first awaits `MiniCPMHost.shared.unloadAll()`,
   which unloads both MiniCPM models.
-  A load short of memory also unloads the other MiniCPM model if it's idle, then waits up to 5 s for
-  memory still being released (Woof's takes up to 0.32 s to leave the count) before it gives up.
-  D18 set these constants: iOS warns the app at about 1.41 GB left and the app then unloads every model,
-  and an ASR pass adds up to 0.33 GB. Their effect is predicted, not yet re-measured
+  A load short of memory also unloads the other MiniCPM model if it's idle; if memory is still short, the
+  load is refused and the caller may try again. D18 passed with these constants (no jetsam), and the owner
+  kept them. Constants derived from D18 (1.75 GB to spare, 4.5 GB and 3.2 GB to load, and a 5 s wait for
+  memory still being released) were proposed and **not adopted**
   ([evaluation §4](minicpm-evaluation.md#4-memory)).
 - **MiniCPM lifecycle.**
   - The 1B unloads after 3 minutes idle.
@@ -409,7 +411,8 @@ numbers; exactness and acceptance do not depend on the device.
 Two MiniCPM-V 4.7 models run on a second runtime, in the `MiniCPM` package:
 
 - the **1B** reads photos, for every engine;
-- the **35B-A3B** answers on-device replies in the "Most accurate on device" mode.
+- the **35B-A3B** answers on-device replies in the "Most accurate on device" mode, which is hidden in this
+  version (decision 31; see "Eligibility and files" below).
 
 Woof stays the default model and handles every action. Measurements and benchmark commands are in
 [MiniCPM-V evaluation](minicpm-evaluation.md).
@@ -546,12 +549,15 @@ on. The engine shows as "On device · MiniCPM-V 35B".
 
 **Eligibility and files.**
 
-- **Who can turn the mode on.** It is offered when `physicalMemory ≥ 11e9`. A 12 GB iPhone reports
-  12.26e9, so a 12 GiB test would reject it. Turning it on needs Woof downloaded, plus the missing bytes and
-  1 GB free.
-- **Loading.** Loading needs `os_proc_available_memory() ≥ 4.5 GB` after Woof is evicted: the production
-  peak D18 measured (2.75 GB) plus `runBytes` (1.75 GB). Decision 21's 3.65 GB was the `balanced` profile
-  with the draft.
+- **Who can turn the mode on.** Nobody, in this version: `MiniCPMHost.accurateEligible()` returns false
+  (decision 31, after D23 failed). `SettingsStore` turns off a setting an earlier build left on, and when 35B
+  files are on the phone, Settings shows a "MiniCPM-V 35B files" section with their state and Delete only, no
+  download. To offer the mode again, return `MiniCPM35BArtifacts.eligible(physicalMemory:)` there. It is then
+  offered when `physicalMemory ≥ 11e9`; a 12 GB iPhone reports 12.26e9, so a 12 GiB test would reject it.
+  Turning it on needs Woof downloaded, plus the missing bytes and 1 GB free.
+- **Loading.** Loading needs `os_proc_available_memory() ≥ 4.3 GB` after Woof is evicted: 3.7 GB for the
+  model (decision 21's 3.65 GB, which was the `balanced` profile with the draft) plus `runBytes` (600 MB).
+  D18 passed with it; the production profile's own load-and-reply peak was 2.12–2.69 GB.
 - **The 35B's files.** The LES target (1.66 GB) and its experts (13.84 GB), about 15.5 GB in all.
   - There is no projector; an existing one (1.12 GB) is deleted.
   - The DSpark draft (0.42 GB) is optional. It would download only once its manifest entry had a
@@ -775,7 +781,7 @@ offset, such as `2026-10-07T17:00`.
 | `fillerDelay` | Voice responsiveness › Say "One moment" after | 1.8 s | 1.0–4.0 s. |
 | `turnChime` | Voice responsiveness › Chime when I finish speaking | off | |
 | `bargeInDucking` | Voice responsiveness › Lower the voice when I talk over it | on | |
-| `accurateOnDevice` | Most accurate on device | off | Shown when `physicalMemory ≥ 11e9`. Needs Woof downloaded and the 35B files (about 15.5 GB). See [§4.12](#412-minicpm-v-on-device). |
+| `accurateOnDevice` | Most accurate on device | off | **Hidden in this version** (decision 31), and turned off at launch if an earlier build left it on. When 35B files are on the phone, a "MiniCPM-V 35B files" section shows them with Delete only. Offered again, it shows when `physicalMemory ≥ 11e9` and needs Woof downloaded and the 35B files (about 15.5 GB). See [§4.12](#412-minicpm-v-on-device). |
 
 Routing and Deep thinking appear with Claude as the provider; On-device engine with "On this iPhone" or
 automatic routing; Tools unless the provider is OpenAI-compatible. Settings saved by older builds load with
@@ -790,7 +796,7 @@ never run; a tool turn passes when its expected tool is called in any round.
 
 Photo reading has no setting of its own. Its Settings section downloads or deletes the 1B, and the photo
 controls appear while the 1B is ready. Both MiniCPM sections show the bytes used, with Download, Cancel and
-Delete. Settings › Acknowledgements lists the licences of the runtime and the models.
+Delete; while the 35B mode is hidden, its files section has Delete only. Settings › Acknowledgements lists the licences of the runtime and the models.
 
 ## 10. CI workflows and how to read them
 
@@ -927,15 +933,20 @@ need a hand stay **manual**. Details, sample sizes and the harnesses used are in
 | D15 | **Manual**, not run (cancel and leave mid-download). | — |
 | D16 | **Pass on the fixtures; real photos manual.** 4 fixtures, n=32 per setting: 100% of key strings at 1 and 4 slices, p50 1.40 s and 2.60 s (p90 1.73 and 3.00 s); through the app 2.94 s p50, about 4.6 s for the first photo after launch. The same cards at a half or a third of a 12 MP frame: 1 slice 87.5% and 62.5%, with confident misreads; 4 slices 100%. | `MiniCPMHost.photoSlices` stays 4; README speed. The 4 real scenes confirm it (manual). |
 | D17 | **Manual**, not run. | — |
-| D18 | **Pass: no jetsam** in 20 turns each. Woof + ASR + 1B: peak footprint 5.13 GB, resident 5.61 GB, 33 memory warnings. 35B + ASR + 1B: 4.12 GB, 5.17 GB, 17 warnings, 15/20 35B replies (3 refused by the 4.3 GB rule while memory was still being released, 2 cancelled at `serious`). `weights_bytes`: 1B 0.66 GB, 35B 1.65 GB. With the old constants every turn crossed iOS's warning line (about 1.41 GB left), which unloads every model: Woof reloaded for every reply, and the 35B re-read the conversation after each photo (median 70.7 s). | `runBytes` 1.75 GB; load needs 4.5 GB (35B) and 3.2 GB (1B); a load waits up to 5 s for memory being released. Predicted effect, to be re-measured with the D18 harness. |
+| D18 | **Pass: no jetsam** in 20 turns each. Woof + ASR + 1B: peak footprint 5.13 GB, resident 5.61 GB, 33 memory warnings. 35B + ASR + 1B: 4.12 GB, 5.17 GB, 17 warnings, 15/20 35B replies (3 refused by the 4.3 GB rule while memory was still being released, 2 cancelled at `serious`). `weights_bytes`: 1B 0.66 GB, 35B 1.65 GB. With these constants (the shipped ones) every turn crossed iOS's warning line (about 1.41 GB left), which unloads every model: Woof reloaded for every reply, and the 35B re-read the conversation after each photo (median 70.7 s). | **The owner kept the constants D18 passed with:** `runBytes` 600 MB; a load needs 4.3 GB (35B) and 2.2 GB (1B). Constants derived from D18 (1.75 GB, 4.5 GB and 3.2 GB, and a 5 s wait for memory being released) were **not adopted**; [evaluation §4](minicpm-evaluation.md#4-memory) keeps them as a record. |
 | D19 | **Automated part passes.** 30 app switches during 1B reads, 35B replies and prefix prefills or saves: no GPU error, crash or relaunch; interrupted work stopped within 0–95 ms; reads, replies and the prefix worked on return. After two or more 35B unloads, 3 of 7 first replies after a return were refused at 4.11 GB available (Woof answers those). **Manual:** locking the phone. | Lifecycle unchanged. |
-| D20 | **Pass, and the patch has no effect.** Woof loaded 18/18; every unload came back within 300 MB of the 23 MB baseline; no growth over cycles. A 35B unloaded for the second time in a process keeps about 2.5 GB counted for 2–90+ s, with and without the patch alike (p = 0.82), and so did Codex's runs before it. | Drop the patch with the next runtime release (owner gate G1: a new asset, tag and checksum); `ponytail:` note at `runtimeRevision`. |
-| D21 | **Pass; Delete manual.** `physicalMemory` 12,262,113,280, eligible. The existing folder was recognised without a download (43/43 files), the app removed the projector (1.12 GB freed), the first verification takes about 10 s (9.5 and 10.2 s re-hashing 15.93 GB), later launches are `ready` in 0.19 s, and every file and the folder are excluded from backup. The free-space refusal needs a download; unit tests cover it. | Sheet: "about 15.5 GB", files checked in about 10 s. |
+| D20 | **Pass, and the patch has no effect.** Woof loaded 18/18; every unload came back within 300 MB of the 23 MB baseline; no growth over cycles. A 35B unloaded for the second time in a process keeps about 2.5 GB counted for 2–90+ s, with and without the patch alike (p = 0.82), and so did Codex's runs before it. | **The owner kept the published runtime with the patch**: no effect, and harmless. It goes only when the runtime is rebuilt for another reason (gate G1: a new asset, tag and checksum); `ponytail:` note at `runtimeRevision`. |
+| D21 | **Pass; Delete manual.** `physicalMemory` 12,262,113,280, eligible. The existing folder was recognised without a download (43/43 files), the app removed the projector (1.12 GB freed), the first verification takes about 10 s (9.5 and 10.2 s re-hashing 15.93 GB), later launches are `ready` in 0.19 s, and every file and the folder are excluded from backup. The free-space refusal needs a download; unit tests cover it. | Sheet: "about 15.5 GB", files checked in about 10 s. With the mode hidden, Delete on the phone isn't needed for this merge. |
 | D22 | **Target-only stays.** 24-task suite 48/48 in every arm. Target-only: first text 2.30 s p50, 5.87 tok/s in Swift, 4.41 GB resident. `baseline`: 2.38 s, 5.63 tok/s, 5.20 GB. `balanced`: 2.40 s, 6.27 tok/s, 5.99 GB. Neither DSpark profile met decision 13, and their replies differ from target-only's in 12 of 80 rows. First text grows by about 40 ms per prompt token in every arm (about 87 s at 2,073 tokens). | `MiniCPMSession.production` stays `(.baseline, useDraft: false)`; no G1b, no draft `sourceURL`. |
-| D23 | **Fail.** First audio p50 / p90: append 7.53 / 8.47 s (n=30), barge-in then `replaceLastReply` 9.26 / 11.75 s (n=12), against 5 / 8 s. Cold start from the disk prefix 7.05 / 8.93 s (passes ≤ 10 s); without the prefix file 22.8 and 27.2 s. A replaced tentative turn 7.86 / 11.32 s. Checkpoints are 62.8 MiB, taken in 1.8–6.7 ms; rewinds take 2–13 ms. The time is the prefill of about 50 fed tokens (78.7 ms each) plus waiting for the first sentence. **Manual:** live speech, Qwen3-ASR on real audio, a conversation past the context budget. | Sheet copy corrected. **Owner decision (decision 31):** re-tune and run D23 again, or merge with the mode hidden (`accurateEligible` returns false). |
-| D24 | **Manual**, not run. | — |
-| D25 | **Manual**, not run. | — |
+| D23 | **Fail.** First audio p50 / p90: append 7.53 / 8.47 s (n=30), barge-in then `replaceLastReply` 9.26 / 11.75 s (n=12), against 5 / 8 s. Cold start from the disk prefix 7.05 / 8.93 s (passes ≤ 10 s); without the prefix file 22.8 and 27.2 s. A replaced tentative turn 7.86 / 11.32 s. Checkpoints are 62.8 MiB, taken in 1.8–6.7 ms; rewinds take 2–13 ms. The time is the prefill of about 50 fed tokens (78.7 ms each) plus waiting for the first sentence. **Manual:** live speech, Qwen3-ASR on real audio, a conversation past the context budget. | Sheet copy corrected. **Decision 31: the mode is hidden** (`accurateEligible` returns false, 16 Oct). Its manual parts aren't needed for this merge; re-tune and run D23 again before offering the mode. |
+| D24 | **Manual**, not run. | Not needed while the 35B mode is hidden. |
+| D25 | **Manual**, not run. | Not needed while the 35B mode is hidden. |
 | D26 | Not run: it belongs to PR B (VoiceKit). | — |
+
+**Still to do by hand for this merge** (the photo reading that ships): Acknowledgements and the camera alert
+on the phone (D14), the 1B download (D15), the 4 real scenes (D16), the photo flow end to end (D17), and
+locking the phone (D19). The 35B-only checks (Delete in D21, the live parts of D23, D24, D25) come back only
+if the mode is offered again.
 
 **Already settled in CI** (no device needed): `mtp.*` presence (none: WP42 skipped, and today's app does not
 load Woof as garbage); template behaviour and EOS ids; quantization layout; prompt-lookup acceptance and tool
@@ -964,7 +975,9 @@ too: 5.03 tokens per round, but not faster or lossless in dflash-mlx ([Drafter l
 | Background downloads for MiniCPM | Deferred | A foreground `URLSession`, like Woof's, so the 15.5 GB download needs the app open. A background session is the upgrade path. |
 | Release workflow with attestation for the runtime | Deferred | The owner uploads one locally built, checksum-pinned zip with `PROVENANCE.txt`. Add a tag workflow once others must verify provenance. |
 | DSpark draft for the 35B | Not adopted | D22: slower first text, no 10 % decode gain, 5.2–6.0 GB resident. |
-| Metal autorelease patch in the runtime | Drop at the next runtime release | D20: no effect on the phone. Dropping it changes the release asset (gate G1). |
+| "Most accurate on device" (35B) | Hidden (decision 31) | D23: first audio p50 / p90 7.5 / 8.5 s after an append and 9.3 / 11.8 s after a barge-in, against 5 / 8 s. The code stays; returning `MiniCPM35BArtifacts.eligible(physicalMemory:)` from `MiniCPMHost.accurateEligible` offers it again, after a re-tune and a new D23 run. |
+| Memory constants derived from D18 | Not adopted | 1.75 GB to spare, 4.5 GB (35B) and 3.2 GB (1B) to load, and a 5 s wait were predicted to stop the warnings that unload every model, but never measured. The constants D18 passed with ship (600 MB, 4.3 GB, 2.2 GB). |
+| Metal autorelease patch in the runtime | Kept | D20: no effect on the phone, and harmless. Dropping it alone would change the release asset (gate G1), so it goes only when the runtime is rebuilt for another reason. |
 
 ## 13. Risks
 
@@ -988,10 +1001,13 @@ too: 5.03 tokens per round, but not faster or lossless in dflash-mlx ([Drafter l
   This is not proven safe.
 - **The 35B feels slow.** It decodes at about 6 tok/s, and in voice it starts speaking 7.5 s after a turn at
   p50 (9.3 s after a barge-in), which fails D23. Every D22 run ended at `serious`, and battery drain hasn't
-  been measured (D24). The owner either re-tunes it or merges with the mode hidden (decision 31).
+  been measured (D24). So this version hides the mode (decision 31).
+- **Memory warnings.** With the shipped thresholds, D18 saw a memory warning on every turn that combined
+  Woof, Qwen3-ASR and a photo. The app then unloads every idle model, so Woof reloaded before each reply
+  (3.3–9.6 s), with no jetsam. The D18-derived thresholds aimed at this were not adopted.
 - **Delayed memory release.** After the 35B's second unload in a process, iOS keeps about 2.5 GB counted
-  for 2–90 s (D20). A model load in that window can be refused: the 35B's turn then goes to Woof, and a
-  photo read stops and asks to be tried again.
+  for 2–90 s (D20). This matters only if the mode is offered again: a model load in that window can be
+  refused, the 35B's turn then goes to Woof, and a photo read stops and asks to be tried again.
 - **Outside hosting.**
   - The runtime is a public release asset. Deleting it breaks package resolution, and a rebuild changes the
     checksum.

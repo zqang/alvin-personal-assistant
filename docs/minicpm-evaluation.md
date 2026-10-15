@@ -16,18 +16,26 @@ was 6 GiB (the device probe, with the increased-memory entitlement).
 - **Woof 4B stays the default on-device model.**
 - **MiniCPM-V 4.7 1B reads photos** for every engine; see the README's
   [Photo reading](../README.md#photo-reading).
-- **MiniCPM-V 4.7 35B-A3B is an opt-in mode, "Most accurate on device"**; see the README's
-  [Most accurate on device](../README.md#most-accurate-on-device). It runs target-only: D22 found that
-  neither DSpark profile earns its place ([§8](#8-35b-production-profile-and-voice-latency)). **It failed
-  D23's voice-latency line**: first audio after an append took 7.5 s at p50 and a barge-in 9.3 s, against
-  p50 ≤ 5 s. Under decision 31 of the plan, the owner either re-tunes it and runs D23 again, or merges with
-  the mode hidden (`MiniCPMHost.accurateEligible` returns false).
+- **MiniCPM-V 4.7 35B-A3B, the opt-in mode "Most accurate on device", is in the code but hidden in this
+  version**; see the README's [Most accurate on device](../README.md#most-accurate-on-device). It runs
+  target-only: D22 found that neither DSpark profile earns its place
+  ([§8](#8-35b-production-profile-and-voice-latency)). **It failed D23's voice-latency line**: first audio
+  after an append took 7.5 s at p50 and a barge-in 9.3 s, against p50 ≤ 5 s. So on 16 October 2026 the
+  owner hid the mode (decision 31): `MiniCPMHost.accurateEligible` returns false. Returning
+  `MiniCPM35BArtifacts.eligible(physicalMemory:)` there offers it again, after a re-tune and a new D23 run.
+- **The memory thresholds that ship are the ones D18 passed with**: 600 MB to spare for a run, 4.3 GB free to
+  load the 35B and 2.2 GB for the 1B. Thresholds derived from D18's numbers were proposed and **not
+  adopted** ([§4](#4-memory)).
+- **The published runtime keeps its Metal patch.** It had no effect in D20 and does no harm, so it goes only
+  when the runtime is rebuilt for another reason ([§4](#4-memory)).
 
 The device gate's results per check are in
 [the architecture doc's §11](architecture-plan-on-device-and-orchestration.md#11-device-checklist). Anything
-still marked **pending** needs somebody holding the iPhone: Acknowledgements on the phone (D14), D15, the
-real photos of D16, D17, locking the phone (D19), Delete (D21), the live-voice parts of D23, D24, D25, and
-D26 (for the VoiceKit PR).
+still marked **pending** needs somebody holding the iPhone. For the photo reading that ships, these remain:
+Acknowledgements and the camera alert on the phone (D14), D15, the real photos of D16, D17, and locking the
+phone (D19). With the 35B mode hidden, its own checks (Delete in D21, the live-voice parts of D23, D24 and
+D25) aren't needed for this merge; they come back if the mode is offered again. D26 belongs to the VoiceKit
+PR.
 
 ## Contents
 
@@ -61,7 +69,7 @@ Swift code received the text.
 | 35B decodes at 5.58 tok/s | Measured: the median native decode rate over 16 performance rows. OpenBMB quotes 13+ tok/s, and nobody has explained the gap. The run used a DSpark draft that was converted locally, because the official file returned 404. D22 measured the production profile (target-only) at 5.87 tok/s in Swift. | `7C253525`; D22 |
 | Woof peak 5.11 GB, "not established" | Woof's last block loaded on top of 2,594 MB that the 35B hadn't released (`35b-comparison-reclaim-console.log:3609`). Woof's first block peaked at 2.80 GB, and its other seven replies in the last block at 2.73 GB. | `7C253525` |
 | "About 17% faster after optimization" | Only a 3-prompt pilot supports this: `balanced` took 44.37 s in total, `baseline` 53.57 s. Its first text (2.31 s) was no better than the original 2.349 s, and peak memory rose from 2.70 to 3.65 GB. This project doesn't make that claim. | `75E359AD` |
-| The Metal autorelease patch makes model memory release on time | Unproven when claimed: the patched runtime was built after the pilots and never installed. After the last unpatched block, 2,554 MB was still held (`35b-optimization-pool-pilot-console.log:5038`). D20 then found **no effect** ([§4](#4-memory)). | `75E359AD` (its last block); D20 |
+| The Metal autorelease patch makes model memory release on time | Unproven when claimed: the patched runtime was built after the pilots and never installed. After the last unpatched block, 2,554 MB was still held (`35b-optimization-pool-pilot-console.log:5038`). D20 then found **no effect**; the runtime keeps it, as it is harmless ([§4](#4-memory)). | `75E359AD` (its last block); D20 |
 
 In 21 of the 35B's 40 prompts in `7C253525`, the phone was already at `serious` thermal state when the
 prompt started. The device gate has since measured the `balanced` profile on the 24-task suite and 35B
@@ -198,8 +206,8 @@ What each model adds to `phys_footprint`:
 iOS sends the app a memory warning once its footprint passes about 5.04–5.09 GB, which leaves about
 1.36–1.41 GB available. With the 35B and the 1B loading together, warnings also came at 1.92–4.14 GB, from
 system-wide pressure (GPU-wired memory). The app's handlers then unload every idle model. So with the
-constants of `d0387f0` (4.3 GB to load the 35B, 2.2 GB for the 1B, 600 MB to spare), every turn crossed the
-warning line:
+constants of `d0387f0` (4.3 GB to load the 35B, 2.2 GB for the 1B, 600 MB to spare), which are the ones that
+ship, every turn crossed the warning line:
 
 - in mode A the 1B loaded beside Woof and ASR (2.36–2.77 GB was available, and it needed 2.2 GB), and the
   warning then unloaded all three: Woof reloaded for every reply (3.3–9.6 s) and ASR for every turn;
@@ -208,23 +216,30 @@ warning line:
 - 3 of mode B's 35B replies were refused at 4.01–4.05 GB available, because the 1B's memory was still
   being released; 2 more were cancelled mid-prefill at `serious`, for a reason not found.
 
-**The constants now** (`MiniCPMHost`), derived from these numbers:
+**The constants that ship** (`MiniCPMHost`) are the ones D18 passed with: no jetsam in modes A and B, 20
+turns each. The owner kept them on 16 October 2026:
 
-- `runBytes`, what a run on a loaded model leaves free: 600 MB → **1.75 GB**, the 1.41 GB warning distance
-  plus a 0.33 GB ASR pass.
-- `loadBytes`, what a model needs free to load: its peak plus `runBytes`. For the 35B that is 2.75 + 1.75 =
-  **4.5 GB** (was 3.7 + 0.6 = 4.3 GB); for the 1B, 1.45 + 1.75 = **3.2 GB** (was 2.2 GB).
-- Before refusing a load, the host waits up to 5 s for memory that is still being released (D18's refusals,
+- `runBytes`, what a run on a loaded model leaves free: **600 MB**.
+- `loadBytes`, what a model needs free to load: its peak plus `runBytes`. For the 35B that is 3.7 + 0.6 =
+  **4.3 GB** (decision 21); for the 1B, 1.6 + 0.6 = **2.2 GB**.
+- A load short of memory is refused at once, and the caller may try again.
+
+The cost is the warnings above: in mode A, with a photo, an ASR pass and a reply every turn, Woof reloaded
+before every reply (3.3–9.6 s).
+
+**Proposed from D18, not adopted.** Kept here as a record; none of it is in the code, and none of it was
+measured:
+
+- `runBytes` 600 MB → 1.75 GB, the 1.41 GB warning distance plus a 0.33 GB ASR pass.
+- `loadBytes` from the measured peaks: 2.75 + 1.75 = 4.5 GB for the 35B, 1.45 + 1.75 = 3.2 GB for the 1B.
+- Before refusing a load, a wait of up to 5 s for memory that is still being released (D18's refusals,
   Woof's 0.32 s, D19's 3.5–5 s).
 
-The intended effect: with Woof and ASR loaded, a photo evicts Woof first instead of setting off the warning
-that unloads all three, and in 35B mode it evicts the idle 35B, whose next reply still reads the
-conversation again (keeping both loaded, as mode C did, isn't viable). **These effects are predicted from
-the measurements, not re-measured.** Run modes A and B again with the D18 harness (kept in
-`build/minicpm-results/device-gate-2026-10-15/D18/harness/`) before relying on them.
-One risk is known: a 35B unloaded for the second time in a process can stay counted for 2–90 s (D20), longer
-than the 5 s wait, and a 1B load that needs 3.2 GB may then be refused (the photo's read stops, and the user
-is asked to try again).
+The intended effect was that with Woof and ASR loaded, a photo would evict Woof first instead of setting off
+the warning that unloads all three, and that in 35B mode it would evict the idle 35B. Its known risk: a 35B
+unloaded for the second time in a process can stay counted for 2–90 s (D20), longer than the 5 s wait, and a
+1B load that needed 3.2 GB could then be refused. Anyone taking the proposal up again should run modes A and
+B with the D18 harness (kept in `build/minicpm-results/device-gate-2026-10-15/D18/harness/`) first.
 
 **D20: the Metal autorelease patch.** 3 load/unload cycles of 35B → Woof → 1B, 30 or 90 s watched after each
 unload, in 6 alternating runs: 3 with the shipped runtime and 3 with the same runtime built without the
@@ -247,9 +262,10 @@ patch (18 cycles). No memory warning, jetsam or crash. The idle baseline was 23.
 - **Codex's runs before the patch** show the same pattern: 61–103 MB right after 7 of 10 releases (every first
   release in a process), and 2,554–3,466 MB after the other 3.
 
-So the patch is to be dropped. Dropping it changes the runtime asset (a new tag and checksum), which is the
-owner's release step (gate G1); until then the shipped runtime keeps it, with a `ponytail:` note at
-`MiniCPMRuntimeConfiguration.runtimeRevision`.
+So the patch does nothing measurable, and it does no harm. Dropping it alone would change the runtime asset
+(a new tag and checksum, the owner's release step, gate G1), so on 16 October 2026 the owner kept the
+published runtime with the patch. It goes only when the runtime is rebuilt for another reason; a
+`ponytail:` note at `MiniCPMRuntimeConfiguration.runtimeRevision` says so.
 
 **D19, automated part: app switches.** 30 switches to Settings and back (about 10 s away), during 1B reads
 (7), 35B replies (10) and the 35B's prefix prefill or save (13), with the app suspended (24) or kept running
@@ -313,7 +329,8 @@ manifest.
 
 Both model sets download in the app. Photo reading (the 1B) is 1.78 GB: the model is 672 MB and the vision
 projector 1,109 MB. Most accurate on device (the 35B) is 15.50 GB: the model is 1.66 GB and the experts
-13.84 GB. How downloads resume, verify, use space and are deleted is described in the
+13.84 GB. With that mode hidden, this version doesn't download the 35B; files an earlier build downloaded
+can be deleted in Settings. How downloads resume, verify, use space and are deleted is described in the
 [architecture doc §4.12](architecture-plan-on-device-and-orchestration.md#412-minicpm-v-on-device). In
 short, each file is hashed once, and after that a load checks only its size and modification time.
 
@@ -324,7 +341,7 @@ the app's hashing loop (size, GGUF magic, SHA-256 in 1 MiB reads).
 
 | Check | 1B (D15) | 35B (D21) |
 |---|---|---|
-| Offered | — | Yes: `physicalMemory` 12,262,113,280, and `accurateEligible()` is true. The switch shows in a simulator run of Settings, with "about 15.5 GB" |
+| Offered | — | Yes, in the build of `d0387f0`: `physicalMemory` 12,262,113,280, and `accurateEligible()` was true. The switch showed in a simulator run of Settings, with "about 15.5 GB". This version hides the mode |
 | Cancel, then leave mid-file: finished files kept, download resumes on return | pending (manual) | — |
 | First verification time | 1.30 s for 1.78 GB (re-hash) | **about 10 s**: 10.2 and 9.5 s for 43 files, 15.93 GB (1.6–1.7 GB/s). The app's own first check also ends with writing `.verified.json`, and on a first launch it runs beside the 1B's, so expect a little more |
 | Later loads check in ≤ 3 s | Yes: `ready` 0.19 s after process start (D21) | Yes: the same 0.19 s |
@@ -332,7 +349,7 @@ the app's hashing loop (size, GGUF magic, SHA-256 in 1 MiB reads).
 | Projector removed | — | Yes: the app deleted `mmproj-model-f16.gguf` (1,119,575,840 B) during its first 35B preparation; free storage rose by 1.13 GB |
 | Refused below the missing bytes + 1 GB free | — | Not exercised (it needs a download); covered by `MiniCPMArtifactsTests` |
 | `isExcludedFromBackup` set | Yes (2/2 files and the folder) | Yes (43/43 files and the folder) |
-| Delete frees the bytes shown | pending (manual) | pending (manual). What the button shows (`bytesOnDisk`) was 15.93 GB here, more than the 15.5 GB download, because this phone also holds the 425 MB DSpark draft; the 73 MB system prefix saved later adds to it |
+| Delete frees the bytes shown | pending (manual) | Not needed for this merge (the mode is hidden). What the button shows (`bytesOnDisk`) was 15.93 GB here, more than the 15.5 GB download, because this phone also holds the 425 MB DSpark draft; the 73 MB system prefix saved later adds to it |
 
 ## 7. Photo flow
 
@@ -422,7 +439,7 @@ scripted conversations of 10 requests plus 2 cold starts without a prefix file; 
 | Append | **7.53 s** | **8.47 s** | 4.83 s | 30 |
 | Barge-in, then `replaceLastReply` | **9.26 s** | **11.75 s** | 6.95 s | 12 |
 | Replaced tentative turn | 7.86 s | 11.32 s | — | 12 |
-| Rebuild past the budget, voice and typed | pending | pending | | |
+| Rebuild past the budget, voice and typed | not measured | not measured | | |
 
 - **Where the time goes.** First text is 0.29 s plus 78.7 ms per fed token (§3), and every spoken turn feeds
   about 47 tokens of scaffolding and time tag before the user's words. Then the first sentence has to finish:
@@ -443,15 +460,20 @@ scripted conversations of 10 requests plus 2 cold starts without a prefix file; 
   audio, the audible output latency of the running audio engine, and the in-app latency log. A conversation
   long enough to be rebuilt (about 3,800 tokens) wasn't reached either; the longest reached 2,300.
 
-Under decision 31 the owner chooses: re-tune (for example a shorter turn scaffold or speaking a first
-clause sooner) and run D23 again, or merge with the mode hidden. The Settings copy now gives the measured
-times.
+**Decision 31: the mode is hidden.** On 16 October 2026 the owner chose to merge with the mode hidden
+rather than re-tune it now. `MiniCPMHost.accurateEligible` returns false, so Settings doesn't offer the mode,
+a setting an earlier build left on is turned off when the app starts, and 35B files an earlier build
+downloaded are shown only to be deleted. The code, the Settings copy with the measured times and the
+benchmarks stay. Before the mode is offered again, re-tune it (for example a shorter turn scaffold, or
+speaking a first clause sooner) and run D23 again.
 
-**Pending (D24, manual).** A 10-minute 35B voice conversation, then Low Power Mode. Record the battery % per
-10 minutes and the time until `.serious`. Check that Woof takes over within one turn.
+**D24 (manual), not needed while the mode is hidden.** A 10-minute 35B voice conversation, then Low Power
+Mode. Record the battery % per 10 minutes and the time until `.serious`. Check that Woof takes over within
+one turn.
 
-**Pending (D25, manual).** In airplane mode, "Remind me at 5" and "5点提醒我", then an open question. Woof should
-create the reminder, and the 35B should answer next, with its prefix restored. Record the swap time.
+**D25 (manual), not needed while the mode is hidden.** In airplane mode, "Remind me at 5" and "5点提醒我",
+then an open question. Woof should create the reminder, and the 35B should answer next, with its prefix
+restored. Record the swap time.
 
 ## 9. Running the benchmarks
 
@@ -502,7 +524,8 @@ measures text only and doesn't load a vision projector. LES keeps the model's to
 256-slot shared bank, 32 or 48 cached experts per layer (depending on the profile), and lookahead prefetch
 depth 4.
 
-The 35B files come either from the in-app download (Settings › Most accurate on device) or from the Mac:
+The benchmark doesn't need the mode, which this version hides. The 35B files come from the Mac (or from
+an earlier build's in-app download):
 
 ```bash
 python3 scripts/download_minicpm_35b.py --target-only
@@ -616,8 +639,9 @@ otherwise the package ignores `MiniCPM/Frameworks`.
 
 The Metal patch adds `@autoreleasepool` blocks to the Metal encoding and residency workers. It changes no
 model operation, weight or precision, and the Swift bridge also drains temporary native objects at each
-call. On the phone it made no difference ([§4](#4-memory), D20), so the next runtime release drops it. That
-release needs a new tag and checksum; until the owner publishes one, the pinned asset keeps the patch.
+call. On the phone it made no difference ([§4](#4-memory), D20). It does no harm, so the owner kept the
+published asset with it; it goes only when the runtime is rebuilt for another reason, which needs a new
+tag and checksum anyway.
 
 ### 9.7 Converting the DSpark draft
 

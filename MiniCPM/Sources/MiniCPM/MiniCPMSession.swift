@@ -61,8 +61,8 @@ public struct MiniCPMRuntimeConfiguration: Codable, Equatable, Sendable {
     /// the local patch's SHA-256 (`scripts/prepare_minicpm.sh`). A prefix file another runtime wrote
     /// never loads. Change it with the `llama` binary target.
     // ponytail: the patch (Metal autorelease pools) made no difference on the iPhone (D20 A/B,
-    // p = 0.82); drop it with the next runtime release, which needs a new asset, tag and checksum
-    // (owner gate G1).
+    // p = 0.82) and is harmless, so the owner kept the published runtime (16 Oct 2026). Drop it
+    // only when the runtime is rebuilt for another reason (new asset, tag and checksum, gate G1).
     public static let runtimeRevision = "96bbf61710d44421ea54e63f5194f9b17c20d877-p60c9974a"
 }
 

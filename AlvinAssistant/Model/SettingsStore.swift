@@ -1,5 +1,6 @@
 import AssistantKit
 import Foundation
+import MiniCPM
 import Observation
 import Security
 import Speech
@@ -46,6 +47,9 @@ final class SettingsStore {
         secrets = loaded
         deepUsage = Self.load(DeepBudget.self, key: Self.deepUsageKey, from: defaults) ?? DeepBudget()
         latency = Self.load(LatencyEstimator.self, key: Self.latencyKey, from: defaults) ?? LatencyEstimator()
+        // A mode this build doesn't offer can't stay on, or voice mode would skip preparing the
+        // on-device model for a 35B that never answers.
+        if !MiniCPMHost.accurateEligible() { settings.accurateOnDevice = false }
     }
 
     func save() {

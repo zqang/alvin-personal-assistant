@@ -18,28 +18,36 @@ struct PhotoReadingSection: View {
 
 /// Settings › Most accurate on device: MiniCPM-V 4.7 35B answers on-device replies in place of the
 /// on-device model, which still handles reminders, calendar and timers and takes over when the
-/// iPhone is hot. Offered only on iPhones with 12 GB of memory.
+/// iPhone is hot. Hidden in this version (`MiniCPMHost.accurateEligible`), so only files an earlier
+/// build downloaded show, to be deleted.
 struct AccurateOnDeviceSection: View {
     @Bindable var store: SettingsStore
 
     private var host: MiniCPMHost { .shared }
 
     var body: some View {
-        Section {
-            if MiniCPMHost.accurateEligible() {
+        if MiniCPMHost.accurateEligible() {
+            Section {
                 Toggle("Most accurate on device", isOn: $store.settings.accurateOnDevice)
                     // It needs the model that answers whenever the 35B can't; always switchable off.
                     .disabled(!store.settings.accurateOnDevice && !fallbackDownloaded)
                 if showsDownload {
                     MiniCPMModelRows(model: .accurate, name: "MiniCPM-V 35B", downloadBytes: MiniCPM35BArtifacts.totalBytes)
                 }
-            } else {
-                LabeledContent("Most accurate on device", value: "Not on this iPhone")
+            } header: {
+                Text("Most accurate on device")
+            } footer: {
+                Text(footer)
             }
-        } header: {
-            Text("Most accurate on device")
-        } footer: {
-            Text(footer)
+        } else if showsDownload {
+            // The mode isn't offered, but files from an earlier build must still be deletable.
+            Section {
+                MiniCPMModelRows(model: .accurate, name: "MiniCPM-V 35B", downloadBytes: MiniCPM35BArtifacts.totalBytes, allowsDownload: false)
+            } header: {
+                Text("MiniCPM-V 35B files")
+            } footer: {
+                Text("Most accurate on device isn't available in this version, so these files aren't used. Delete them to free the space.")
+            }
         }
     }
 
@@ -55,9 +63,6 @@ struct AccurateOnDeviceSection: View {
     }
 
     private var footer: String {
-        guard MiniCPMHost.accurateEligible() else {
-            return "Most accurate on device needs an iPhone with 12 GB of memory, such as iPhone 17 Pro."
-        }
         let fallback = LocalModelCatalog.option(for: store.settings.localModelID)?.displayName ?? "the on-device model"
         let size = ByteCountFormatter.string(fromByteCount: MiniCPM35BArtifacts.totalBytes, countStyle: .file)
         // Measured on an iPhone 17 Pro Max: speed in D22 and D23, the file check in D21 (architecture
@@ -75,6 +80,8 @@ private struct MiniCPMModelRows: View {
     let name: String
     /// What the download takes, from the model's manifest.
     let downloadBytes: Int64
+    /// False shows only the state and Delete, for files of a model this build doesn't offer.
+    var allowsDownload = true
 
     /// What the model's files take now: read when the rows appear and whenever the status changes.
     @State private var bytesOnDisk: Int64 = 0
@@ -93,10 +100,12 @@ private struct MiniCPMModelRows: View {
         case .downloading, .verifying:
             Button("Cancel download") { host.cancelDownload(model) }
         case .notDownloaded:
-            Button(bytesOnDisk > 0 ? "Resume download" : "Download (\(Self.size(downloadBytes)))") { host.download(model) }
+            if allowsDownload {
+                Button(bytesOnDisk > 0 ? "Resume download" : "Download (\(Self.size(downloadBytes)))") { host.download(model) }
+            }
             deleteButton
         case .failed:
-            Button("Try again") { host.download(model) }
+            if allowsDownload { Button("Try again") { host.download(model) } }
             deleteButton
         case .ready, .loading:
             deleteButton

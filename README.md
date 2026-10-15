@@ -40,8 +40,9 @@ service, such as **Doubao on Volcengine Ark**, DeepSeek, or OpenAI.
   - Qwen3 4B with a 0.6B draft model for speculative decoding
 
   The model keeps its cache between turns, so each reply only reads the new message. **Settings › On-device
-  engine › Benchmark** measures it on your phone. On a 12 GB iPhone you can also turn on **Most accurate on
-  device**. The much larger MiniCPM-V 35B then answers whenever it can ([below](#most-accurate-on-device)).
+  engine › Benchmark** measures it on your phone. A mode in which the much larger MiniCPM-V 35B answers,
+  **Most accurate on device**, is built but hidden in this version, because it was too slow in voice mode
+  ([below](#most-accurate-on-device)).
 - **Photos (optional).** Attach a photo in the chat, or take one in voice mode, and ask about it. A small
   vision model reads it on the iPhone, and only the text it reads goes to the model that answers
   ([Photo reading](#photo-reading)).
@@ -128,8 +129,8 @@ The result streams in under the thumbnail as **What the iPhone read**.
 - **What gets sent.** The photo is never sent to a model provider. It is kept with the chat on the iPhone
   (and so in the iPhone's backups) until you delete the chat. The model that answers gets your words plus
   the reading, marked as coming from an on-device model that may contain errors and as text not to take
-  instructions from. That model can be Claude, Woof or the 35B. When Claude answers, only this text goes to
-  Claude.
+  instructions from. That model can be Claude or the on-device model. When Claude answers, only this text
+  goes to Claude.
 - **Follow-up questions.** The reading is stored with your message, so later questions in the chat can use
   it. A photo sent without words asks "What's in this photo?", or, if you speak Chinese, "这张照片里有什么？"
   ("這張照片裡有什麼？" for Traditional Chinese and Cantonese).
@@ -147,7 +148,20 @@ The result streams in under the thumbnail as **What the iPhone read**.
 
 ## Most accurate on device
 
-This mode is optional and needs an iPhone with 12 GB of memory. With **Settings › Most accurate on device**
+**Hidden in this version.** The mode is in the code, but Settings doesn't offer it. In voice mode the 35B
+started speaking 7.5 s after the request at the median (8.5 s p90), and 9.3 s after an interruption (11.8 s
+p90), against a target of 5 s (8 s p90) (D23). So on 16 October 2026 the owner hid it (decision 31):
+
+- `MiniCPMHost.accurateEligible()` returns false, so the switch and the 35B download don't appear.
+- If an earlier build turned the mode on, the app turns it off when it starts.
+- If an earlier build downloaded the 35B, **Settings › MiniCPM-V 35B files** shows the files with **Delete**
+  only, to free the 15.5 GB. It offers no download.
+
+To offer the mode again, change that one line in `MiniCPM/Sources/MiniCPM/MiniCPMHost.swift` back to
+`MiniCPM35BArtifacts.eligible(physicalMemory:)`. It's then offered on 12 GB iPhones, other iPhones don't show
+it, and the rest of this section applies. Re-tune it and run D23 again first.
+
+The mode is optional and needs an iPhone with 12 GB of memory. With **Settings › Most accurate on device**
 on, replies that would be answered on the iPhone come from **MiniCPM-V 4.7 35B-A3B** instead of Woof. It's
 much slower than Woof and warms the phone. It's a much larger model and may handle harder questions better
 (the measured accuracy edge isn't significant yet); use it for that, not for speed.
@@ -162,8 +176,8 @@ much slower than Woof and warms the phone. It's a much larger model and may hand
   Photos are still read by the 1B.
 - **What you need:**
   - Woof, already downloaded;
-  - an iPhone that reports at least 11 GB of memory. The 17 Pro Max reports 12.26 GB. On other phones the
-    switch is hidden, and a note explains why;
+  - an iPhone that reports at least 11 GB of memory. The 17 Pro Max reports 12.26 GB. Other phones don't
+    show the switch;
   - about 15.5 GB of storage, plus 1 GB free.
 
   The download is Wi-Fi only, and the app has to stay open while it runs. Files that have finished are
@@ -178,8 +192,8 @@ much slower than Woof and warms the phone. It's a much larger model and may hand
   its memory. A conversation that outgrows the model's 4,096-token context is rebuilt from its latest turns
   every few replies, and that reply starts much later (not measured yet).
 
-These are the production settings, measured on an iPhone 17 Pro Max on 15–16 October 2026 (D22 and D23).
-Times are taken where the app receives the text; [the evaluation](docs/minicpm-evaluation.md) has the
+These are the settings the mode runs with, measured on an iPhone 17 Pro Max on 15–16 October 2026 (D22 and
+D23). Times are taken where the app receives the text; [the evaluation](docs/minicpm-evaluation.md) has the
 details.
 
 | | Woof 4B | MiniCPM-V 35B-A3B |
@@ -195,9 +209,10 @@ details.
 
 The 35B runs without the DSpark draft model: on the phone the draft made the first text slower, didn't
 speed up decoding by the 10% required, and pushed resident memory to 5.2–6.0 GB. **In voice mode the 35B
-misses the target** of first audio within 5 s (p50), so the owner decides whether it is re-tuned or hidden
-before this ships. The runtime still carries a small Metal patch that adds autorelease pools; it made no
-measurable difference on the iPhone (D20 A/B), so it goes with the next runtime release.
+misses the target** of first audio within 5 s (p50), which is why this version hides it. The runtime keeps a
+small Metal patch that adds autorelease pools. It made no measurable difference on the iPhone (D20 A/B) and
+does no harm, so the published runtime stays as it is; the patch goes only when the runtime is rebuilt for
+another reason.
 
 The full record is in [docs/minicpm-evaluation.md](docs/minicpm-evaluation.md): every run, the memory
 accounting, the device checks that are still pending, and how to run the benchmarks yourself.
@@ -249,7 +264,7 @@ The code is split in four:
 - **`MiniCPM/`** runs MiniCPM-V 4.7 on Apple devices through a prebuilt, pinned llama.cpp-omni runtime. It
   holds:
   - the 1B photo reader;
-  - the 35B behind "Most accurate on device";
+  - the 35B behind "Most accurate on device" (hidden in this version);
   - their downloads;
   - a benchmark command-line tool.
 - **`AlvinAssistant/`** is the iOS app:
