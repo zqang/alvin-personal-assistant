@@ -340,30 +340,6 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
 /// session doesn't adopt a failed early reply: it starts the turn's reply afresh.
 private struct EarlyReplyNotOnDevice: Error {}
 
-/// `base`, once `gate` is open: the stream waits for that, and fails with `CancellationError`
-/// when the gate is cancelled instead, without ever calling `base`.
-private struct CommitGatedProvider: AssistantProvider {
-    let base: any AssistantProvider
-    let gate: CommitGate
-
-    func streamEvents(system: String, turns: [ChatTurn]) -> AsyncThrowingStream<AssistantEvent, Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task {
-                do {
-                    try await gate.wait()
-                    for try await event in base.streamEvents(system: system, turns: turns) {
-                        continuation.yield(event)
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-}
-
 /// Measures a reply's time to first text for `LatencyEstimator`: from the latest `.routed` event
 /// (the route, or a fallback's) to the first non-empty text. A reply that loaded the on-device
 /// model first, or called a tool before its text, measures that, not the engine, so it gives no

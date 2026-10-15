@@ -358,6 +358,44 @@ final class ContractCommitGateTests: XCTestCase {
         try await gate.wait()
     }
 
+    func testGatedProviderCallsItsBaseOnlyOnceTheGateOpens() async throws {
+        let base = ScriptedProvider([.reply(.text("Hi")), .reply(.finished(.completed))])
+        let gate = CommitGate()
+        let gated = CommitGatedProvider(base: base, gate: gate)
+        let reply = Task { try await collectEvents(gated.streamEvents(system: "rules", turns: [ChatTurn(role: .user, text: "hello")])) }
+        let registered = await waitUntil { gate.waiterCount == 1 }
+        XCTAssertTrue(registered, "the stream must be waiting for the gate")
+        XCTAssertEqual(base.callCount, 0, "nothing is sent before the turn is final")
+        gate.open()
+        let events = try await reply.value
+        XCTAssertEqual(events, [.reply(.text("Hi")), .reply(.finished(.completed))])
+        XCTAssertEqual(base.receivedSystems, ["rules"])
+        XCTAssertEqual(base.receivedTurns.first?.map(\.text), ["hello"])
+    }
+
+    func testGatedProviderNeverCallsItsBaseForACancelledGateOrAStoppedReply() async throws {
+        let base = ScriptedProvider([.reply(.text("Hi"))])
+        let cancelled = CommitGate()
+        let discarded = Task { _ = try await collectEvents(CommitGatedProvider(base: base, gate: cancelled).streamEvents(system: "", turns: [])) }
+        let waiting = await waitUntil { cancelled.waiterCount == 1 }
+        XCTAssertTrue(waiting)
+        cancelled.cancel()
+        await assertCancelled(discarded)
+
+        // A reply stopped while it waits ends its wait, so a gate opened later sends nothing.
+        let pending = CommitGate()
+        let stopped = Task { _ = try await collectEvents(CommitGatedProvider(base: base, gate: pending).streamEvents(system: "", turns: [])) }
+        let registered = await waitUntil { pending.waiterCount == 1 }
+        XCTAssertTrue(registered)
+        stopped.cancel()
+        _ = try? await stopped.value
+        let released = await waitUntil { pending.waiterCount == 0 }
+        XCTAssertTrue(released, "ending the stream ends the wait")
+        pending.open()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(base.callCount, 0)
+    }
+
     private final class Counter: @unchecked Sendable {
         private let lock = NSLock()
         private var count = 0
