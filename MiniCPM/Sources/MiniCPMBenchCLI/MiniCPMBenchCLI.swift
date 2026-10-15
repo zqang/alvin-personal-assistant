@@ -1,20 +1,26 @@
+import AssistantKit
 import Foundation
-import MiniCPMBenchmark
+import MiniCPM
 
+/// Measures through the app's streams (`reply`, `describePhoto`), so first text is when Swift
+/// receives it; `result.nativeFirstTextSeconds` keeps the runtime's own number. Each prompt is
+/// prefilled from scratch, in the same format as the native benchmark run.
 @main
 struct MiniCPMBenchCLI {
     struct Report: Encodable {
         let model: String
-        let runtimeRevision = "96bbf61710d44421ea54e63f5194f9b17c20d877"
+        let runtimeRevision = MiniCPMRuntimeConfiguration.runtimeRevision
         let image: String?
         let prompt: String
         let loadSeconds: Double
+        /// Mapped weights, which `phys_footprint` doesn't count.
+        let weightsBytes: UInt64
         let tokensPerSecond: Double
         let result: MiniCPMBenchmarkResult
     }
 
     static func main() async {
-        let usage = "Usage: minicpm-bench MODEL.gguf MMPROJ.gguf|- [IMAGE.png] [--experts MANIFEST.json] [--draft DSPARK.gguf] [--prompt TEXT | --prompts-json FILE] [--max-tokens N] [--profile NAME] [--warmup N] [--repeat N]"
+        let usage = "Usage: minicpm-bench MODEL.gguf MMPROJ.gguf|- [IMAGE.png] [--experts MANIFEST.json] [--draft DSPARK.gguf] [--prompt TEXT | --prompts-json FILE] [--max-tokens N] [--slices N] [--profile NAME] [--warmup N] [--repeat N]"
         var arguments = Array(CommandLine.arguments.dropFirst())
         if arguments.isEmpty || arguments.contains("--help") {
             print(usage)
@@ -31,6 +37,7 @@ struct MiniCPMBenchCLI {
             var image: URL?
             var prompt: String?
             var maxTokens = 128
+            var slices = 1
             var configuration = MiniCPMRuntimeConfiguration.baseline
             var promptsFile: URL?
             var repetitions = 1
@@ -61,6 +68,9 @@ struct MiniCPMBenchCLI {
                 case "--max-tokens":
                     guard let parsed = Int(value) else { throw MiniCPMError.invalidInput("Invalid token limit") }
                     maxTokens = parsed
+                case "--slices":
+                    guard let parsed = Int(value), (1...9).contains(parsed) else { throw MiniCPMError.invalidInput("Use 1–9 slices") }
+                    slices = parsed
                 default: throw MiniCPMError.invalidInput("Unknown option: \(flag)\n\(usage)")
                 }
             }
@@ -71,15 +81,29 @@ struct MiniCPMBenchCLI {
             try await session.load(modelURL: model, projectorURL: projector, expertsURL: experts, draftURL: draft, configuration: configuration)
             let elapsed = start.duration(to: .now).components
             let loadSeconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+            let weightsBytes = await session.info.weightsBytes
             let prompts = try promptsFile.map { try JSONDecoder().decode([String].self, from: Data(contentsOf: $0)) } ?? [instruction]
             guard !prompts.isEmpty else { throw MiniCPMError.invalidInput("Prompt list cannot be empty") }
-            for _ in 0..<warmupCount { _ = try await session.run(prompt: "Reply with exactly OK.", maxTokens: 8) }
+            let imageData = try image.map { try Data(contentsOf: $0) }
+            let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("minicpm-bench-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: scratch) }
+            func measure(_ text: String, maxTokens: Int) async throws -> MiniCPMBenchmarkResult {
+                let events = imageData.map {
+                    session.describePhoto(jpeg: $0, system: "", instruction: text, maxTokens: maxTokens, maxSlices: slices)
+                } ?? session.reply(system: "", turns: [ChatTurn(role: .user, text: text)], maxTokens: maxTokens, prefixDirectory: scratch)
+                for try await event in events {
+                    if case .finished(let result) = event { return result }
+                }
+                throw MiniCPMError.runtime("The stream ended without a result.")
+            }
+            for _ in 0..<warmupCount { _ = try await measure("Reply with exactly OK.", maxTokens: 8) }
             var reports: [Report] = []
             for _ in 0..<repetitions {
                 for instruction in prompts {
-                    let result = try await session.run(prompt: instruction, imageURL: image, maxTokens: maxTokens)
+                    let result = try await measure(instruction, maxTokens: maxTokens)
                     reports.append(Report(model: model.lastPathComponent, image: image?.lastPathComponent,
-                        prompt: instruction, loadSeconds: loadSeconds, tokensPerSecond: result.tokensPerSecond, result: result))
+                        prompt: instruction, loadSeconds: loadSeconds, weightsBytes: weightsBytes,
+                        tokensPerSecond: result.tokensPerSecond, result: result))
                 }
             }
             await session.unload()
