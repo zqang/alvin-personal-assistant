@@ -2,7 +2,7 @@
 """Download and verify the pinned MiniCPM-V 4.7 1B benchmark GGUF pair.
 
 Only Python's standard library is required. Keep the manifest synchronized with
-AssistantKit/OnDevice/MiniCPMArtifacts.swift. Downloaded files are installed only
+MiniCPM/Sources/MiniCPM/MiniCPMArtifacts.swift. Downloaded files are installed only
 after exact length, GGUF header, and full SHA256 verification succeeds.
 """
 

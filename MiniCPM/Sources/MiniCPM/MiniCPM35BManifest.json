@@ -296,13 +296,6 @@
       "sourceURL": "https://huggingface.co/tc-mb/MiniCPM-V-Apps-gguf/resolve/8716e5209f308fd53f197ccd7d50c6fdcc2dc37d/MiniCPM-V-4.7-35B-A3B/experts/manifest.json"
     },
     {
-      "path": "mmproj-model-f16.gguf",
-      "sizeBytes": 1119575840,
-      "sha256": "bff3b688e14c300eca273092c37c50a0ddfcc2054e079af1a0480edeed5d20f1",
-      "role": "projector",
-      "sourceURL": "https://huggingface.co/tc-mb/MiniCPM-V-Apps-gguf/resolve/8716e5209f308fd53f197ccd7d50c6fdcc2dc37d/MiniCPM-V-4.7-35B-A3B/mmproj-model-f16.gguf"
-    },
-    {
       "path": "MiniCPMV47-DSpark-Q8_0.gguf",
       "sizeBytes": 424573088,
       "sha256": "60772de6e32598a53d21bb7c12535081b9d1a6d516ceb8003093af2545ad41a6",

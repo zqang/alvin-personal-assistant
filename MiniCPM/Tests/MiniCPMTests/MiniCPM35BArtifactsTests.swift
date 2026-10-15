@@ -1,11 +1,8 @@
+import CryptoKit
+import Darwin
 import Foundation
 import XCTest
-@testable import AssistantKit
-#if canImport(CryptoKit)
-import CryptoKit
-#if canImport(Darwin)
-import Darwin
-#endif
+@testable import MiniCPM
 
 final class MiniCPM35BArtifactsTests: XCTestCase {
     private func temporaryDirectory() throws -> URL {
@@ -22,10 +19,9 @@ final class MiniCPM35BArtifactsTests: XCTestCase {
     }
 
     private func fixture() throws -> ([MiniCPM35BArtifacts.Artifact], [String: Data]) {
-        var files: [String: Data] = ["model.gguf": Data("GGUFmodel".utf8), "projector.gguf": Data("GGUFprojector".utf8), "draft.gguf": Data("GGUFdraft".utf8)]
+        var files: [String: Data] = ["model.gguf": Data("GGUFmodel".utf8), "draft.gguf": Data("GGUFdraft".utf8)]
         var entries: [[String: Any]] = []
         var artifacts = [artifact("model.gguf", role: "model", bytes: files["model.gguf"]!),
-                         artifact("projector.gguf", role: "projector", bytes: files["projector.gguf"]!),
                          artifact("draft.gguf", role: "draft", bytes: files["draft.gguf"]!, local: true)]
         for layer in 0..<40 {
             let name = String(format: "layer_%03d.bin", layer)
@@ -46,20 +42,37 @@ final class MiniCPM35BArtifactsTests: XCTestCase {
         return (artifacts, files)
     }
 
-    func testPinnedTargetIncludesFortyRawShardsAndDedicatedProjector() {
+    private func makeLoader(_ directory: URL, _ entries: [MiniCPM35BArtifacts.Artifact], _ downloads: MiniCPM35BFixtureDownloads) -> MiniCPM35BArtifacts {
+        MiniCPM35BArtifacts(directory: directory, artifacts: entries, downloader: { source, destination, progress in
+            try await downloads.download(source, destination, progress)
+        }, freeBytes: { _ in .max })
+    }
+
+    func testPinnedSetHasFortyRawShardsNoProjectorAndAnUnhostedDraft() {
         let files = MiniCPM35BArtifacts.artifacts
         XCTAssertEqual(files.filter { $0.role == "expert" }.count, 40)
-        XCTAssertEqual(files.first { $0.role == "projector" }?.sizeBytes, 1_119_575_840)
-        XCTAssertEqual(files.first { $0.role == "draft" }?.sha256, MiniCPM35BArtifacts.draftProvenance.sha256)
-        XCTAssertNil(files.first { $0.role == "draft" }?.sourceURL)
-        XCTAssertEqual(MiniCPM35BArtifacts.totalBytes, 17_048_158_596)
+        XCTAssertFalse(files.contains { $0.role == "projector" })
+        let draft = files.first { $0.role == "draft" }
+        XCTAssertEqual(draft?.sha256, MiniCPM35BArtifacts.draftProvenance.sha256)
+        XCTAssertEqual(draft?.sizeBytes, MiniCPM35BArtifacts.draftProvenance.sizeBytes)
+        XCTAssertNil(draft?.sourceURL)
+        XCTAssertEqual(files.first { $0.role == "model" }?.sha256, MiniCPM35BArtifacts.draftProvenance.pairedTargetSHA256)
+        // The download: the model, 40 shards and their manifest, without the unhosted draft.
+        XCTAssertEqual(MiniCPM35BArtifacts.totalBytes, 15_504_009_668)
+        XCTAssertEqual(MiniCPM35BArtifacts.directory.lastPathComponent, "MiniCPM35BBenchmark")
         for file in files where file.role != "draft" {
             XCTAssertEqual(file.sha256.count, 64)
             XCTAssertTrue(file.sourceURL?.path.contains("/resolve/\(MiniCPM35BArtifacts.revision)/") == true)
         }
     }
 
-    #if canImport(Darwin)
+    func testEligibilityNeedsElevenBillionBytesOfMemory() {
+        XCTAssertTrue(MiniCPM35BArtifacts.eligible(physicalMemory: 12_262_113_280)) // iPhone 17 Pro Max
+        XCTAssertTrue(MiniCPM35BArtifacts.eligible(physicalMemory: 11_000_000_000))
+        XCTAssertFalse(MiniCPM35BArtifacts.eligible(physicalMemory: 10_999_999_999))
+        XCTAssertFalse(MiniCPM35BArtifacts.eligible(physicalMemory: 8_000_000_000))
+    }
+
     func testHashingDoesNotRetainAWholeFileOfAutoreleasedChunks() throws {
         let directory = try temporaryDirectory()
         let file = directory.appendingPathComponent("large.bin")
@@ -75,7 +88,7 @@ final class MiniCPM35BArtifactsTests: XCTestCase {
             sha256: hasher.finalize().map { String(format: "%02x", $0) }.joined(), role: "expert", sourceURL: nil)
         let growth: UInt64 = try autoreleasepool {
             let before = try processFootprint()
-            XCTAssertTrue(try MiniCPM35BArtifacts.valid(file, artifact: artifact))
+            XCTAssertTrue(try MiniCPMArtifacts.valid(file, artifact: artifact))
             let after = try processFootprint()
             return after > before ? after - before : 0
         }
@@ -94,48 +107,66 @@ final class MiniCPM35BArtifactsTests: XCTestCase {
         XCTAssertEqual(status, KERN_SUCCESS)
         return info.phys_footprint
     }
-    #endif
 
     func testUnsafePathsAndSymlinkEscapeAreRejected() throws {
         let directory = try temporaryDirectory()
         for name in ["/tmp/file", "../file", "experts/../../file", "experts//file", "experts/./file", "experts\\file", ""] {
-            XCTAssertThrowsError(try MiniCPM35BArtifacts.safePath(name, in: directory))
+            XCTAssertThrowsError(try MiniCPMArtifacts.safePath(name, in: directory))
         }
         try FileManager.default.createSymbolicLink(at: directory.appendingPathComponent("escape"), withDestinationURL: directory.deletingLastPathComponent())
-        XCTAssertThrowsError(try MiniCPM35BArtifacts.safePath("escape/file", in: directory))
+        XCTAssertThrowsError(try MiniCPMArtifacts.safePath("escape/file", in: directory))
     }
 
     func testCacheIsVerifiedAndCorruptShardIsReplaced() async throws {
         let directory = try temporaryDirectory()
         let (entries, files) = try fixture()
-        try files["draft.gguf"]!.write(to: directory.appendingPathComponent("draft.gguf"))
         let downloads = MiniCPM35BFixtureDownloads(files: files)
-        let loader = MiniCPM35BArtifacts(directory: directory, artifacts: entries) { source, destination, progress in
-            try await downloads.download(source, destination, progress)
-        }
+        let loader = makeLoader(directory, entries, downloads)
         let paths = try await loader.prepare()
         _ = try await loader.prepare()
         let initialCount = await downloads.count
-        XCTAssertEqual(initialCount, 43)
+        XCTAssertEqual(initialCount, 42)
         XCTAssertEqual(paths.experts.lastPathComponent, "manifest.json")
         let shard = directory.appendingPathComponent("experts/layer_007.bin")
         try Data(repeating: 99, count: 768).write(to: shard)
         _ = try await loader.prepare()
         let finalCount = await downloads.count
-        XCTAssertEqual(finalCount, 44)
+        XCTAssertEqual(finalCount, 43)
         XCTAssertEqual(try Data(contentsOf: shard), files["experts/layer_007.bin"])
     }
 
-    func testMissingDraftFailsBeforeDownloadingTarget() async throws {
+    func testDraftIsOptionalAndAWrongOneIsNeverUsed() async throws {
         let directory = try temporaryDirectory()
-        let (entries, _) = try fixture()
-        let loader = MiniCPM35BArtifacts(directory: directory, artifacts: entries) { _, _, _ in XCTFail("No download without the required local draft") }
-        do {
-            _ = try await loader.prepare()
-            XCTFail("Required draft cannot silently fall back")
-        } catch let error as MiniCPM35BArtifacts.ArtifactError {
-            XCTAssertEqual(error, .missingLocalDraft)
-        }
+        let (entries, files) = try fixture()
+        let downloads = MiniCPM35BFixtureDownloads(files: files)
+        let loader = makeLoader(directory, entries, downloads)
+        let draft = directory.appendingPathComponent("draft.gguf")
+        // Absent: the target downloads and runs without it; the draft is never fetched.
+        var paths = try await loader.prepare()
+        XCTAssertNil(paths.draft)
+        XCTAssertEqual(paths.model.lastPathComponent, "model.gguf")
+        let count = await downloads.count
+        XCTAssertEqual(count, 42)
+        // Present but wrong: left alone and not used.
+        try Data("GGUFdrafT".utf8).write(to: draft) // Right size, wrong hash.
+        paths = try await loader.prepare()
+        XCTAssertNil(paths.draft)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: draft.path))
+        // Present and right: used.
+        try files["draft.gguf"]!.write(to: draft)
+        paths = try await loader.prepare()
+        XCTAssertEqual(paths.draft?.lastPathComponent, "draft.gguf")
+        let finalCount = await downloads.count
+        XCTAssertEqual(finalCount, 42)
+    }
+
+    func testAnOldProjectorIsDeleted() async throws {
+        let directory = try temporaryDirectory()
+        let (entries, files) = try fixture()
+        let projector = directory.appendingPathComponent("mmproj-model-f16.gguf")
+        try Data("GGUFprojector".utf8).write(to: projector)
+        _ = try await makeLoader(directory, entries, MiniCPM35BFixtureDownloads(files: files)).prepare()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: projector.path))
     }
 
     func testExpertManifestRejectsTraversalAndOutOfBoundsAndDuplicateTensors() throws {
@@ -158,23 +189,23 @@ final class MiniCPM35BArtifactsTests: XCTestCase {
         let (entries, files) = try fixture()
         try files["draft.gguf"]!.write(to: directory.appendingPathComponent("draft.gguf"))
         let (started, signal) = AsyncStream<Void>.makeStream()
-        let loader = MiniCPM35BArtifacts(directory: directory, artifacts: entries) { _, target, _ in
+        let loader = MiniCPM35BArtifacts(directory: directory, artifacts: entries, downloader: { _, target, _ in
             try Data("GGUF".utf8).write(to: target)
             signal.yield(())
             try await Task.sleep(for: .seconds(60))
-        }
+        }, freeBytes: { _ in .max })
         let task = Task { try await loader.prepare() }
         var iterator = started.makeAsyncIterator()
         _ = await iterator.next()
         do {
             _ = try await loader.prepare()
             XCTFail("Concurrent preparation must not share staging files")
-        } catch let error as MiniCPM35BArtifacts.ArtifactError {
+        } catch let error as MiniCPMArtifacts.ArtifactError {
             XCTAssertEqual(error, .alreadyPreparing)
         }
         task.cancel()
         do { _ = try await task.value; XCTFail("Expected cancellation") } catch is CancellationError { }
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["draft.gguf"])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), [".verified.json", "draft.gguf"])
         signal.finish()
     }
 }
@@ -190,4 +221,3 @@ private actor MiniCPM35BFixtureDownloads {
         progress(Int64(bytes.count))
     }
 }
-#endif

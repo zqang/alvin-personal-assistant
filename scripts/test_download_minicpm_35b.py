@@ -2,10 +2,13 @@
 
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
+import json
 from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 import download_minicpm_35b as subject
 
@@ -67,6 +70,30 @@ class DownloadTests(unittest.TestCase):
             (directory / "link").symlink_to(directory.parent, target_is_directory=True)
             with self.assertRaises(ValueError):
                 subject.safe_path(directory, "link/escape")
+
+    def test_draft_is_optional_but_a_present_one_must_match(self):
+        model, draft = b"GGUFmodel", b"GGUFdraft"
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            (directory / "model.gguf").write_bytes(model)
+            manifest = directory / "manifest.json"
+            manifest.write_text(json.dumps({"artifacts": [
+                {"path": "model.gguf", "sizeBytes": len(model), "sha256": hashlib.sha256(model).hexdigest(),
+                 "role": "model", "sourceURL": "http://127.0.0.1:9/model.gguf"},
+                {"path": "draft.gguf", "sizeBytes": len(draft), "sha256": hashlib.sha256(draft).hexdigest(),
+                 "role": "draft", "sourceURL": None}]}))
+
+            def run():
+                argv = ["download_minicpm_35b.py", "--directory", root, "--verify-only"]
+                with mock.patch.object(subject, "MANIFEST", manifest), mock.patch.object(subject, "validate_expert_manifest"), \
+                        mock.patch("sys.argv", argv), mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
+                    return subject.main()
+
+            self.assertEqual(run(), 0)  # Absent: skipped.
+            (directory / "draft.gguf").write_bytes(b"GGUFdrafT")
+            self.assertEqual(run(), 1)  # Present but wrong: refused.
+            (directory / "draft.gguf").write_bytes(draft)
+            self.assertEqual(run(), 0)
 
 
 if __name__ == "__main__":

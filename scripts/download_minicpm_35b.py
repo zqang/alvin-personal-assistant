@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Resume and SHA256-verify the pinned MiniCPM-V 35B LES benchmark files.
+"""Resume and SHA256-verify the pinned MiniCPM-V 35B LES files.
 
 Uses the same manifest as the app. Interrupted downloads stay in .partial files;
-only complete, verified files are atomically installed. No third-party packages.
+only complete, verified files are atomically installed. The DSpark draft has no
+download source: it is optional, but a present one must match its pin. No
+third-party packages.
 """
 
 import argparse
@@ -18,7 +20,7 @@ import time
 import urllib.error
 import urllib.request
 
-MANIFEST = Path(__file__).resolve().parents[1] / "AssistantKit/Sources/AssistantKit/OnDevice/MiniCPM35BManifest.json"
+MANIFEST = Path(__file__).resolve().parents[1] / "MiniCPM/Sources/MiniCPM/MiniCPM35BManifest.json"
 CHUNK = 1_048_576
 
 
@@ -129,7 +131,7 @@ def main():
     parser.add_argument("--directory", type=Path, default=Path("build/minicpm-35b-models"))
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--verify-only", action="store_true")
-    parser.add_argument("--target-only", action="store_true", help="Prepare target files while the DSpark draft is converted separately")
+    parser.add_argument("--target-only", action="store_true", help="Ignore the DSpark draft, even a present one")
     options = parser.parse_args()
     try:
         directory = options.directory.resolve()
@@ -137,10 +139,13 @@ def main():
         artifacts = json.loads(MANIFEST.read_text())["artifacts"]
         if options.target_only:
             artifacts = [a for a in artifacts if a["role"] != "draft"]
-        for artifact in artifacts:
+        for artifact in [a for a in artifacts if not a.get("sourceURL")]:
             path = safe_path(directory, artifact["path"])
-            if not artifact.get("sourceURL") and not valid(path, artifact):
-                raise ValueError(f"Prepare the required local draft {artifact['path']} with scripts/convert_minicpm_dspark.py first, or use --target-only")
+            if not path.exists():
+                print(f"Skipping the optional {artifact['path']}: DSpark stays off until scripts/convert_minicpm_dspark.py makes it", flush=True)
+                artifacts.remove(artifact)
+            elif not valid(path, artifact):
+                raise ValueError(f"{artifact['path']} does not match its pin; convert it again with scripts/convert_minicpm_dspark.py, or use --target-only")
         missing = sum(a["sizeBytes"] for a in artifacts if not safe_path(directory, a["path"]).exists())
         required = missing + max(a["sizeBytes"] for a in artifacts) + 512 * 1_048_576
         if not options.verify_only and shutil.disk_usage(directory).free < required:

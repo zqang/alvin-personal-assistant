@@ -9,7 +9,9 @@ It never rewrites the checkpoint as an unrelated architecture.
 Requires numpy, tqdm and pyyaml plus the runtime's gguf-py. Build the quantizer:
   CMAKE --build build/minicpm/macos-arm64 --config Release --target llama-quantize
 Download config.json and model.safetensors from SOURCE_URL below before running.
-All three inputs are SHA-256 checked. The output has a provenance JSON sidecar.
+Every pin comes from the draftProvenance of MiniCPM35BManifest.json, which the app
+reads too. All three inputs are SHA-256 checked, the output has a provenance JSON
+sidecar, and an output that differs from the manifest's pin fails the run.
 """
 from __future__ import annotations
 
@@ -23,12 +25,14 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_REVISION = "96bbf61710d44421ea54e63f5194f9b17c20d877"
-SOURCE_REVISION = "5facb75c251ffd524524a544c1f5fd97ba0d6c5c"
-SOURCE_URL = f"https://huggingface.co/openbmb/MiniCPM-V-4.7-35B-A3B-DSpark/resolve/{SOURCE_REVISION}"
-CONFIG_SHA = "a603178db396e6a18e95d3151156ad817315e4135f99426253ac469629182096"
-WEIGHTS_SHA = "211eda7b962795ba727b0d7db072d8c474dc3b94075f85f123fe363caf5e9679"
-TARGET_SHA = "a1e700ae07b0d46ccf06b3fc65da503ef3adaeaa149b741a3da04fb48d8f2f83"
+PROVENANCE = json.loads((ROOT / "MiniCPM/Sources/MiniCPM/MiniCPM35BManifest.json").read_text())["draftProvenance"]
+RUNTIME_REVISION = PROVENANCE["runtimeRevision"]
+SOURCE_REPOSITORY = PROVENANCE["sourceRepository"]
+SOURCE_REVISION = PROVENANCE["sourceRevision"]
+SOURCE_URL = f"https://huggingface.co/{SOURCE_REPOSITORY}/resolve/{SOURCE_REVISION}"
+CONFIG_SHA = PROVENANCE["sourceConfigSHA256"]
+WEIGHTS_SHA = PROVENANCE["sourceWeightsSHA256"]
+TARGET_SHA = PROVENANCE["pairedTargetSHA256"]
 
 
 def sha256(path: Path) -> str:
@@ -104,8 +108,8 @@ def main() -> None:
     mapping = tensor_mapping(config)
     if set(header) != set(mapping):
         raise ValueError("Checkpoint tensor names do not exactly match the DSpark mapping")
-    if sum(math.prod(value["shape"]) for value in header.values()) != 389_223_169:
-        raise ValueError("Unexpected draft parameter count")
+    if len(mapping) != PROVENANCE["tensorCount"] or sum(math.prod(value["shape"]) for value in header.values()) != PROVENANCE["parameterCount"]:
+        raise ValueError("Unexpected draft tensor or parameter count")
     for name, info in header.items():
         if info["dtype"] != "BF16" or info["shape"] != mapping[name][1]:
             raise ValueError(f"Unexpected dtype/shape: {name}")
@@ -124,7 +128,7 @@ def main() -> None:
     writer = gguf.GGUFWriter(intermediate, "dflash", use_temp_file=True)
     writer.add_name("MiniCPM-V-4.7-35B-A3B-DSpark")
     writer.add_file_type(1)
-    writer.add_string("general.source.huggingface.repository", "openbmb/MiniCPM-V-4.7-35B-A3B-DSpark")
+    writer.add_string("general.source.huggingface.repository", SOURCE_REPOSITORY)
     writer.add_string("minicpm.draft.source_revision", SOURCE_REVISION)
     writer.add_string("minicpm.draft.source_sha256", WEIGHTS_SHA)
     writer.add_string("minicpm.draft.runtime_revision", RUNTIME_REVISION)
@@ -182,19 +186,15 @@ def main() -> None:
         if tensor.tensor_type not in allowed:
             raise ValueError(f"Unexpected output tensor type: {tensor.name}: {tensor.tensor_type}")
     del converted
-    staged.replace(args.output)
-    provenance = {
-        "sourceRepository": "openbmb/MiniCPM-V-4.7-35B-A3B-DSpark",
-        "sourceRevision": SOURCE_REVISION, "sourceWeightsSHA256": WEIGHTS_SHA,
-        "sourceConfigSHA256": CONFIG_SHA, "pairedTargetSHA256": TARGET_SHA,
-        "runtimeRevision": RUNTIME_REVISION, "converter": "scripts/convert_minicpm_dspark.py",
-        "conversion": "BF16 checkpoint -> F16 matrices/F32 vectors -> pinned llama-quantize Q8_0",
-        "tokenizer": "Copied verbatim from the paired target GGUF, with checkpoint mask_token_id",
-        "tensorCount": len(mapping), "parameterCount": 389_223_169,
-        "sizeBytes": args.output.stat().st_size, "sha256": sha256(args.output),
-    }
-    args.output.with_suffix(".provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
+    # Checked before anything is replaced: a conversion that misses the pin leaves a good draft
+    # at the output path as it was.
+    provenance = {**PROVENANCE, "sizeBytes": staged.stat().st_size, "sha256": sha256(staged)}
     print(json.dumps(provenance, indent=2))
+    if provenance != PROVENANCE:
+        staged.unlink()
+        raise ValueError("The converted draft differs from the manifest's pin, so the app wouldn't use it; the output was left as it was")
+    staged.replace(args.output)
+    args.output.with_suffix(".provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
 
 
 if __name__ == "__main__":
