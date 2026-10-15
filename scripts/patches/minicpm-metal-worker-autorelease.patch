@@ -1,0 +1,131 @@
+--- a/ggml/src/ggml-metal/ggml-metal-context.m
++++ b/ggml/src/ggml-metal/ggml-metal-context.m
+@@ -674,49 +674,52 @@
+     }
+ 
+     ctx->encode_async = Block_copy(^(size_t iter) {
+-        const int cb_idx = iter;
+-        const int n_cb_l = ctx->n_cb;
+-
+-        const int n_nodes_0 = ctx->n_nodes_0;
+-        const int n_nodes_1 = ctx->n_nodes_1;
+-
+-        const int n_nodes_per_cb = ctx->n_nodes_per_cb;
+-
+-        int idx_start = 0;
+-        int idx_end   = n_nodes_0;
+-
+-        if (cb_idx < n_cb_l) {
+-            idx_start = n_nodes_0 + (                                         (cb_idx + 0) * n_nodes_per_cb);
+-            idx_end   = n_nodes_0 + (MIN((cb_idx == n_cb_l - 1) ? n_nodes_1 : (cb_idx + 1) * n_nodes_per_cb, n_nodes_1));
+-        }
+-
+-        id<MTLCommandBuffer> cmd_buf = ctx->cmd_bufs[cb_idx].obj;
+-
+-        ggml_metal_op_t ctx_op = ggml_metal_op_init(
+-            ctx->dev,
+-            cmd_buf,
+-            ctx->gf,
+-            idx_start,
+-            idx_end,
+-            ctx->use_fusion,
+-            ctx->use_concurrency,
+-            ctx->capture_compute,
+-            ctx->debug_graph,
+-            ctx->debug_fusion);
+-
+-        for (int idx = 0; idx < ggml_metal_op_n_nodes(ctx_op); ++idx) {
+-            const int res = ggml_metal_op_encode(ctx_op, idx);
+-            if (res == 0) {
+-                break;
+-            }
+-
+-            idx += res - 1;
+-        }
+-
+-        ggml_metal_op_free(ctx_op);
+-
+-        if (cb_idx < 2 || ctx->abort_callback == NULL) {
+-            [cmd_buf commit];
++        // Dispatch workers need their own pool; the calling thread cannot drain autoreleased encoders.
++        @autoreleasepool {
++            const int cb_idx = iter;
++            const int n_cb_l = ctx->n_cb;
++
++            const int n_nodes_0 = ctx->n_nodes_0;
++            const int n_nodes_1 = ctx->n_nodes_1;
++
++            const int n_nodes_per_cb = ctx->n_nodes_per_cb;
++
++            int idx_start = 0;
++            int idx_end   = n_nodes_0;
++
++            if (cb_idx < n_cb_l) {
++                idx_start = n_nodes_0 + (                                         (cb_idx + 0) * n_nodes_per_cb);
++                idx_end   = n_nodes_0 + (MIN((cb_idx == n_cb_l - 1) ? n_nodes_1 : (cb_idx + 1) * n_nodes_per_cb, n_nodes_1));
++            }
++
++            id<MTLCommandBuffer> cmd_buf = ctx->cmd_bufs[cb_idx].obj;
++
++            ggml_metal_op_t ctx_op = ggml_metal_op_init(
++                ctx->dev,
++                cmd_buf,
++                ctx->gf,
++                idx_start,
++                idx_end,
++                ctx->use_fusion,
++                ctx->use_concurrency,
++                ctx->capture_compute,
++                ctx->debug_graph,
++                ctx->debug_fusion);
++
++            for (int idx = 0; idx < ggml_metal_op_n_nodes(ctx_op); ++idx) {
++                const int res = ggml_metal_op_encode(ctx_op, idx);
++                if (res == 0) {
++                    break;
++                }
++
++                idx += res - 1;
++            }
++
++            ggml_metal_op_free(ctx_op);
++
++            if (cb_idx < 2 || ctx->abort_callback == NULL) {
++                [cmd_buf commit];
++            }
+         }
+     });
+ }
+--- a/ggml/src/ggml-metal/ggml-metal-device.m
++++ b/ggml/src/ggml-metal/ggml-metal-device.m
+@@ -590,18 +590,21 @@
+ #if defined(GGML_METAL_HAS_RESIDENCY_SETS)
+         if (@available(macOS 15.0, iOS 18.0, tvOS 18.0, visionOS 2.0, *)) {
+               while (!atomic_load_explicit(&res->d_stop, memory_order_relaxed)) {
+-                  if (atomic_load_explicit(&res->d_loop, memory_order_relaxed) > 0) {
+-                      [res->lock lock];
+-
+-                      for (int i = 0; i < (int) res->data.count; ++i) {
+-                          [res->data[i] requestResidency];
++                  // This long-lived worker must retire Metal autoreleases on every residency refresh.
++                  @autoreleasepool {
++                      if (atomic_load_explicit(&res->d_loop, memory_order_relaxed) > 0) {
++                          [res->lock lock];
++
++                          for (int i = 0; i < (int) res->data.count; ++i) {
++                              [res->data[i] requestResidency];
++                          }
++
++                          atomic_fetch_sub_explicit(&res->d_loop, 1, memory_order_relaxed);
++
++                          [res->lock unlock];
+                       }
+ 
+-                      atomic_fetch_sub_explicit(&res->d_loop, 1, memory_order_relaxed);
+-
+-                      [res->lock unlock];
+                   }
+-
+                   // half a second
+                   usleep(500 * 1000);
+               }

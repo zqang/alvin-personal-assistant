@@ -72,6 +72,7 @@ final class QwenListener {
     /// Downloads the model the first time (about 1 GB, Wi-Fi only), then, if a voice session is
     /// open, loads and warms it up.
     func load() {
+        guard !LocalModelHost.shared.externalBenchmarkInProgress else { return }
         guard model == nil, loading == nil else { return }
         #if targetEnvironment(simulator)
         status = .failed("Qwen3-ASR needs a real iPhone. The Simulator uses Apple's recognizer.")
@@ -97,6 +98,13 @@ final class QwenListener {
         loading?.cancel()
         loading = nil
         if case .failed = status {} else { status = .off }
+    }
+
+    /// A benchmark owns the GPU only after any load or transcription has released it.
+    func unloadForBenchmark() async {
+        unload(stopDownload: true)
+        await orphan?.value
+        await Self.finishPasses()
     }
 
     /// The turn's text from Qwen3-ASR, or nil to keep the live caption: the model isn't ready,

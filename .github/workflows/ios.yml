@@ -2,9 +2,9 @@ name: iOS
 
 on:
   push:
-    paths-ignore: ["docs/**", "scripts/**", "README.md", ".github/workflows/model-facts.yml", ".github/workflows/drafter-lab.yml"]
+    paths-ignore: ["docs/**", "README.md", ".github/workflows/model-facts.yml", ".github/workflows/drafter-lab.yml"]
   pull_request:
-    paths-ignore: ["docs/**", "scripts/**", "README.md", ".github/workflows/model-facts.yml", ".github/workflows/drafter-lab.yml"]
+    paths-ignore: ["docs/**", "README.md", ".github/workflows/model-facts.yml", ".github/workflows/drafter-lab.yml"]
   workflow_dispatch:
 
 concurrency:
@@ -34,6 +34,17 @@ jobs:
         run: |
           xcodebuild -showComponent MetalToolchain | grep -q "Status: installed" \
             || xcodebuild -downloadComponent MetalToolchain
+
+      - name: Cache MiniCPM runtime
+        id: minicpm
+        uses: actions/cache@v4
+        with:
+          path: MiniCPMBenchmark/Frameworks/llama.xcframework
+          key: minicpm-ios-${{ runner.arch }}-${{ hashFiles('scripts/prepare_minicpm.sh') }}
+
+      - name: Build MiniCPM benchmark runtime
+        if: steps.minicpm.outputs.cache-hit != 'true'
+        run: scripts/prepare_minicpm.sh ios
 
       - name: Build the iOS app
         run: |

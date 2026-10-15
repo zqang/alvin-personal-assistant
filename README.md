@@ -76,7 +76,8 @@ needs testing on a device are in
 
 ## Run it on your iPhone
 
-1. Clone the repo and open `AlvinAssistant.xcodeproj` in Xcode.
+1. Clone the repo, run `scripts/prepare_minicpm.sh ios` (requires CMake 3.28+), then open
+   `AlvinAssistant.xcodeproj` in Xcode. This builds the native runtime for the experimental MiniCPM benchmark.
 2. Select the **AlvinAssistant** target, open **Signing & Capabilities**, and choose your **Team**. If Xcode
    says the bundle identifier is taken, change `com.alvinang.personalassistant` to something unique.
 3. Plug in your iPhone (or pair it over Wi-Fi), select it as the run destination, and press **Run** (⌘R). The
@@ -101,6 +102,174 @@ Tips:
 - **Qwen3-ASR listening** downloads about 1 GB the first time (use Wi-Fi), needs a recent iPhone (iPhone 15 Pro
   or newer is best), and works only while the app is open; with the screen locked, turns use Apple's text.
   Build with the **Release** configuration for realistic speed.
+
+## MiniCPM-V experiment
+
+**Settings › On-device engine › Advanced settings › MiniCPM-V benchmark** runs MiniCPM-V 4.7 1B
+locally with its Q4_K_M language model and F16 vision projector. The first run downloads about 1.8 GB
+over Wi-Fi, verifies both files against pinned SHA-256 hashes, and keeps them for later runs. It measures
+either the eight English/Chinese benchmark prompts or three repetitions of a fixed image-reading task.
+The results include the generated answers, load time, time to first text, prefill time including vision,
+decode throughput, thermal state, and sampled process memory. Copy or share the report from the screen.
+Use **Delete MiniCPM download** on that screen to reclaim its storage.
+
+This uses a separate, pinned llama.cpp-omni runtime. Your selected chat model stays the same. Existing
+MLX models are unloaded before each benchmark, and MiniCPM is unloaded afterwards. Each prompt starts
+fresh, with thinking off, greedy decoding, one image overview slice, and a maximum of 128 output tokens.
+The first prompt includes cold kernel work. These timings are not directly equivalent to the normal
+benchmark's continued conversation, system prompt, tool loop, or MLX memory accounting.
+GPU layer checkpoints allow cancellation; their synchronization overhead is included in the results.
+
+Use a Release build on a real iPhone and keep the app open. Leaving the app or tapping Stop cancels
+the run. The official demo recommends at least 4 GB device RAM; this benchmark also checks available
+app memory before loading. The simulator is not offered as a performance measurement device.
+
+For a connected development iPhone, launch the installed app with `--minicpm-benchmark all` to run
+the text and image scenarios consecutively (`text` or `image` runs just that scenario):
+
+```bash
+xcrun devicectl device process launch --device YOUR_DEVICE_ID --terminate-existing --console \
+  com.alvinang.personalassistant --minicpm-benchmark all
+```
+
+The app starts once it is active and saves each completed prompt. It writes raw timings, answers,
+device details, and completion status to `Documents/MiniCPMBenchmark/latest.json`, with JSON and
+text reports retained in a separate folder for each run. To retrieve them:
+
+```bash
+xcrun devicectl device copy from --device YOUR_DEVICE_ID \
+  --domain-type appDataContainer --domain-identifier com.alvinang.personalassistant \
+  --source Documents/MiniCPMBenchmark --destination build/minicpm-results/iphone
+```
+
+Use your app's bundle identifier if you changed it for signing. A cancelled or failed run retains
+its partial results and does not automatically restart when the app returns to the foreground.
+
+To compare MiniCPM against the model currently selected in the app, launch with
+`--compare-local-models` instead. Both model downloads must already be present. This runs the
+current model, MiniCPM, MiniCPM, then the current model, with an excluded warm-up and eight
+independent English/Chinese performance prompts per block. It also scores 24 fixed bilingual
+tasks once per model. Answers must satisfy both the content and the requested output format;
+this small diagnostic is not a standardized accuracy benchmark.
+
+The comparison uses greedy decoding, thinking off, a 128-token output limit, and no tools,
+speculation, or conversation/prefix reuse. It therefore measures fresh model requests rather
+than the full voice/tool assistant. It records wall-clock response time and visible characters
+per second alongside each backend's differently defined token metrics. Reports are saved under
+`Documents/ModelComparison/`, including `latest.json`, and can be copied with the same device
+command above using that source directory. Keep Low Power Mode off and the app in the foreground.
+
+Runtime source and model revisions are pinned in `scripts/prepare_minicpm.sh` and
+`AssistantKit/Sources/AssistantKit/OnDevice/MiniCPMArtifacts.swift`. Generated native binaries and
+model files are not committed. See [the official mobile implementation](https://github.com/OpenBMB/MiniCPM-V-Apps)
+for the runtime and model provenance. Build all Apple Silicon slices with `scripts/prepare_minicpm.sh`
+when running the package's macOS command-line benchmark as well as the app.
+
+On an Apple Silicon Mac, after preparing all slices:
+
+```bash
+python3 scripts/download_minicpm.py
+swift run --package-path MiniCPMBenchmark -c release minicpm-bench \
+  build/minicpm-models/MiniCPM-V-4_7-1B-Q4_K_M.gguf \
+  build/minicpm-models/mmproj-model-f16.gguf
+```
+
+Add an image path after the two model paths to exercise vision. `--prompt "..."` and
+`--max-tokens 128` override the input and limit. The CLI writes a JSON report to stdout and
+native runtime logs to stderr. Mac measurements do not predict iPhone speed.
+
+### MiniCPM-V 35B-A3B with LES and DSpark
+
+The 35B comparison runs the same 24 scored bilingual tasks and eight performance prompts against
+the model selected in Settings. It uses the published `mix_q3gud_im` LES split and a Q8 DSpark
+draft converted from the official checkpoint. The complete file set occupies about **17.1 GB**,
+in addition to the current model. Allow extra Mac storage for the source checkpoint and conversion.
+Preparation needs an Apple Silicon Mac, the Xcode setup above, **CMake 3.28+**, and **Python 3.11+**.
+
+From the repository root, build the native runtime and download the pinned target files:
+
+```bash
+scripts/prepare_minicpm.sh all
+python3 scripts/download_minicpm_35b.py --target-only
+python3 -m venv build/minicpm-dspark-venv
+build/minicpm-dspark-venv/bin/python -m pip install numpy==2.4.4 tqdm==4.67.3 pyyaml==6.0.3
+
+mkdir -p build/minicpm-dspark-source
+MINICPM_DSPARK_SOURCE='https://huggingface.co/openbmb/MiniCPM-V-4.7-35B-A3B-DSpark/resolve/5facb75c251ffd524524a544c1f5fd97ba0d6c5c'
+for file in config.json model.safetensors; do
+  curl --fail --location --retry 3 "$MINICPM_DSPARK_SOURCE/$file" \
+    -o "build/minicpm-dspark-source/$file"
+done
+
+"${CMAKE:-cmake}" --build build/minicpm/macos-arm64 --config Release --target llama-quantize
+build/minicpm-dspark-venv/bin/python scripts/convert_minicpm_dspark.py
+python3 scripts/download_minicpm_35b.py --verify-only
+```
+
+Run `export CMAKE=/absolute/path/to/cmake` first if CMake is not on your PATH. The converter verifies the
+checkpoint, configuration, and paired target hashes, copies the target tokenizer, and maps all
+62 DSpark tensors to the pinned runtime's DFlash/Markov implementation. It preserves normalization
+and bias vectors in F32 and uses the runtime's Q8 quantizer for matrices; the single-row confidence
+head remains F16. Its `.provenance.json` sidecar records source hashes, revisions, and conversion
+settings. The app and downloader share `MiniCPM35BManifest.json`, including the exact converted
+draft hash. A missing or mismatched draft stops the run instead of silently disabling DSpark.
+
+Build and install the **Release** app with your signing team, select and download Woof in Settings,
+then copy the prepared files to the connected development iPhone. Replace `YOUR_DEVICE_ID` and,
+if necessary, the bundle identifier:
+
+```bash
+xcrun devicectl device copy to --device YOUR_DEVICE_ID \
+  --domain-type appDataContainer --domain-identifier com.alvinang.personalassistant \
+  --source build/minicpm-35b-models \
+  --destination 'Library/Application Support/MiniCPM35BBenchmark'
+xcrun devicectl device process launch --device YOUR_DEVICE_ID --terminate-existing --console \
+  com.alvinang.personalassistant --compare-local-models-35b
+xcrun devicectl device copy from --device YOUR_DEVICE_ID \
+  --domain-type appDataContainer --domain-identifier com.alvinang.personalassistant \
+  --source Documents/ModelComparison35B --destination build/minicpm-results/iphone-35b
+```
+
+Wait for the benchmark to finish before copying its reports. Keep Low Power Mode off, leave the
+phone unlocked, and keep Assistant in the foreground. `Documents/ModelComparison35B/latest.json`
+records progress and retains completed prompts if the run is interrupted.
+
+This suite measures **text only** and does not load the vision projector. LES retains the model's
+top-8 expert routing, with a 256-slot shared bank, 32 cached experts per layer, and lookahead
+prefetch depth 4. DSpark proposes up to three tokens per round; the target verifies the exact
+greedy prefix, and reports include proposed and accepted draft counts. Thinking is off, the output
+limit is 128 tokens, and tools and prompt reuse are disabled. Woof uses the comparison's existing
+non-speculative path. These settings and the locally converted draft must be reported with any
+measurements; results from the upstream demo are not measurements of this integration.
+
+Runtime tuning keeps that original configuration available as `baseline`. Add
+`--minicpm-profile balanced` to the 35B comparison launch to use 48 cached experts per layer,
+four-layer cancellation checkpoints, and allocation-free target argmax sampling. `checkpoints4`
+keeps the original 32-expert cache; `draft2` uses the balanced settings with two draft tokens.
+The weights, quantization, top-8 routing, and exact target verification are unchanged. Exported
+rows record the actual runtime configuration. Larger caches consume more RAM and must be
+measured on the target phone; a profile name does not imply that it is faster.
+
+For a short profile-selection run, append
+`--minicpm-pilot baseline,checkpoints4,balanced,draft2,baseline` instead. This reloads each profile,
+warms it up, and runs frozen performance prompts 1, 4, and 5 at the same 128-token limit.
+Pilot reports are separate under `Documents/MiniCPM35BProfilePilot`; they do not replace the
+full 80-row comparison. All blocks now reclaim model memory before loading and wait up to
+120 seconds for nominal thermal state. Preparation time and thermal state at load are recorded
+outside the measured load/reply times. Apply this policy equally to Woof and MiniCPM, and account
+for it when comparing with older runs that did not cool between blocks.
+
+`io1` and `io8` vary storage-reader threads from the balanced profile's four; `threads4` varies
+CPU threads from six to four. Storage-thread trials require separate app launches because the
+upstream runtime reads this setting once per process. Mixing different I/O-thread profiles in
+one pilot fails explicitly. These candidates also retain the same weights and exact verification.
+
+The pinned runtime has a local `minicpm-metal-worker-autorelease-v1` patch that adds autorelease
+pools to Metal encoding and residency workers. The Swift bridge also drains temporary native
+objects at each call boundary. This prevents temporary worker objects from delaying model memory
+release across benchmark blocks. The preparation script applies the patch reproducibly and records
+its hash in the framework provenance; comparison exports include the patch ID and hash. The patch
+does not change model operations, weights, or precision.
 
 ## Use Doubao, DeepSeek, or OpenAI instead of Claude
 

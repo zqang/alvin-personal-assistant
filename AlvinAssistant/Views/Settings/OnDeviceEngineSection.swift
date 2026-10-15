@@ -88,6 +88,9 @@ struct OnDeviceEngineSection: View {
         NavigationLink("Benchmark") {
             LocalBenchmarkView(store: store)
         }
+        NavigationLink("MiniCPM-V benchmark") {
+            MiniCPMBenchmarkView()
+        }
     }
 
     private var canCheck: Bool {

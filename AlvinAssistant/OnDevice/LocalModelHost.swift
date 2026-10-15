@@ -29,6 +29,10 @@ final class LocalModelHost {
 
     static let shared = LocalModelHost()
 
+    /// An experimental native backend owns the device until it has fully unloaded.
+    /// This also blocks a delayed cloud-to-local fallback from loading MLX beside it.
+    private(set) var externalBenchmarkInProgress = false
+
     /// The base system prompt and tool definitions on-device replies are sent with, for
     /// `prewarm(settings:)`, which must render exactly what replies will. The system prompt is
     /// the base one (replies add `PromptBuilder.localSystemPrompt`'s lines), and `tools` are the
@@ -203,6 +207,7 @@ final class LocalModelHost {
     /// `prewarm`, the system prompt is made resident once the model is ready (see
     /// `prewarm(settings:)`).
     func prepare(_ settings: AssistantSettings, prewarm: Bool = true) {
+        guard !externalBenchmarkInProgress else { return }
         guard let option = LocalModelCatalog.option(for: settings.localModelID) else { return }
         latest = settings
         let wanted = Self.key(option, settings)
@@ -231,6 +236,24 @@ final class LocalModelHost {
     func settle() async {
         await loading?.value
     }
+
+    /// Releases MLX before an experimental backend takes the GPU and memory budget.
+    func unloadForBenchmark() async {
+        unload(stopDownload: true)
+        await orphan?.value
+        await retired?.value
+        await invalidating?.value
+        await Task.detached { Memory.clearCache() }.value
+    }
+
+    func beginExternalBenchmark() async -> Bool {
+        guard !externalBenchmarkInProgress else { return false }
+        externalBenchmarkInProgress = true
+        await unloadForBenchmark()
+        return true
+    }
+
+    func endExternalBenchmark() { externalBenchmarkInProgress = false }
 
     /// Frees the model. A download in progress carries on unless `stopDownload`.
     func unload(stopDownload: Bool = false) {
@@ -975,6 +998,9 @@ final class LocalModelHost {
         toolMode: ToolMode = .guided,
         emit: (AssistantEvent) -> Void
     ) async throws -> (text: String, stats: LocalGenerationStats) {
+        guard !externalBenchmarkInProgress else {
+            throw AssistantError.missingConfiguration("Stop the MiniCPM benchmark before using an on-device reply.")
+        }
         let requested = ContinuousClock.now
         let showLoading = status != .ready
         if showLoading {
