@@ -2,12 +2,13 @@ import AssistantKit
 import Foundation
 import HuggingFace
 import LocalEngine
-import MiniCPM
 import MLX
 import MLXLMCommon
 import Observation
 import os
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Runs the on-device reply model: downloads and loads it, and answers with either the Alvin
 /// engine (LocalEngine: token-exact session reuse, a system prefix kept on disk, speculative
@@ -18,71 +19,101 @@ import UIKit
 /// `.automatic` uses the engine only once its on-device self-test has passed for this model and
 /// build (`EngineVerificationStore`). An engine error before the first token answers that reply
 /// with the stock session instead.
+///
+/// The app's own ties are the static hooks below, which launch setup sets once: its profile, the
+/// prompt and tools its prewarm renders, whether the cloud can be reached, and its other on-device
+/// models (`beforeLoad`, `finishOtherGPUWork`, `memoryAdvice`), and the language of what it shows
+/// (`localize`). Each default goes without: an app with no other models, no tools, the neutral
+/// profile and English. `LocalProvider` answers through
+/// `shared`, and `settings.localModelID` picks the model.
+///
+/// Apple platforms only. On macOS, where only tests run it, the app always counts as active.
 @MainActor
 @Observable
-final class LocalModelHost {
-    enum Status: Equatable {
+public final class LocalEngineHost {
+    public enum Status: Equatable {
         case off
         case loading(Double)
         case ready
         case failed(String)
     }
 
-    static let shared = LocalModelHost()
+    public static let shared = LocalEngineHost()
 
     /// An experimental native backend owns the device until it has fully unloaded.
     /// This also blocks a delayed cloud-to-local fallback from loading MLX beside it.
-    private(set) var externalBenchmarkInProgress = false
+    public private(set) var externalBenchmarkInProgress = false
+
+    // MARK: - The app's ties (launch setup sets them)
+
+    /// The app's domain: the on-device lines of the system prompt and the tool loop's words and
+    /// checks. The same value the app passes everywhere else a profile is asked for.
+    public static var profile = AssistantProfile()
 
     /// The base system prompt and tool definitions on-device replies are sent with, for
     /// `prewarm(settings:)`, which must render exactly what replies will. The system prompt is
     /// the base one (replies add `PromptBuilder.localSystemPrompt`'s lines), and `tools` are the
     /// definitions of the executor replies pass; `handoff_to_cloud` among them means a handoff is
-    /// available. Launch setup replaces the default.
-    static var systemProvider: @MainActor (AssistantSettings) -> (system: String, tools: [ToolDefinition]) = { settings in
-        (
-            PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: settings.customInstructions, profile: .app),
-            DeviceTools.localRegistry(settings: settings, handoff: false).definitions
-        )
+    /// available. The default: `profile`'s system prompt and no tools.
+    public static var systemProvider: @MainActor (AssistantSettings) -> (system: String, tools: [ToolDefinition]) = { settings in
+        (PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: settings.customInstructions, profile: LocalEngineHost.profile), [])
     }
 
     /// Whether the cloud assistant can be reached, read when an engine reply starts (it decides
-    /// what `handoff_to_cloud` does). Launch setup replaces the default.
-    static var isOnline: @MainActor () -> Bool = { true }
+    /// what `handoff_to_cloud` does).
+    public static var isOnline: @MainActor () -> Bool = { true }
 
-    private(set) var status: Status = .off
+    /// Runs before a load takes the GPU and memory: the app's other on-device models let go of
+    /// them (this app's MiniCPM-V unloads).
+    public static var beforeLoad: @MainActor () async -> Void = {}
+
+    /// Returns once the app's other GPU work already queued has run, so this model never shares
+    /// the GPU with it (this app's Qwen3-ASR passes). Awaited before every load's warm-up, check,
+    /// prewarm and reply.
+    public static var finishOtherGPUWork: @MainActor () async -> Void = {}
+
+    /// The advice that ends a "Not enough memory" message; none by default.
+    public static var memoryAdvice = ""
+
+    /// Puts each line the host shows into the app's language: a `status` failure, `statusText`,
+    /// and a reply's loading activity and errors. They're written in English, and the default shows
+    /// them as they are. Some carry a model's name and sizes, so match those on their opening words:
+    /// "Not enough memory", "Not enough storage", "The on-device model couldn't load".
+    public static var localize: @MainActor (String) -> String = { $0 }
+
+    public private(set) var status: Status = .off
     /// What speculative decoding is doing for the loaded model, for Settings and the benchmark.
-    private(set) var speculation = "off"
+    public private(set) var speculation = "off"
     /// Seconds the last load took after the download, warm-up included (checks excluded).
-    private(set) var lastLoadTime: TimeInterval?
+    public private(set) var lastLoadTime: TimeInterval?
     /// Whether the engine holds the system prompt of the last prewarm or engine reply, so the
     /// next reply needn't prefill it. Stock replies never set it.
-    private(set) var isWarm = false
+    public private(set) var isWarm = false
     /// What the host is doing besides downloading and loading, e.g. "Checking the on-device
     /// engine…"; nil otherwise.
-    private(set) var statusText: String?
+    public private(set) var statusText: String?
     /// The stored self-test result for the loaded (else the selected, downloaded) model and this
     /// build.
-    private(set) var selfTest: EngineSelfTest.Result?
+    public private(set) var selfTest: EngineSelfTest.Result?
     /// The stored cost curve for that model on this device (measured with the fast kernels
     /// while the model runs them), if one was measured.
-    private(set) var costCurve: CostCurve?
+    public private(set) var costCurve: CostCurve?
     /// The stored fast-kernel gain for that model on this device: how much cheaper an 8-row
     /// forward was with them (`1 − c(8) with ÷ c(8) without`).
-    private(set) var kernelGain: Double?
+    public private(set) var kernelGain: Double?
     /// What the fast kernels last reported for the loaded model (their `prepare` in the load's
     /// warm-up, or `measureFastKernels()`), with the before/after c(8).
-    private(set) var kernelSummary: String?
+    public private(set) var kernelSummary: String?
     /// Whether the loaded model runs the fast kernels.
-    private(set) var kernelsInstalled = false
+    public private(set) var kernelsInstalled = false
     /// Whether that model's checkpoint holds multi-token-prediction weights.
-    private(set) var hasMTPWeights = false
+    public private(set) var hasMTPWeights = false
     /// The last reply's measurements.
-    private(set) var lastStats: LocalGenerationStats?
+    public private(set) var lastStats: LocalGenerationStats?
     /// The engine's live session after its last job (warm or cold, ledger, checkpoints, disk prefix).
-    private(set) var sessionDescription: String?
+    public private(set) var sessionDescription: String?
     /// A self-test or speed measurement is running.
-    private(set) var isChecking = false
+    public private(set) var isChecking = false
 
     private struct Key: Equatable {
         var modelID: String
@@ -103,10 +134,10 @@ final class LocalModelHost {
 
     @ObservationIgnored private var key: Key?
     /// The loaded engine; `engine.loaded.container` serves the stock path.
-    @ObservationIgnored private(set) var engine: InferenceEngine?
+    @ObservationIgnored public private(set) var engine: InferenceEngine?
     /// The draft model, loaded only for a catalog model with one while
     /// `localSpeculativeDecoding` is on.
-    @ObservationIgnored private(set) var draftModel: LoadedModel?
+    @ObservationIgnored public private(set) var draftModel: LoadedModel?
     @ObservationIgnored private var loading: Task<Void, Never>?
     /// A cancelled load that may still be reading weights or checking its engine; the next load
     /// waits for it before downloading.
@@ -170,11 +201,20 @@ final class LocalModelHost {
     /// Longest an engine job waits for an inactive app to become active again.
     nonisolated private static let inactiveWait: TimeInterval = 2
 
+    /// Whether the app is in the foreground, where loads may start and finish.
+    private static var isActive: Bool {
+        #if canImport(UIKit)
+        UIApplication.shared.applicationState == .active
+        #else
+        true
+        #endif
+    }
+
     /// The engine's GPU guard: the same `gpuAllowed` / `inFlight` pair the stock path uses.
     nonisolated static let engineHooks = EngineHooks(
-        beginGPU: { LocalModelHost.beginEngineGPU() },
-        endGPU: { LocalModelHost.inFlight.leave() },
-        isAllowed: { LocalModelHost.gpuAllowed.withLock { $0 } }
+        beginGPU: { LocalEngineHost.beginEngineGPU() },
+        endGPU: { LocalEngineHost.inFlight.leave() },
+        isAllowed: { LocalEngineHost.gpuAllowed.withLock { $0 } }
     )
 
     nonisolated private static let parameters = GenerateParameters(maxTokens: 1024, temperature: 0.7, topP: 0.8, topK: 20)
@@ -183,6 +223,7 @@ final class LocalModelHost {
     private static let memoryMargin = 600_000_000
 
     private init() {
+        #if canImport(UIKit)
         let center = NotificationCenter.default
         _ = center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { _ in
             Self.gpuAllowed.withLock { $0 = false }
@@ -190,16 +231,17 @@ final class LocalModelHost {
         }
         _ = center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { _ in
             Self.inBackground.withLock { $0 = true }
-            MainActor.assumeIsolated { LocalModelHost.shared.unload() }
+            MainActor.assumeIsolated { LocalEngineHost.shared.unload() }
             Self.waitForGPU()
         }
         _ = center.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { _ in
-            MainActor.assumeIsolated { LocalModelHost.shared.unload() }
+            MainActor.assumeIsolated { LocalEngineHost.shared.unload() }
         }
         _ = center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
             Self.gpuAllowed.withLock { $0 = true }
             Self.inBackground.withLock { $0 = false }
         }
+        #endif
     }
 
     // MARK: - Loading
@@ -207,7 +249,7 @@ final class LocalModelHost {
     /// Starts downloading and loading the model the settings ask for, if it isn't already. With
     /// `prewarm`, the system prompt is made resident once the model is ready (see
     /// `prewarm(settings:)`).
-    func prepare(_ settings: AssistantSettings, prewarm: Bool = true) {
+    public func prepare(_ settings: AssistantSettings, prewarm: Bool = true) {
         guard !externalBenchmarkInProgress else { return }
         guard let option = LocalModelCatalog.option(for: settings.localModelID) else { return }
         latest = settings
@@ -224,9 +266,9 @@ final class LocalModelHost {
         key = wanted
         prewarmAfterLoad = prewarm
         #if targetEnvironment(simulator)
-        status = .failed("On-device models need a real iPhone.")
+        status = .failed(Self.localize("On-device models need a real iPhone."))
         #else
-        guard UIApplication.shared.applicationState == .active else { return }
+        guard Self.isActive else { return }
         status = .loading(0)
         let previous = orphan
         loading = Task { await load(option, key: wanted, after: previous) }
@@ -234,18 +276,18 @@ final class LocalModelHost {
     }
 
     /// Returns once the current load, if any, has finished or failed.
-    func settle() async {
+    public func settle() async {
         await loading?.value
     }
 
     /// Whether the model is loading its weights (not downloading them) or a reply or prewarm is
     /// using it: another engine taking the GPU and memory now would fail it, or race its memory.
-    var isBusy: Bool {
+    public var isBusy: Bool {
         (loading != nil && !downloading) || activeJobs > 0
     }
 
     /// Releases MLX before an experimental backend takes the GPU and memory budget.
-    func unloadForBenchmark() async {
+    public func unloadForBenchmark() async {
         unload(stopDownload: true)
         await orphan?.value
         await retired?.value
@@ -253,19 +295,19 @@ final class LocalModelHost {
         await Task.detached { Memory.clearCache() }.value
     }
 
-    func beginExternalBenchmark() async -> Bool {
+    public func beginExternalBenchmark() async -> Bool {
         guard !externalBenchmarkInProgress else { return false }
         externalBenchmarkInProgress = true
         await unloadForBenchmark()
         return true
     }
 
-    func endExternalBenchmark() { externalBenchmarkInProgress = false }
+    public func endExternalBenchmark() { externalBenchmarkInProgress = false }
 
     /// Runs `body`, another engine's GPU work (MiniCPM-V), while this model is paused: as a check
     /// does, it waits for the replies and prewarms in progress and keeps new ones waiting until
     /// `body` returns. With no model loaded, or one unloaded meanwhile, `body` runs at once.
-    func whilePaused(_ body: () async throws -> Void) async throws {
+    public func whilePaused(_ body: () async throws -> Void) async throws {
         var ran = false
         if let engine {
             do {
@@ -279,7 +321,7 @@ final class LocalModelHost {
     }
 
     /// Frees the model. A download in progress carries on unless `stopDownload`.
-    func unload(stopDownload: Bool = false) {
+    public func unload(stopDownload: Bool = false) {
         retire()
         engine = nil
         draftModel = nil
@@ -326,7 +368,7 @@ final class LocalModelHost {
     }
 
     /// Forgets the cached session, so the next reply processes the whole conversation again.
-    func resetSession() {
+    public func resetSession() {
         session = nil
         sessionSystem = nil
         sessionTurns = nil
@@ -347,7 +389,7 @@ final class LocalModelHost {
     /// unloads the model (the next use loads it again); speculation mode, disk prefix and MTP
     /// change on the running engine. Turning on automatic mode or speculation runs a missing
     /// self-test or speed measurement.
-    func apply(_ settings: AssistantSettings) {
+    public func apply(_ settings: AssistantSettings) {
         guard let key, let option = LocalModelCatalog.option(for: settings.localModelID), Self.key(option, settings) == key else {
             if key != nil {
                 unload(stopDownload: true)
@@ -376,7 +418,7 @@ final class LocalModelHost {
     /// kept if live, else loaded from disk, else prefilled (and saved). For voice listening
     /// starting and the composer opening. A downloaded model that isn't loaded is loaded first;
     /// a model that isn't downloaded is left alone.
-    func prewarm(settings: AssistantSettings) {
+    public func prewarm(settings: AssistantSettings) {
         guard let option = LocalModelCatalog.option(for: settings.localModelID) else { return }
         if Self.key(option, settings) == key, engine != nil || loading != nil {
             prepare(settings)
@@ -389,7 +431,7 @@ final class LocalModelHost {
 
     /// Whether `id`'s files are on the iPhone: its snapshot has `config.json` and its weights.
     /// Looks in the local cache only.
-    func isDownloaded(_ id: String) -> Bool {
+    public func isDownloaded(_ id: String) -> Bool {
         Self.downloadedSnapshot(id) != nil
     }
 
@@ -413,8 +455,8 @@ final class LocalModelHost {
                 await previous.value
                 try Task.checkCancellation()
             }
-            // MiniCPM-V gives this model the GPU and its memory (plan decision 24).
-            await MiniCPMHost.shared.unloadAll()
+            // The app's other models give this one the GPU and its memory (plan decision 24).
+            await Self.beforeLoad()
             try Task.checkCancellation()
             let needed = option.approximateBytes + (wanted.draft ? option.draftApproximateBytes : 0) + Self.memoryMargin
             let draftID = wanted.draft ? option.draftModelID : nil
@@ -434,12 +476,12 @@ final class LocalModelHost {
             // Most of the bytes are the main model's; the draft model follows.
             let mainShare = wanted.draft ? 0.85 : 0.99
             let directory = try await downloader.download(id: option.id, progress: { fraction in
-                LocalModelHost.shared.setProgress(fraction * mainShare)
+                LocalEngineHost.shared.setProgress(fraction * mainShare)
             })
             var draftDirectory: URL?
             if wanted.draft, let draftID = option.draftModelID {
                 draftDirectory = try await downloader.download(id: draftID, progress: { fraction in
-                    LocalModelHost.shared.setProgress(0.85 + fraction * 0.14)
+                    LocalEngineHost.shared.setProgress(0.85 + fraction * 0.14)
                 })
             }
             downloading = false
@@ -491,7 +533,7 @@ final class LocalModelHost {
             // Compile the GPU kernels now instead of on the first reply. The warm-up also prepares
             // the extensions: the fast kernels, when requested, test and time themselves and stay
             // only when they help.
-            await QwenListener.finishPasses()
+            await Self.finishOtherGPUWork()
             try checkStillWanted()
             do {
                 try await loaded.warmUp()
@@ -533,14 +575,19 @@ final class LocalModelHost {
     /// limit minus what it holds, not the phone's free memory: closing other apps doesn't raise it
     /// (the increased-memory-limit entitlement does).
     private static func memoryShortfall(_ option: LocalModelOption, needed: Int) -> String? {
+        #if canImport(UIKit)
         let available = os_proc_available_memory()
         guard available <= needed else { return nil }
-        return "Not enough memory for \(option.displayName): it needs \(gigabytes(needed)) and the app has \(gigabytes(available)) left. Turn off Qwen3-ASR listening or pick a smaller model."
+        let shortfall = "Not enough memory for \(option.displayName): it needs \(gigabytes(needed)) and the app has \(gigabytes(available)) left."
+        return memoryAdvice.isEmpty ? shortfall : shortfall + " " + memoryAdvice
+        #else
+        return nil
+        #endif
     }
 
     /// Why `bytes` more of `name` can't be stored: the iPhone has less free space than that plus a
     /// margin iOS needs for itself. Nil when it fits, or when iOS doesn't say.
-    nonisolated static func storageShortfall(_ name: String, bytes: Int) -> String? {
+    nonisolated public static func storageShortfall(_ name: String, bytes: Int) -> String? {
         let key = URLResourceKey.volumeAvailableCapacityForImportantUsageKey
         guard let free = try? modelsFolder().resourceValues(forKeys: [key]).volumeAvailableCapacityForImportantUsage,
               free < Int64(bytes) + 500_000_000
@@ -552,30 +599,22 @@ final class LocalModelHost {
         String(format: "%.1f GB", Double(bytes) / 1e9)
     }
 
-    /// What the downloaded models and the engine's caches take on the iPhone, Qwen3-ASR's and
-    /// MiniCPM-V's included.
-    nonisolated static func downloadedBytes() -> Int64 {
-        [modelsFolder(), EngineSetup.cacheDirectory(), MiniCPMArtifacts.directory, MiniCPM35BArtifacts.directory]
-            .reduce(0) { $0 + MiniCPMArtifacts.bytesOnDisk(in: $1) }
+    /// Where the host downloads models (`Application Support/Models`, a hub cache the app's other
+    /// models may share) and keeps the engine's caches.
+    nonisolated public static var downloadFolders: [URL] {
+        [modelsFolder(), EngineSetup.cacheDirectory()]
     }
 
-    /// Unloads the models and deletes every download and the engine's caches (the saved system
-    /// prompts and drafting corpora), MiniCPM-V's too. A model downloads again the next time it's
-    /// needed (MiniCPM-V's from Settings). The task ends once MiniCPM-V's files are gone too.
-    @discardableResult
-    func deleteDownloads() -> Task<Void, Never> {
+    /// Unloads the model and deletes `downloadFolders`: every download and the engine's caches
+    /// (the saved system prompts and drafting corpora). A model downloads again the next time it's
+    /// needed. The app stops its other models that keep files there first.
+    public func deleteDownloads() {
         unload(stopDownload: true)
-        QwenListener.shared.unload(stopDownload: true)
-        for folder in [Self.modelsFolder(), EngineSetup.cacheDirectory()] {
+        for folder in Self.downloadFolders {
             try? FileManager.default.removeItem(at: folder)
         }
         statusText = nil
         status = .off
-        // MiniCPMHost stops their downloads and unloads them first.
-        return Task {
-            _ = await MiniCPMHost.shared.delete(.photoReader)
-            _ = await MiniCPMHost.shared.delete(.accurate)
-        }
     }
 
     private func fail(_ message: String) {
@@ -584,7 +623,7 @@ final class LocalModelHost {
         kernelsInstalled = false
         live = nil
         statusText = nil
-        status = .failed(message)
+        status = .failed(Self.localize(message))
         loading = nil
     }
 
@@ -595,7 +634,7 @@ final class LocalModelHost {
     /// Throws if unload() ran or the app left the foreground while loading.
     private func checkStillWanted() throws {
         try Task.checkCancellation()
-        guard UIApplication.shared.applicationState == .active else {
+        guard Self.isActive else {
             unload(stopDownload: true)
             throw CancellationError()
         }
@@ -652,7 +691,7 @@ final class LocalModelHost {
     }
 
     /// Whether replies under `settings` use the engine rather than the stock session.
-    func usesEngine(_ settings: AssistantSettings) -> Bool {
+    public func usesEngine(_ settings: AssistantSettings) -> Bool {
         switch settings.localEngineMode {
         case .alvin:
             return true
@@ -728,11 +767,11 @@ final class LocalModelHost {
             // Each check only while `engine` is still the loaded one: an unloaded engine's results
             // aren't kept, and checking it would keep it in memory for seconds.
             if self.engine === engine, settings.localEngineMode == .automatic, selfTest == nil {
-                statusText = "Checking the on-device engine…"
+                statusText = Self.localize("Checking the on-device engine…")
                 _ = await performSelfTest(engine)
             }
             if self.engine === engine, settings.localSpeculation != .off, costCurve == nil, usesEngine(settings) {
-                statusText = "Measuring the on-device engine's speed…"
+                statusText = Self.localize("Measuring the on-device engine's speed…")
                 _ = try? await performCostProbe(engine)
             }
             statusText = nil
@@ -745,10 +784,10 @@ final class LocalModelHost {
     /// cancelled before it started, or when the app stopped being active during the run (nothing
     /// is stored).
     @discardableResult
-    func runSelfTest() async -> EngineSelfTest.Result? {
+    public func runSelfTest() async -> EngineSelfTest.Result? {
         guard let engine, status == .ready else { return nil }
         let result = try? await exclusively(engine) { () async -> EngineSelfTest.Result? in
-            statusText = "Checking the on-device engine…"
+            statusText = Self.localize("Checking the on-device engine…")
             defer { statusText = nil }
             return await performSelfTest(engine)
         }
@@ -759,10 +798,10 @@ final class LocalModelHost {
     /// Measures the engine's cost curve on this device now (Settings, the benchmark), stores it
     /// and drafts with it from the next reply.
     @discardableResult
-    func measureSpeed() async throws -> CostCurve {
+    public func measureSpeed() async throws -> CostCurve {
         guard let engine, status == .ready else { throw Self.notLoaded }
         return try await exclusively(engine) {
-            statusText = "Measuring the on-device engine's speed…"
+            statusText = Self.localize("Measuring the on-device engine's speed…")
             defer { statusText = nil }
             guard let curve = try await performCostProbe(engine) else { throw Self.leftForeground }
             return curve
@@ -773,13 +812,13 @@ final class LocalModelHost {
 
     /// Whether this build has the fast kernels (launch setup put them in
     /// `EngineSetup.extraExtensions`).
-    var fastKernelsAvailable: Bool {
+    public var fastKernelsAvailable: Bool {
         EngineSetup.fastKernels != nil
     }
 
     /// Whether the stored comparison says the fast kernels help on this device. Settings offers
     /// the fast-kernel switch only then (and to switch it off).
-    var fastKernelsHelp: Bool {
+    public var fastKernelsHelp: Bool {
         (kernelGain ?? -1) >= EngineSetup.kernelGainThreshold
     }
 
@@ -787,16 +826,16 @@ final class LocalModelHost {
     /// benchmark): the kernel self-test, then the cost curve without and with them. The model
     /// keeps the layers it has. Stores the gain and returns the comparison's summary line.
     @discardableResult
-    func measureFastKernels() async throws -> String {
+    public func measureFastKernels() async throws -> String {
         guard let kernels = EngineSetup.fastKernels else {
             throw AssistantError.missingConfiguration("This build has no fast kernels.")
         }
         guard let engine, status == .ready else { throw Self.notLoaded }
         return try await exclusively(engine) {
-            statusText = "Testing the fast kernels…"
+            statusText = Self.localize("Testing the fast kernels…")
             defer { statusText = nil }
             let before = Self.interruptions.withLock { $0 }
-            await QwenListener.finishPasses()
+            await Self.finishOtherGPUWork()
             let verdict = try await kernels.measure(engine)
             // A run the app interrupted timed the interruption: measure again later.
             guard Self.interruptions.withLock({ $0 }) == before, self.engine === engine else { throw Self.leftForeground }
@@ -836,7 +875,7 @@ final class LocalModelHost {
 
     /// "On; an 8-token check takes 31% less time with them (25% needed)", or that they were
     /// never compared on this iPhone.
-    var fastKernelsSummary: String {
+    public var fastKernelsSummary: String {
         let state = kernelsInstalled ? "On" : "Off"
         guard let kernelGain else { return "\(state); not compared on this iPhone yet" }
         let percent = Int((abs(kernelGain) * 100).rounded())
@@ -847,7 +886,7 @@ final class LocalModelHost {
 
     private func performSelfTest(_ engine: InferenceEngine) async -> EngineSelfTest.Result? {
         let before = Self.interruptions.withLock { $0 }
-        await QwenListener.finishPasses()
+        await Self.finishOtherGPUWork()
         isWarm = false
         let result = await EngineSelfTest.run(engine: engine)
         refreshSessionDescription(engine)
@@ -857,14 +896,14 @@ final class LocalModelHost {
         verification.setSelfTest(result, for: key)
         selfTest = result
         if !result.passed {
-            print("LocalModelHost: the engine self-test failed for \(engine.loaded.id):\n\(result.detail)")
+            print("LocalEngineHost: the engine self-test failed for \(engine.loaded.id):\n\(result.detail)")
         }
         return result
     }
 
     private func performCostProbe(_ engine: InferenceEngine) async throws -> CostCurve? {
         let before = Self.interruptions.withLock { $0 }
-        await QwenListener.finishPasses()
+        await Self.finishOtherGPUWork()
         let curve = try await CostProbe.measure(engine: engine)
         guard Self.interruptions.withLock({ $0 }) == before, self.engine === engine else { return nil }
         verification.setCostCurve(curve, for: curveKey(engine.loaded.id))
@@ -962,16 +1001,21 @@ final class LocalModelHost {
 
     // MARK: - Prewarm
 
+    /// What a prewarm makes resident: `systemProvider`'s prompt and tools, with the on-device
+    /// lines an engine reply adds for them.
+    static func prewarmPrompt(_ settings: AssistantSettings) -> (system: String, tools: [ToolDefinition]) {
+        let provided = systemProvider(settings)
+        let handoff = provided.tools.contains { $0.name == HandoffTool.name }
+        return (PromptBuilder.localSystemPrompt(base: provided.system, handoffAvailable: handoff, profile: profile), provided.tools)
+    }
+
     private func schedulePrewarm(_ settings: AssistantSettings) {
         guard let engine, status == .ready, prewarming == nil, usesEngine(settings) else { return }
-        let provided = Self.systemProvider(settings)
-        let handoff = provided.tools.contains { $0.name == HandoffTool.name }
-        let system = PromptBuilder.localSystemPrompt(base: provided.system, handoffAvailable: handoff, profile: .app)
-        let tools = provided.tools
+        let (system, tools) = Self.prewarmPrompt(settings)
         prewarming = Task {
             if await beginPrewarmJob(engine) {
                 let job = Task {
-                    await QwenListener.finishPasses()
+                    await Self.finishOtherGPUWork()
                     do {
                         try await engine.prewarm(system: system, tools: tools)
                         if self.engine === engine {
@@ -999,7 +1043,7 @@ final class LocalModelHost {
 
     /// How an engine reply leaves tool calls to the model; the benchmark's "Compare tool modes"
     /// plays each.
-    enum ToolMode: String, CaseIterable {
+    public enum ToolMode: String, CaseIterable {
         /// The app's: the claim guard, forced call openings and the name selector.
         case guided
         /// The model alone (`ToolChoice.native`, no claim guard), with the same system prompt.
@@ -1016,7 +1060,7 @@ final class LocalModelHost {
     ///   before showing anything.
     /// - With the stock session: no tools; only `.reply` events and progress marks.
     @discardableResult
-    func respond(
+    public func respond(
         system: String,
         turns: [ChatTurn],
         settings: AssistantSettings,
@@ -1027,13 +1071,13 @@ final class LocalModelHost {
         emit: (AssistantEvent) -> Void
     ) async throws -> (text: String, stats: LocalGenerationStats) {
         guard !externalBenchmarkInProgress else {
-            throw AssistantError.missingConfiguration("Stop the MiniCPM benchmark before using an on-device reply.")
+            throw AssistantError.missingConfiguration(Self.localize("Stop the benchmark before using an on-device reply."))
         }
         let requested = ContinuousClock.now
         let showLoading = status != .ready
         if showLoading {
             emit(.cue(.loadingModel))
-            emit(.reply(.activity("Loading the on-device model")))
+            emit(.reply(.activity(Self.localize("Loading the on-device model"))))
         }
         prepare(settings, prewarm: false)
         await settle()
@@ -1043,14 +1087,15 @@ final class LocalModelHost {
         defer { activeJobs -= 1 }
         try Task.checkCancellation()
         guard let engine, status == .ready else {
-            throw AssistantError.missingConfiguration("The on-device model isn't loaded. Try again.")
+            throw AssistantError.missingConfiguration(Self.localize("The on-device model isn't loaded. Try again."))
         }
         if showLoading { emit(.reply(.activity(nil))) }
         latest = settings
         await applyLive(settings)
         updateSpeculation()
-        // A Qwen3-ASR pass that outlived its turn would otherwise share the GPU with this reply.
-        await QwenListener.finishPasses()
+        // Other GPU work that outlived its turn (a Qwen3-ASR pass) would otherwise share the GPU
+        // with this reply.
+        await Self.finishOtherGPUWork()
 
         guard usesEngine(settings) else {
             return try await respondWithChatSession(engine, system: system, turns: turns, requested: requested, emit: emit)
@@ -1062,7 +1107,7 @@ final class LocalModelHost {
         } catch let failure as EngineFailure {
             // Nothing was decoded yet: answer this reply with the stock session over the same
             // model, and let the engine start its session over.
-            print("LocalModelHost: the engine failed before its first token (\(failure.error)); answering with the stock session.")
+            print("LocalEngineHost: the engine failed before its first token (\(failure.error)); answering with the stock session.")
             await engine.invalidateSession()
             isWarm = false
             return try await respondWithChatSession(engine, system: system, turns: turns, requested: requested, emit: emit)
@@ -1086,7 +1131,7 @@ final class LocalModelHost {
         emit: (AssistantEvent) -> Void
     ) async throws -> (text: String, stats: LocalGenerationStats) {
         let request = EngineRequest(
-            system: PromptBuilder.localSystemPrompt(base: system, handoffAvailable: handoffAvailable, profile: .app),
+            system: PromptBuilder.localSystemPrompt(base: system, handoffAvailable: handoffAvailable, profile: Self.profile),
             tools: tools?.definitions ?? [],
             turns: turns,
             toolChoice: toolMode == .guided ? .auto : .native
@@ -1098,7 +1143,7 @@ final class LocalModelHost {
             handoffAvailable: handoffAvailable,
             isOnline: { online },
             toolContext: { ToolContext(commitGate: commitGate) },
-            profile: .app
+            profile: Self.profile
         )
         let report = ReportBox()
         var text = ""
@@ -1203,7 +1248,7 @@ final class LocalModelHost {
         // Generated off the main actor, which the background handler blocks while it waits for
         // `inFlight`: `relay` stops the generation on leaving the foreground and leaves `inFlight`.
         let (items, sink) = AsyncThrowingStream<Generation, Error>.makeStream()
-        async let relayed = LocalModelHost.relay(source, into: sink)
+        async let relayed = LocalEngineHost.relay(source, into: sink)
 
         var stats = LocalGenerationStats(reusedSession: source.isCached, engine: "stock")
         var filter = ThinkingFilter()
@@ -1302,7 +1347,7 @@ final class LocalModelHost {
     // MARK: - Description
 
     /// Several lines on the loaded engine, for Settings and the benchmark.
-    var engineSummary: String {
+    public var engineSummary: String {
         guard let engine else {
             if case .loading = status { return statusText ?? "Loading…" }
             return "Not loaded."
@@ -1334,7 +1379,7 @@ final class LocalModelHost {
     }
 
     /// "Passed in 4.2 s", "Failed (rollback)", or "Not run for this model and build".
-    var selfTestSummary: String {
+    public var selfTestSummary: String {
         guard let selfTest else { return "Not run for this model and build" }
         if selfTest.passed {
             return "Passed in \(String(format: "%.1f", selfTest.seconds)) s"
@@ -1344,14 +1389,14 @@ final class LocalModelHost {
     }
 
     /// "Measured: c(2) 1.05×, c(4) 1.63×, c(8) 3.07×", or the default curve's note.
-    var costCurveSummary: String {
+    public var costCurveSummary: String {
         guard let costCurve else { return "Not measured; using the stock MLX curve" }
         let points = [2, 4, 8].map { "c(\($0)) \(String(format: "%.2f", costCurve.relative($0)))×" }
         return "Measured: " + points.joined(separator: ", ")
     }
 
     /// The last reply's speculation: tokens per verification round and drafts accepted.
-    var lastReplySummary: String {
+    public var lastReplySummary: String {
         guard let lastStats else { return "No reply yet" }
         let engineName = lastStats.engine == "stock" ? "Stock session" : "Alvin engine"
         guard let speculation = lastStats.speculation, speculation.rounds > 0 else {
@@ -1386,7 +1431,7 @@ final class LocalModelHost {
     }
 
     /// The number of tokens `text` encodes to with the loaded model's tokenizer.
-    func tokenCount(_ text: String) -> Int? {
+    public func tokenCount(_ text: String) -> Int? {
         engine?.loaded.tokenizer.encode(text: text, addSpecialTokens: false).count
     }
 
@@ -1435,7 +1480,7 @@ final class LocalModelHost {
 
     /// Whether `snapshot` holds `config.json` and every weight file: all shards listed by
     /// `model.safetensors.index.json`, or at least one `.safetensors` file without an index.
-    nonisolated static func hasModelFiles(in snapshot: URL) -> Bool {
+    nonisolated public static func hasModelFiles(in snapshot: URL) -> Bool {
         let files = FileManager.default
         guard files.fileExists(atPath: snapshot.appending(path: "config.json", directoryHint: .notDirectory).path) else {
             return false
@@ -1571,7 +1616,7 @@ final class LocalModelHost {
         _ = inFlight.wait(timeout: .now() + 3)
     }
 
-    nonisolated static func seconds(_ duration: Duration) -> TimeInterval {
+    nonisolated public static func seconds(_ duration: Duration) -> TimeInterval {
         let parts = duration.components
         return Double(parts.seconds) + Double(parts.attoseconds) / 1e18
     }

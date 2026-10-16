@@ -4,10 +4,7 @@ import HuggingFace
 import MLXLMCommon
 
 /// Fetches model files through swift-huggingface, preferring files already on the device so a
-/// downloaded model loads offline.
-///
-/// Copied from the app's `LocalModelHost.swift`; the app keeps its private copy until the engine
-/// is wired in.
+/// downloaded model loads offline. `LocalEngineHost` downloads with it.
 public struct HubDownloader: MLXLMCommon.Downloader {
     /// The files a model needs: weights, configuration, tokenizer and chat template.
     public static let patterns = ["*.safetensors", "*.json", "*.jinja"]

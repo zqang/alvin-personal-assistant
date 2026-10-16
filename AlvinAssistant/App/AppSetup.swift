@@ -2,6 +2,7 @@ import AlvinProfile
 import AssistantKit
 import Foundation
 import LocalEngine
+import LocalEngineHost
 import MiniCPM
 import os
 import UserNotifications
@@ -13,18 +14,24 @@ extension AssistantProfile {
     static let app = AlvinProfile.profile
 }
 
-/// Wires the app together at launch: the on-device host's prompt and network seams, MiniCPM-V's
+/// Wires the app together at launch: the on-device host's hooks, MiniCPM-V's
 /// GPU lease, the engine extensions and the timer notifications.
 /// `AlvinAssistantApp.init` calls `install(store:)` once, with the store the app then uses.
 @MainActor
 enum AppSetup {
     static func install(store: SettingsStore) {
-        // The prewarm renders exactly the system prompt and tools that replies send.
-        LocalModelHost.systemProvider = { settings in
+        // The on-device host's ties to this app. The prewarm renders exactly the system prompt and
+        // tools that replies send. Before a load, MiniCPM-V gives the model the GPU and its memory
+        // (plan decision 24), and Qwen3-ASR's queued passes finish before the model's GPU work.
+        LocalEngineHost.profile = .app
+        LocalEngineHost.systemProvider = { settings in
             let prompt = LocalPromptFactory.make(settings: settings, store: store)
             return (system: prompt.system, tools: prompt.tools.definitions)
         }
-        LocalModelHost.isOnline = { Connectivity.shared.isOnline }
+        LocalEngineHost.isOnline = { Connectivity.shared.isOnline }
+        LocalEngineHost.beforeLoad = { await MiniCPMHost.shared.unloadAll() }
+        LocalEngineHost.finishOtherGPUWork = { await QwenListener.finishPasses() }
+        LocalEngineHost.memoryAdvice = "Turn off Qwen3-ASR listening or pick a smaller model."
 
         // MiniCPM-V (photo reading, Most accurate on device) runs while MLX is idle (plan decision
         // 24): Qwen3-ASR's queued passes finish, the on-device model gives up its memory when the
@@ -35,16 +42,16 @@ enum AppSetup {
             // The on-device model loading its weights isn't all resident yet, and evicting it, or
             // it while it answers, would fail that reply: wait first. Cancellable, since that load
             // starts by stopping these runs (`unloadAll`) and waits for them.
-            while LocalModelHost.shared.isBusy {
+            while LocalEngineHost.shared.isBusy {
                 try await Task.sleep(for: .milliseconds(100))
             }
             // A load of the on-device model waits for the runs it stopped (`unloadAll`): a stopped
             // run mustn't then wait for that load in `unloadForBenchmark`.
             try Task.checkCancellation()
             if os_proc_available_memory() < needBytes {
-                await LocalModelHost.shared.unloadForBenchmark()
+                await LocalEngineHost.shared.unloadForBenchmark()
             }
-            try await LocalModelHost.shared.whilePaused(body)
+            try await LocalEngineHost.shared.whilePaused(body)
         }
         // Verifies MiniCPM-V's files now, so the photo button shows from the first screen.
         _ = MiniCPMHost.shared
@@ -73,15 +80,3 @@ enum AppSetup {
         #endif
     }
 }
-
-// The fast kernels as `EngineSetup` drives them (see `FastKernelsProviding`): the request lives in
-// the engine configuration, and the extension's report is the verdict.
-extension FastKernelsExtension: FastKernelsProviding {
-    typealias Verdict = FastKernelsReport
-
-    func request(_ requested: Bool, in configuration: inout EngineConfiguration) {
-        configuration.fastKernelsRequested = requested
-    }
-}
-
-extension FastKernelsReport: FastKernelsVerdict {}

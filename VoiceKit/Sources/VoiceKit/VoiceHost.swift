@@ -41,7 +41,8 @@ public protocol VoiceConversation: AnyObject {
 /// default that goes without it, so a host need only give `settings`.
 @MainActor
 public protocol VoiceSessionHost: AnyObject {
-    /// Voice mode reads the settings and never changes them.
+    /// Voice mode reads the settings and never changes them. `speechLocale` also picks the language
+    /// of voice mode's own text, when the app declares that language.
     var settings: AssistantSettings { get }
     /// For OpenAI voices (`settings.voiceEngine`); empty (the default) for none, and the built-in
     /// voice speaks.

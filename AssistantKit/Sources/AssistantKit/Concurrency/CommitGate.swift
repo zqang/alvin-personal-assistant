@@ -102,3 +102,41 @@ public final class CommitGate: @unchecked Sendable {
         return body()
     }
 }
+
+/// `base`, once `gate` is open: the stream waits for that, and fails with `CancellationError`
+/// when the gate is cancelled instead, without ever calling `base`.
+///
+/// A reply started early wraps every provider whose request leaves a durable record (a cloud
+/// request, a backend that keeps its own history) in one, so nothing is sent for a turn the user
+/// didn't finish. The wait counts against the orchestrator's first-event watchdog.
+public struct CommitGatedProvider: AssistantProvider {
+    public let base: any AssistantProvider
+    public let gate: CommitGate
+
+    public init(base: any AssistantProvider, gate: CommitGate) {
+        self.base = base
+        self.gate = gate
+    }
+
+    public func streamEvents(system: String, turns: [ChatTurn]) -> AsyncThrowingStream<AssistantEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    try await gate.wait()
+                    // The gate may open just as the stream is dropped: send nothing then.
+                    // ponytail: narrows that race to the microseconds before this check (measured: a base
+                    // call in 100 of 100 open-then-drop runs without it, 3–7 with it). Closing it fully
+                    // would need this task on the actor that opens and drops the gate.
+                    try Task.checkCancellation()
+                    for try await event in base.streamEvents(system: system, turns: turns) {
+                        continuation.yield(event)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}

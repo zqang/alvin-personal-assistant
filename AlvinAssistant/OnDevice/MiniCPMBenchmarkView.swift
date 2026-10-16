@@ -1,5 +1,6 @@
 import AssistantKit
 import Darwin
+import LocalEngineHost
 import MiniCPM
 import Observation
 import SwiftUI
@@ -245,7 +246,7 @@ final class MiniCPMBenchmarkRunner {
         let working = FileManager.default.temporaryDirectory.appendingPathComponent("minicpm-bench-\(UUID().uuidString)")
         defer {
             sampleTask?.cancel()
-            if ownsGPU { LocalModelHost.shared.endExternalBenchmark() }
+            if ownsGPU { LocalEngineHost.shared.endExternalBenchmark() }
             try? FileManager.default.removeItem(at: working)
         }
         do {
@@ -255,7 +256,7 @@ final class MiniCPMBenchmarkRunner {
             try persistExport()
             try await waitForMiniCPMFiles(.photoReader) { progress = $0 }
             progress = "Releasing the reply and speech models…"
-            guard await LocalModelHost.shared.beginExternalBenchmark() else { throw BenchmarkError.busy }
+            guard await LocalEngineHost.shared.beginExternalBenchmark() else { throw BenchmarkError.busy }
             ownsGPU = true
             await QwenListener.shared.unloadForBenchmark()
             await MiniCPMHost.shared.unloadAll()

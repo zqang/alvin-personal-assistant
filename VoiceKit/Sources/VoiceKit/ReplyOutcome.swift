@@ -10,7 +10,7 @@ public enum ReplyOutcome {
             // A declined reply's partial text shouldn't be kept or sent back to the model.
             reply.text = ""
             reply.status = .refused
-            reply.errorText = String(localized: "The model declined to answer this. Try rephrasing.", bundle: .module)
+            reply.errorText = String(localized: "The model declined to answer this. Try rephrasing.", bundle: .voiceKit)
         case .completed, .truncated, .other:
             reply.status = .complete
         }

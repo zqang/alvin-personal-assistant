@@ -98,8 +98,8 @@ public struct VoiceModeView: View {
                         .background(Circle().fill(session.cameraOpen ? Color.white : Color.white.opacity(0.14)))
                         .foregroundStyle(session.cameraOpen ? Color.black : Color.white)
                 }
-                .accessibilityLabel(Text(session.cameraOpen ? "Close camera" : "Open camera", bundle: .module))
-                .accessibilityHint(Text("Show the assistant a photo while you talk", bundle: .module))
+                .accessibilityLabel(Text(session.cameraOpen ? "Close camera" : "Open camera", bundle: .voiceKit))
+                .accessibilityHint(Text("Show the assistant a photo while you talk", bundle: .voiceKit))
             }
         }
         .padding(.top, 16)
@@ -117,8 +117,8 @@ public struct VoiceModeView: View {
                 .frame(width: 40, height: 40)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             // `PendingPhoto.unreadable`, in the user's language.
-            Text(photo.failed ? String(localized: "The photo couldn't be read on this iPhone.", bundle: .module)
-                : photo.finished ? String(localized: "Photo ready for your question", bundle: .module) : VoiceSession.readingPhoto)
+            Text(photo.failed ? String(localized: "The photo couldn't be read on this iPhone.", bundle: .voiceKit)
+                : photo.finished ? String(localized: "Photo ready for your question", bundle: .voiceKit) : VoiceSession.readingPhoto)
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.75))
                 .lineLimit(2)
@@ -130,7 +130,7 @@ public struct VoiceModeView: View {
                     .font(.title3)
                     .foregroundStyle(.white.opacity(0.6))
             }
-            .accessibilityLabel(Text("Remove photo", bundle: .module))
+            .accessibilityLabel(Text("Remove photo", bundle: .voiceKit))
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.08)))
@@ -146,7 +146,7 @@ public struct VoiceModeView: View {
                 Button {
                     Task { await session.restart() }
                 } label: {
-                    Label { Text("Try again", bundle: .module) } icon: { Image(systemName: "arrow.clockwise") }
+                    Label { Text("Try again", bundle: .voiceKit) } icon: { Image(systemName: "arrow.clockwise") }
                 }
                 .buttonStyle(.bordered)
                 .tint(.white)
@@ -200,7 +200,7 @@ public struct VoiceModeView: View {
                     .background(Circle().fill(session.isMuted ? Color.white : Color.white.opacity(0.14)))
                     .foregroundStyle(session.isMuted ? Color.black : Color.white)
             }
-            .accessibilityLabel(Text(session.isMuted ? "Unmute microphone" : "Mute microphone", bundle: .module))
+            .accessibilityLabel(Text(session.isMuted ? "Unmute microphone" : "Mute microphone", bundle: .voiceKit))
 
             Spacer()
 
@@ -208,7 +208,7 @@ public struct VoiceModeView: View {
                 Button {
                     session.requestDeepNextTurn(!session.deepNextTurn)
                 } label: {
-                    Label { Text("Think deeper", bundle: .module) } icon: { Image(systemName: "brain.head.profile") }
+                    Label { Text("Think deeper", bundle: .voiceKit) } icon: { Image(systemName: "brain.head.profile") }
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
@@ -217,9 +217,9 @@ public struct VoiceModeView: View {
                         .background(Capsule().fill(session.deepNextTurn ? Color.white : Color.white.opacity(0.14)))
                         .foregroundStyle(session.deepNextTurn ? Color.black : Color.white)
                 }
-                .accessibilityLabel(Text("Think deeper", bundle: .module))
-                .accessibilityValue(Text(session.deepNextTurn ? "On for the next answer" : "Off", bundle: .module))
-                .accessibilityHint(Text("Takes more time to answer your next question carefully", bundle: .module))
+                .accessibilityLabel(Text("Think deeper", bundle: .voiceKit))
+                .accessibilityValue(Text(session.deepNextTurn ? "On for the next answer" : "Off", bundle: .voiceKit))
+                .accessibilityHint(Text("Takes more time to answer your next question carefully", bundle: .voiceKit))
 
                 Spacer()
             }
@@ -233,27 +233,27 @@ public struct VoiceModeView: View {
                     .background(Circle().fill(Color.red))
                     .foregroundStyle(.white)
             }
-            .accessibilityLabel(Text("End voice chat", bundle: .module))
+            .accessibilityLabel(Text("End voice chat", bundle: .voiceKit))
         }
         .padding(.horizontal, 12)
     }
 
     private var statusText: String {
         switch session.phase {
-        case .idle, .starting: return String(localized: "Connecting…", bundle: .module)
-        case .listening: return session.isMuted ? String(localized: "Muted", bundle: .module) : String(localized: "Listening…", bundle: .module)
-        case .thinking: return String(localized: "Thinking…", bundle: .module)
-        case .speaking: return String(localized: "Speaking", bundle: .module)
-        case .failed: return String(localized: "Voice chat stopped", bundle: .module)
+        case .idle, .starting: return String(localized: "Connecting…", bundle: .voiceKit)
+        case .listening: return session.isMuted ? String(localized: "Muted", bundle: .voiceKit) : String(localized: "Listening…", bundle: .voiceKit)
+        case .thinking: return String(localized: "Thinking…", bundle: .voiceKit)
+        case .speaking: return String(localized: "Speaking", bundle: .voiceKit)
+        case .failed: return String(localized: "Voice chat stopped", bundle: .voiceKit)
         }
     }
 
     private var hintText: String? {
         switch session.phase {
-        case .listening where !session.userCaption.isEmpty: return String(localized: "Tap the orb to send now", bundle: .module)
-        case .listening where session.pendingPhoto != nil: return String(localized: "Ask about the photo, or tap the orb", bundle: .module)
-        case .listening: return String(localized: "Go ahead, I'm listening", bundle: .module)
-        case .thinking, .speaking: return String(localized: "Tap the orb or just start talking to interrupt", bundle: .module)
+        case .listening where !session.userCaption.isEmpty: return String(localized: "Tap the orb to send now", bundle: .voiceKit)
+        case .listening where session.pendingPhoto != nil: return String(localized: "Ask about the photo, or tap the orb", bundle: .voiceKit)
+        case .listening: return String(localized: "Go ahead, I'm listening", bundle: .voiceKit)
+        case .thinking, .speaking: return String(localized: "Tap the orb or just start talking to interrupt", bundle: .voiceKit)
         default: return nil
         }
     }

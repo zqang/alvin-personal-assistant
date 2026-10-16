@@ -2,6 +2,7 @@ import AssistantKit
 import Darwin
 import HuggingFace
 import LocalEngine
+import LocalEngineHost
 import MiniCPM
 import MLX
 import Observation
@@ -473,7 +474,7 @@ final class ModelComparisonBenchmarkRunner {
 
     func stopForBackground() {
         cancel(reason: "Assistant entered the background.")
-        // LocalModelHost's lifecycle guard drains direct-engine work through engineHooks.
+        // LocalEngineHost's lifecycle guard drains direct-engine work through engineHooks.
         _ = native?.waitUntilIdle(timeout: 3)
     }
 
@@ -483,13 +484,13 @@ final class ModelComparisonBenchmarkRunner {
         defer {
             sampling?.cancel()
             try? FileManager.default.removeItem(at: prefixes)
-            if ownsGPU { LocalModelHost.shared.endExternalBenchmark() }
+            if ownsGPU { LocalEngineHost.shared.endExternalBenchmark() }
         }
         do {
             try persist()
             try await waitForMiniCPMFiles(variant.hostModel) { progress = $0 }
             progress = "Releasing reply and speech models…"
-            guard await LocalModelHost.shared.beginExternalBenchmark() else {
+            guard await LocalEngineHost.shared.beginExternalBenchmark() else {
                 throw ComparisonError.message("Another on-device benchmark is running.")
             }
             ownsGPU = true
@@ -637,7 +638,7 @@ final class ModelComparisonBenchmarkRunner {
         // request), decoding greedily. Its mechanisms run in this run's folders: a drafting corpus
         // that starts empty with each load, so no block drafts from another's identical replies,
         // and, while the setting is on, a prefix cache that a later block loads from disk.
-        let host = LocalModelHost.shared
+        let host = LocalEngineHost.shared
         var configuration = EngineSetup.configuration(settings: settings, host: host)
         configuration.temperature = 0
         configuration.maxTokens = 128
@@ -868,7 +869,7 @@ final class ModelComparisonBenchmarkRunner {
         guard let repo = Repo.ID(rawValue: modelID),
               let revision = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
               let directory = try? cache.snapshotPath(repo: repo, kind: .model, commitHash: revision),
-              LocalModelHost.hasModelFiles(in: directory) else {
+              LocalEngineHost.hasModelFiles(in: directory) else {
             throw ComparisonError.message("Download the selected on-device model (\(modelID)) in Settings before comparing it.")
         }
         return directory
