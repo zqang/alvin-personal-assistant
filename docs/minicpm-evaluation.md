@@ -31,9 +31,10 @@ was 6 GiB (the device probe, with the increased-memory entitlement).
 
 The device gate's results per check are in
 [the architecture doc's §11](architecture-plan-on-device-and-orchestration.md#11-device-checklist). Anything
-still marked **pending** needs somebody holding the iPhone. For the photo reading that ships, these remain:
-Acknowledgements and the camera alert on the phone (D14), D15, the real photos of D16, D17, and locking the
-phone (D19). With the 35B mode hidden, its own checks (Delete in D21, the live-voice parts of D23, D24 and
+still marked **pending** needs somebody holding the iPhone. The manual checks for the photo reading that ships
+ran with the owner on 16 October 2026 on the `6a202c3` Release build and passed: Acknowledgements (D14), the
+download with a mid-file departure and resume (D15), real photos (D16), the photo flow (D17), locking the phone
+(D19), and deleting the 35B files (D21). With the 35B mode hidden, its own checks (Delete in D21, the live-voice parts of D23, D24 and
 D25) aren't needed for this merge; they come back if the mode is offered again. D26 belongs to the VoiceKit
 PR.
 
@@ -274,7 +275,7 @@ memory warning. Interrupted GPU work stopped within 0–95 ms with `Cancellation
 writing finished within 13 ms and left a valid file, a stopped prefill left no file, and reads, replies and
 the prefix all worked on return. After two or more 35B unloads in a process, the first 35B reply after a
 return was refused in 3 of 7 suspended trials, at 4.11 GB available; 4.3 GB was back 3.5 and 5.0 s later.
-Locking the phone was not tested; that stays manual.
+Locking the phone during a photo read passed by hand on 16 October 2026 (`6a202c3`): the same process came back, with no crash or jetsam report and no GPU error in the Mac-captured console.
 
 ## 5. Packaging
 
@@ -342,14 +343,14 @@ the app's hashing loop (size, GGUF magic, SHA-256 in 1 MiB reads).
 | Check | 1B (D15) | 35B (D21) |
 |---|---|---|
 | Offered | — | Yes, in the build of `d0387f0`: `physicalMemory` 12,262,113,280, and `accurateEligible()` was true. The switch showed in a simulator run of Settings, with "about 15.5 GB". This version hides the mode |
-| Cancel, then leave mid-file: finished files kept, download resumes on return | pending (manual) | — |
+| Cancel, then leave mid-file: finished files kept, download resumes on return | **Pass** (16 Oct, by hand on `6a202c3`): after Delete, the owner left the app at about 20–40 % and the download resumed on return, not from 0 %; both files and `.verified.json` were rewritten (19:20) | — |
 | First verification time | 1.30 s for 1.78 GB (re-hash) | **about 10 s**: 10.2 and 9.5 s for 43 files, 15.93 GB (1.6–1.7 GB/s). The app's own first check also ends with writing `.verified.json`, and on a first launch it runs beside the 1B's, so expect a little more |
 | Later loads check in ≤ 3 s | Yes: `ready` 0.19 s after process start (D21) | Yes: the same 0.19 s |
 | Existing folder reused without a download | — | Yes: all 43 files at their pinned sizes and SHA-256s, no staging files, nothing changed between the start and end of the gate |
 | Projector removed | — | Yes: the app deleted `mmproj-model-f16.gguf` (1,119,575,840 B) during its first 35B preparation; free storage rose by 1.13 GB |
 | Refused below the missing bytes + 1 GB free | — | Not exercised (it needs a download); covered by `MiniCPMArtifactsTests` |
 | `isExcludedFromBackup` set | Yes (2/2 files and the folder) | Yes (43/43 files and the folder) |
-| Delete frees the bytes shown | pending (manual) | Not needed for this merge (the mode is hidden). What the button shows (`bytesOnDisk`) was 15.93 GB here, more than the 15.5 GB download, because this phone also holds the 425 MB DSpark draft; the 73 MB system prefix saved later adds to it |
+| Delete frees the bytes shown | **Pass** (16 Oct): Delete then re-download, as above | **Pass** (16 Oct, by hand from the hidden mode's "MiniCPM-V 35B files" section): the whole 16.00 GB folder was removed. What the button shows (`bytesOnDisk`) was 15.93 GB here, more than the 15.5 GB download, because this phone also holds the 425 MB DSpark draft; the 73 MB system prefix saved later adds to it |
 
 ## 7. Photo flow
 
@@ -378,13 +379,16 @@ second run warmed from `nominal` to `fair`):
 
 **Decision: 4 slices stay the default.** On the fixtures alone the rule would pick 1, but the smaller-text
 variants fail it at 1 slice already at half size, and 4 slices cost only about 1.2 s more, far under 6 s.
-**Pending (manual):** the 4 real scenes (a sign, a menu, a receipt and a poster at hand-held distance),
-photographed in the app.
+**Real scenes, by hand (16 Oct, `6a202c3`):** a sign, a menu and a receipt photographed in the app, and a poster
+shown on a Mac screen; the owner judged every reading correct. Nobody recorded per-string scores, so this
+confirms the fixture result rather than measuring it.
 
-**Pending (D17, manual).** Chat questions about a photo answered by Woof and by Claude, with only the note text sent;
-a poster becoming a calendar event through the permission prompt; in voice mode, the shutter working while
-the app listens, echo cancellation and barge-in still working, a barge-in during a read cancelling it
-without a reload, and the next turn carrying the photo.
+**D17, by hand (16 Oct, `6a202c3`): pass.** Chat questions about the photos were answered correctly; the poster
+("Lantern Night Walk", Sat 25 Oct 2026, 7:00–9:30 PM) became a calendar event through the permission prompt; in
+voice mode the shutter worked while the app listened, a barge-in stopped the reply, and the follow-up still knew
+the photo. The Mac-captured console showed four clean model loads and frees and no errors, and no crash or
+jetsam report was written. Which answering engine (Woof or Claude) handled each chat question was not
+recorded.
 
 ## 8. 35B production profile and voice latency
 
