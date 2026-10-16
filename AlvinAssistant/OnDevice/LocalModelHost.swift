@@ -2,6 +2,7 @@ import AssistantKit
 import Foundation
 import HuggingFace
 import LocalEngine
+import MiniCPM
 import MLX
 import MLXLMCommon
 import Observation
@@ -28,6 +29,10 @@ final class LocalModelHost {
     }
 
     static let shared = LocalModelHost()
+
+    /// An experimental native backend owns the device until it has fully unloaded.
+    /// This also blocks a delayed cloud-to-local fallback from loading MLX beside it.
+    private(set) var externalBenchmarkInProgress = false
 
     /// The base system prompt and tool definitions on-device replies are sent with, for
     /// `prewarm(settings:)`, which must render exactly what replies will. The system prompt is
@@ -203,6 +208,7 @@ final class LocalModelHost {
     /// `prewarm`, the system prompt is made resident once the model is ready (see
     /// `prewarm(settings:)`).
     func prepare(_ settings: AssistantSettings, prewarm: Bool = true) {
+        guard !externalBenchmarkInProgress else { return }
         guard let option = LocalModelCatalog.option(for: settings.localModelID) else { return }
         latest = settings
         let wanted = Self.key(option, settings)
@@ -230,6 +236,46 @@ final class LocalModelHost {
     /// Returns once the current load, if any, has finished or failed.
     func settle() async {
         await loading?.value
+    }
+
+    /// Whether the model is loading its weights (not downloading them) or a reply or prewarm is
+    /// using it: another engine taking the GPU and memory now would fail it, or race its memory.
+    var isBusy: Bool {
+        (loading != nil && !downloading) || activeJobs > 0
+    }
+
+    /// Releases MLX before an experimental backend takes the GPU and memory budget.
+    func unloadForBenchmark() async {
+        unload(stopDownload: true)
+        await orphan?.value
+        await retired?.value
+        await invalidating?.value
+        await Task.detached { Memory.clearCache() }.value
+    }
+
+    func beginExternalBenchmark() async -> Bool {
+        guard !externalBenchmarkInProgress else { return false }
+        externalBenchmarkInProgress = true
+        await unloadForBenchmark()
+        return true
+    }
+
+    func endExternalBenchmark() { externalBenchmarkInProgress = false }
+
+    /// Runs `body`, another engine's GPU work (MiniCPM-V), while this model is paused: as a check
+    /// does, it waits for the replies and prewarms in progress and keeps new ones waiting until
+    /// `body` returns. With no model loaded, or one unloaded meanwhile, `body` runs at once.
+    func whilePaused(_ body: () async throws -> Void) async throws {
+        var ran = false
+        if let engine {
+            do {
+                return try await exclusively(engine) {
+                    ran = true
+                    try await body()
+                }
+            } catch where !ran && !(error is CancellationError) {}
+        }
+        try await body()
     }
 
     /// Frees the model. A download in progress carries on unless `stopDownload`.
@@ -367,6 +413,9 @@ final class LocalModelHost {
                 await previous.value
                 try Task.checkCancellation()
             }
+            // MiniCPM-V gives this model the GPU and its memory (plan decision 24).
+            await MiniCPMHost.shared.unloadAll()
+            try Task.checkCancellation()
             let needed = option.approximateBytes + (wanted.draft ? option.draftApproximateBytes : 0) + Self.memoryMargin
             let draftID = wanted.draft ? option.draftModelID : nil
             if !isDownloaded(option.id) || draftID.map({ !isDownloaded($0) }) == true {
@@ -503,21 +552,18 @@ final class LocalModelHost {
         String(format: "%.1f GB", Double(bytes) / 1e9)
     }
 
-    /// What the downloaded models and the engine's caches take on the iPhone, Qwen3-ASR's included.
+    /// What the downloaded models and the engine's caches take on the iPhone, Qwen3-ASR's and
+    /// MiniCPM-V's included.
     nonisolated static func downloadedBytes() -> Int64 {
-        var total: Int64 = 0
-        for folder in [modelsFolder(), EngineSetup.cacheDirectory()] {
-            let files = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.totalFileAllocatedSizeKey])
-            while let file = files?.nextObject() as? URL {
-                total += Int64((try? file.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize) ?? 0)
-            }
-        }
-        return total
+        [modelsFolder(), EngineSetup.cacheDirectory(), MiniCPMArtifacts.directory, MiniCPM35BArtifacts.directory]
+            .reduce(0) { $0 + MiniCPMArtifacts.bytesOnDisk(in: $1) }
     }
 
     /// Unloads the models and deletes every download and the engine's caches (the saved system
-    /// prompts and drafting corpora). A model downloads again the next time it's needed.
-    func deleteDownloads() {
+    /// prompts and drafting corpora), MiniCPM-V's too. A model downloads again the next time it's
+    /// needed (MiniCPM-V's from Settings). The task ends once MiniCPM-V's files are gone too.
+    @discardableResult
+    func deleteDownloads() -> Task<Void, Never> {
         unload(stopDownload: true)
         QwenListener.shared.unload(stopDownload: true)
         for folder in [Self.modelsFolder(), EngineSetup.cacheDirectory()] {
@@ -525,6 +571,11 @@ final class LocalModelHost {
         }
         statusText = nil
         status = .off
+        // MiniCPMHost stops their downloads and unloads them first.
+        return Task {
+            _ = await MiniCPMHost.shared.delete(.photoReader)
+            _ = await MiniCPMHost.shared.delete(.accurate)
+        }
     }
 
     private func fail(_ message: String) {
@@ -975,6 +1026,9 @@ final class LocalModelHost {
         toolMode: ToolMode = .guided,
         emit: (AssistantEvent) -> Void
     ) async throws -> (text: String, stats: LocalGenerationStats) {
+        guard !externalBenchmarkInProgress else {
+            throw AssistantError.missingConfiguration("Stop the MiniCPM benchmark before using an on-device reply.")
+        }
         let requested = ContinuousClock.now
         let showLoading = status != .ready
         if showLoading {

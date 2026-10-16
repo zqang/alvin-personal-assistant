@@ -1,5 +1,6 @@
 import AssistantKit
 import Foundation
+import MiniCPM
 
 /// The app's reply pipeline: routing between Claude and the on-device model, client tools, deep
 /// mode, early start and connection prewarm (plan §5).
@@ -7,7 +8,8 @@ import Foundation
 /// Each reply:
 /// 1. reads the conversation (plus `pendingUser`, for a voice reply started early) into turns;
 /// 2. builds the engines: Claude with the device tools, deep mode, the on-device model with its
-///    tool subset (when downloaded), or the OpenAI-compatible service;
+///    tool subset (when downloaded) or, in "Most accurate on device", MiniCPM-V 35B (see
+///    `accurateAnswers`), or the OpenAI-compatible service;
 /// 3. decides the route: with a single provider, that provider (Claude may go deep); with
 ///    automatic routing (Claude as the provider), `RouteDecider` with live signals;
 /// 4. runs it through `Orchestrator`, which yields `.routed` first and falls back once before the
@@ -28,6 +30,9 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
     /// in the chat screen's body, which streaming redraws for every chunk.
     private var downloadCheck: (modelID: String, downloaded: Bool, at: Date)?
 
+    /// Whether MiniCPM-V 35B answered the latest request on device, for `displayName`.
+    private var answersAccurately = false
+
     /// Warms the connection replies use (the same transport), at most every 30 s.
     private static let prewarmer = ConnectionPrewarmer(transport: ReplyService.transport)
 
@@ -47,8 +52,16 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
         }
         let turns = PromptBuilder.turns(from: messages)
         let system = PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: settings.customInstructions, profile: .app)
+        // Classified once, from the user's words only (never a photo's note): the route reads the
+        // last turn's. The on-device answerer reads the last two: a follow-up to a device action
+        // ("5 pm", "yes, do it") needs the on-device model's tools too.
+        let classifier = AssistantProfile.app.intents
+        let userTexts = turns.filter { $0.role == .user }.map(\.text)
+        let intents = classifier.classify(userTexts.last ?? "")
+        let accurate = accurateAnswers(settings, intents: classifier.classify(userTexts.suffix(2).joined(separator: "\n")))
+        answersAccurately = accurate
 
-        let decision = decide(settings: settings, turns: turns, request: request)
+        let decision = decide(settings: settings, intents: intents, accurate: accurate, request: request)
         // Under "On-device only", a reply started early may run only on device, and with automatic
         // routing only this request's route says whether it does.
         let onDeviceOnly = request.pendingUser != nil && settings.earlyReplyStart == .onDeviceOnly
@@ -59,14 +72,15 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
         }
         let engines: Orchestrator.Engines
         do {
-            engines = try makeEngines(settings: settings, turns: turns, request: request, onDeviceOnly: onDeviceOnly)
+            engines = try makeEngines(settings: settings, turns: turns, request: request, onDeviceOnly: onDeviceOnly, accurate: accurate)
         } catch {
             return AsyncThrowingStream { continuation in
                 continuation.finish(throwing: error)
             }
         }
         // Voice waits less for a silent cloud when the on-device model can answer at once.
-        let watchdog: Duration = request.inputIsVoice && LocalModelHost.shared.status == .ready ? .seconds(3) : .seconds(8)
+        let localLoaded = accurate ? MiniCPMHost.shared.isLoaded(.accurate) : LocalModelHost.shared.status == .ready
+        let watchdog: Duration = request.inputIsVoice && localLoaded ? .seconds(3) : .seconds(8)
         let orchestrator = Orchestrator(decision: decision, engines: engines, firstEventTimeout: watchdog)
         // The OpenAI-compatible service isn't one of the router's engines; its times would skew
         // Claude's.
@@ -78,13 +92,15 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
             deep: decision.mode == .deep,
             gate: request.commitGate,
             recordsLatency: recordsLatency,
-            cloudWaitsForGate: onDeviceOnly
+            cloudWaitsForGate: onDeviceOnly,
+            localIsAccurate: accurate
         )
     }
 
     /// The engines for one reply under `settings`. With `onDeviceOnly` the route is on device, and
-    /// Claude is there only for a handoff, which waits for the request's commit gate.
-    private func makeEngines(settings: AssistantSettings, turns: [ChatTurn], request: ReplyRequest, onDeviceOnly: Bool) throws -> Orchestrator.Engines {
+    /// Claude is there only for a handoff, which waits for the request's commit gate. With
+    /// `accurate`, MiniCPM-V 35B answers on device.
+    private func makeEngines(settings: AssistantSettings, turns: [ChatTurn], request: ReplyRequest, onDeviceOnly: Bool, accurate: Bool) throws -> Orchestrator.Engines {
         let gate = request.commitGate
         let toolContext: @Sendable () -> ToolContext = { ToolContext(commitGate: gate) }
         switch settings.provider {
@@ -110,7 +126,8 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
                 toolContext: toolContext
             )
             // With a single provider, Claude answers alone (plan §5.2: no on-device fallback).
-            let local = settings.routingMode == .automatic && localAvailable(settings) ? localProvider(settings: settings, gate: gate) : nil
+            let local = settings.routingMode == .automatic && localAvailable(settings)
+                ? onDeviceProvider(settings: settings, gate: gate, accurate: accurate, inputIsVoice: request.inputIsVoice) : nil
             if onDeviceOnly {
                 // A handoff reaches Claude only once the turn is final: until then the reply may
                 // still be discarded.
@@ -119,23 +136,40 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
             return Orchestrator.Engines(cloud: cloud, deep: deliberation, local: local)
         case .onDevice:
             // Downloaded on first use, as before routing existed.
-            return Orchestrator.Engines(local: localProvider(settings: settings, gate: gate))
+            return Orchestrator.Engines(local: onDeviceProvider(settings: settings, gate: gate, accurate: accurate, inputIsVoice: request.inputIsVoice))
         case .openAICompatible:
             let compatible = try ReplyService.compatibleProvider(settings: settings, store: store)
             return Orchestrator.Engines(cloud: LegacyProviderAdapter(compatible))
         }
     }
 
-    /// The on-device model with the tools and handoff `LocalPromptFactory` gives it, which the
-    /// prewarm uses too.
-    private func localProvider(settings: AssistantSettings, gate: CommitGate?) -> LocalProvider {
+    /// The on-device reply: MiniCPM-V 35B when `accurate`, which hands a failure before any text to
+    /// the on-device model; else that model, with the tools and handoff `LocalPromptFactory` gives
+    /// it, which the prewarm uses too.
+    private func onDeviceProvider(settings: AssistantSettings, gate: CommitGate?, accurate: Bool, inputIsVoice: Bool) -> any AssistantProvider {
         let prompt = LocalPromptFactory.make(settings: settings, store: store)
         let tools: (any ToolExecutor)? = prompt.tools.isEmpty ? nil : ToolRunner(registry: prompt.tools, lenientInput: true)
-        return LocalProvider(settings: settings, tools: tools, handoffAvailable: prompt.handoff, commitGate: gate)
+        let local = LocalProvider(settings: settings, tools: tools, handoffAvailable: prompt.handoff, commitGate: gate)
+        guard accurate else { return local }
+        let name = LocalModelCatalog.option(for: settings.localModelID)?.displayName ?? "the on-device model"
+        return MiniCPM35BProvider(fallback: local, fallbackName: name, inputIsVoice: inputIsVoice) { [weak self] in
+            self?.answersAccurately = false
+        }
     }
 
-    /// The route of one reply.
-    private func decide(settings: AssistantSettings, turns: [ChatTurn], request: ReplyRequest) -> RouteDecision {
+    /// Whether MiniCPM-V 35B answers on device instead of the on-device model (plan decision 20):
+    /// the mode is on and its model ready, the request isn't a device action, and the iPhone is
+    /// neither hot nor in Low Power Mode.
+    private func accurateAnswers(_ settings: AssistantSettings, intents: IntentClassifier.Intents) -> Bool {
+        let device = ProcessInfo.processInfo
+        return settings.accurateOnDevice && MiniCPMHost.accurateEligible() && MiniCPMHost.shared.status[.accurate] == .ready
+            && !intents.contains(.deviceAction) && device.thermalState.rawValue < ProcessInfo.ThermalState.serious.rawValue
+            && !device.isLowPowerModeEnabled
+    }
+
+    /// The route of one reply. With `accurate`, the on-device side is ready: MiniCPM-V 35B loads
+    /// on first use.
+    private func decide(settings: AssistantSettings, intents: IntentClassifier.Intents, accurate: Bool, request: ReplyRequest) -> RouteDecision {
         switch settings.provider {
         case .onDevice:
             return RouteDecision(engine: .local, reason: .userChoice)
@@ -152,7 +186,7 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
             cloudConfigured: !store.secret(.anthropic).isEmpty,
             // With a single provider there is no on-device fallback.
             localAvailable: automatic && localAvailable(settings),
-            localReady: automatic && host.status == .ready,
+            localReady: automatic && (host.status == .ready || accurate),
             inputIsVoice: request.inputIsVoice,
             deepRequested: request.deep && settings.deepMode != .off,
             deepMode: settings.deepMode,
@@ -160,19 +194,18 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
             fastLocalSmallTalk: settings.fastLocalSmallTalk
         )
         signals.setExpectations(from: store.latency)
-        let utterance = turns.last(where: { $0.role == .user })?.text ?? ""
-        let decider = RouteDecider(classifier: AssistantProfile.app.intents)
-        let intents = decider.classifier.classify(utterance)
         // A device action goes on device only when the on-device reply can run the tools: the
         // Alvin engine with the device tools on. MLX's stock session has no tools.
         if intents.contains(.deviceAction), !(settings.deviceToolsEnabled && host.usesEngine(settings)) {
             signals.localReady = false
         }
-        return decider.decide(intents: intents, signals: signals)
+        return RouteDecider(classifier: AssistantProfile.app.intents).decide(intents: intents, signals: signals)
     }
 
     /// Streams `orchestrator`'s events, recording deep-mode use and the time to first text.
     /// `cloudWaitsForGate`: Claude's time would include the wait for the gate, so it isn't recorded.
+    /// `localIsAccurate`: MiniCPM-V 35B answers on device, and its times would skew the router's
+    /// expectation of the on-device model, so they aren't recorded either.
     private func relay(
         _ orchestrator: Orchestrator,
         system: String,
@@ -180,7 +213,8 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
         deep: Bool,
         gate: CommitGate?,
         recordsLatency: Bool,
-        cloudWaitsForGate: Bool
+        cloudWaitsForGate: Bool,
+        localIsAccurate: Bool
     ) -> AsyncThrowingStream<AssistantEvent, Error> {
         let store = store
         return AsyncThrowingStream { continuation in
@@ -194,7 +228,8 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
                     }
                     var firstText = FirstTextTap()
                     for try await event in orchestrator.streamEvents(system: system, turns: turns) {
-                        if recordsLatency, let sample = firstText.observe(event, at: .now), !(cloudWaitsForGate && sample.engine == .cloud) {
+                        if recordsLatency, let sample = firstText.observe(event, at: .now),
+                           !(cloudWaitsForGate && sample.engine == .cloud), !(localIsAccurate && sample.engine == .local) {
                             store.recordFirstText(engine: sample.engine, mode: sample.mode, seconds: sample.seconds)
                         }
                         continuation.yield(event)
@@ -235,11 +270,13 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
                 let prewarmer = Self.prewarmer
                 Task { await prewarmer.prewarm(request) }
             }
-            if settings.routingMode == .automatic {
-                // Loads a downloaded model and makes its system prompt resident; never downloads.
+            // Loads a downloaded model and makes its system prompt resident; never downloads. Not
+            // while MiniCPM-V runs: the load would stop it, a photo being read included.
+            if settings.routingMode == .automatic, localAvailable(settings), !prewarmAccurate(settings), !MiniCPMHost.shared.isBusy {
                 LocalModelHost.shared.prewarm(settings: settings)
             }
         case .onDevice:
+            if prewarmAccurate(settings) || MiniCPMHost.shared.isBusy { break }
             if inputIsVoice {
                 // As before: voice mode gets the model ready, downloading it if needed.
                 LocalModelHost.shared.prepare(settings)
@@ -251,11 +288,24 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
         }
     }
 
+    /// Loads MiniCPM-V 35B and its system prompt when it answers on device, in place of the
+    /// on-device model, whose load would unload it. False when the on-device model answers.
+    /// Not while that model loads or answers: the 35B's lease would take its memory mid-reply.
+    private func prewarmAccurate(_ settings: AssistantSettings) -> Bool {
+        guard accurateAnswers(settings, intents: []) else { return false }
+        if !LocalModelHost.shared.isBusy {
+            let base = PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: settings.customInstructions, profile: .app)
+            MiniCPMHost.shared.prepareAccurate(system: MiniCPM35BProvider.system(base: base))
+        }
+        return true
+    }
+
     func displayName(for decision: RouteDecision?) -> String {
         let settings = store.settings
         let engine = decision?.engine ?? (settings.provider == .onDevice ? .local : .cloud)
         switch engine {
         case .local:
+            if answersAccurately { return "On device · MiniCPM-V 35B" }
             let model = LocalModelCatalog.option(for: settings.localModelID)?.displayName ?? "model"
             return "On device · \(model)"
         case .cloud:

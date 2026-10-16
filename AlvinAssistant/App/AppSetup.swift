@@ -2,6 +2,8 @@ import AlvinProfile
 import AssistantKit
 import Foundation
 import LocalEngine
+import MiniCPM
+import os
 import UserNotifications
 
 extension AssistantProfile {
@@ -12,8 +14,8 @@ extension AssistantProfile {
 }
 
 /// Wires the app together at launch: the reply pipeline, the on-device host's prompt and network
-/// seams, the engine extensions and the timer notifications. `AlvinAssistantApp.init` calls
-/// `install(store:)` once, with the store the app then uses.
+/// seams, MiniCPM-V's GPU lease, the engine extensions and the timer notifications.
+/// `AlvinAssistantApp.init` calls `install(store:)` once, with the store the app then uses.
 @MainActor
 enum AppSetup {
     static func install(store: SettingsStore) {
@@ -26,6 +28,29 @@ enum AppSetup {
             return (system: prompt.system, tools: prompt.tools.definitions)
         }
         LocalModelHost.isOnline = { Connectivity.shared.isOnline }
+
+        // MiniCPM-V (photo reading, Most accurate on device) runs while MLX is idle (plan decision
+        // 24): Qwen3-ASR's queued passes finish, the on-device model gives up its memory when the
+        // job needs it, and that model's jobs wait until MiniCPM's ends. Its own loads unload
+        // MiniCPM-V.
+        MiniCPMHost.withGPU = { needBytes, body in
+            await QwenListener.finishPasses()
+            // The on-device model loading its weights isn't all resident yet, and evicting it, or
+            // it while it answers, would fail that reply: wait first. Cancellable, since that load
+            // starts by stopping these runs (`unloadAll`) and waits for them.
+            while LocalModelHost.shared.isBusy {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            // A load of the on-device model waits for the runs it stopped (`unloadAll`): a stopped
+            // run mustn't then wait for that load in `unloadForBenchmark`.
+            try Task.checkCancellation()
+            if os_proc_available_memory() < needBytes {
+                await LocalModelHost.shared.unloadForBenchmark()
+            }
+            try await LocalModelHost.shared.whilePaused(body)
+        }
+        // Verifies MiniCPM-V's files now, so the photo button shows from the first screen.
+        _ = MiniCPMHost.shared
 
         // The small-M kernel (used only when asked for, correct here and measurably faster). No
         // catalog checkpoint carries multi-token-prediction weights, so there is no MTP drafter

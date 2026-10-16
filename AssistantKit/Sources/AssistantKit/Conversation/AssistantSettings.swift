@@ -105,6 +105,9 @@ public struct AssistantSettings: Codable, Equatable, Sendable {
     public var localFastKernels = false
     /// The model's own multi-token-prediction drafter, when its weights include one.
     public var localMTP = true
+    /// "Most accurate on device": MiniCPM-V 35B answers on-device replies instead of Woof when it
+    /// is ready and the phone is cool enough.
+    public var accurateOnDevice = false
 
     // Routing
     public var routingMode: RoutingMode = .single
@@ -165,7 +168,7 @@ public struct AssistantSettings: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case provider, claudeModel, effort, webSearchEnabled, compatibleBaseURL, compatibleModel
         case localModelID, localSpeculativeDecoding
-        case localEngineMode, localSpeculation, localPrefixCache, localFastKernels, localMTP
+        case localEngineMode, localSpeculation, localPrefixCache, localFastKernels, localMTP, accurateOnDevice
         case routingMode, preferOnDevice, fastLocalSmallTalk
         case deviceToolsEnabled, disabledTools
         case deepMode, deepStrategy, deepDailyLimit, deepWorkerModel
@@ -195,6 +198,7 @@ public struct AssistantSettings: Codable, Equatable, Sendable {
         localPrefixCache = value(.localPrefixCache, defaults.localPrefixCache)
         localFastKernels = value(.localFastKernels, defaults.localFastKernels)
         localMTP = value(.localMTP, defaults.localMTP)
+        accurateOnDevice = value(.accurateOnDevice, defaults.accurateOnDevice)
         routingMode = value(.routingMode, defaults.routingMode)
         preferOnDevice = value(.preferOnDevice, defaults.preferOnDevice)
         fastLocalSmallTalk = value(.fastLocalSmallTalk, defaults.fastLocalSmallTalk)

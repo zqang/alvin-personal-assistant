@@ -1,5 +1,6 @@
 import AssistantKit
 import AVFoundation
+import MiniCPM
 import Speech
 import SwiftUI
 import UIKit
@@ -26,6 +27,7 @@ struct SettingsView: View {
                 aboutYouSection
                 modelSection
                 assistantSections
+                PhotoReadingSection()
                 voiceSection
                 VoiceLatencySection(store: store)
                 conversationSection
@@ -52,6 +54,9 @@ struct SettingsView: View {
             LocalModelHost.shared.apply(store.settings)
         }
         .onChange(of: LocalModelHost.shared.status) { downloadedBytes = LocalModelHost.downloadedBytes() }
+        .onChange(of: MiniCPMHost.shared.status) { downloadedBytes = LocalModelHost.downloadedBytes() }
+        // While the 35B mode is hidden its status never changes, so its Delete shows up only here.
+        .onChange(of: MiniCPMHost.shared.bytesOnDisk(.accurate) > 0) { downloadedBytes = LocalModelHost.downloadedBytes() }
         .onChange(of: anthropicKey) { store.setSecret(anthropicKey, for: .anthropic) }
         .onChange(of: compatibleKey) { store.setSecret(compatibleKey, for: .compatible) }
         .onChange(of: openAIKey) { store.setSecret(openAIKey, for: .openAI) }
@@ -176,6 +181,11 @@ struct SettingsView: View {
         if routesAutomatically {
             onDeviceModelSection
         }
+        // Hidden, the mode's section only shows 35B files an earlier build left, to delete them
+        // under any provider.
+        if usesOnDeviceModel || !MiniCPMHost.accurateEligible() {
+            AccurateOnDeviceSection(store: store)
+        }
         if usesOnDeviceModel {
             OnDeviceEngineSection(store: store)
         }
@@ -296,15 +306,21 @@ struct SettingsView: View {
                 }
                 .confirmationDialog("Delete the downloaded models?", isPresented: $confirmingDelete, titleVisibility: .visible) {
                     Button("Delete", role: .destructive) {
-                        LocalModelHost.shared.deleteDownloads()
+                        let deleting = LocalModelHost.shared.deleteDownloads()
                         downloadedBytes = LocalModelHost.downloadedBytes()
+                        // MiniCPM-V's folders go once its models have stopped.
+                        Task {
+                            await deleting.value
+                            downloadedBytes = LocalModelHost.downloadedBytes()
+                        }
                     }
                 } message: {
-                    Text("On-device replies and Qwen3-ASR listening stop until a model is downloaded again, over Wi-Fi.")
+                    Text("On-device replies, photo reading and Qwen3-ASR listening stop until their models are downloaded again, over Wi-Fi.")
                 }
             }
+            NavigationLink("Acknowledgements") { AcknowledgementsView() }
         } footer: {
-            Text("Speech is recognized on your iPhone. Your messages go to the model provider you choose above.")
+            Text("Speech is recognized and photos are read on your iPhone. Your messages, with the text read from photos, go to the model provider you choose above.")
         }
     }
 

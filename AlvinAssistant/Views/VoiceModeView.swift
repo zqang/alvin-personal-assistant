@@ -17,14 +17,21 @@ struct VoiceModeView: View {
             VStack(spacing: 0) {
                 header
                 Spacer(minLength: 24)
-                OrbView(level: CGFloat(session.level), mood: OrbMood(session.phase))
-                    .frame(width: 250, height: 250)
-                    .contentShape(Circle())
-                    .onTapGesture { session.tapOrb() }
-                    .accessibilityElement()
-                    .accessibilityLabel(statusText)
-                    .accessibilityHint(hintText ?? "")
-                    .accessibilityAddTraits(.isButton)
+                if session.cameraOpen {
+                    // The microphone keeps listening while the camera is open.
+                    CameraFeedView { data in
+                        Task { await session.attachPhoto(data) }
+                    }
+                    .aspectRatio(3 / 4, contentMode: .fit)
+                    .frame(maxHeight: 340)
+                    .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    orb
+                        .frame(width: 96, height: 96)
+                        .padding(.top, 16)
+                } else {
+                    orb
+                        .frame(width: 250, height: 250)
+                }
                 Text(hintText ?? " ")
                     .font(.footnote)
                     .foregroundStyle(.white.opacity(0.45))
@@ -51,6 +58,16 @@ struct VoiceModeView: View {
         .onDisappear { session.stop() }
     }
 
+    private var orb: some View {
+        OrbView(level: CGFloat(session.level), mood: OrbMood(session.phase))
+            .contentShape(Circle())
+            .onTapGesture { session.tapOrb() }
+            .accessibilityElement()
+            .accessibilityLabel(statusText)
+            .accessibilityHint(hintText ?? "")
+            .accessibilityAddTraits(.isButton)
+    }
+
     private var header: some View {
         VStack(spacing: 4) {
             Text(statusText)
@@ -62,7 +79,52 @@ struct VoiceModeView: View {
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.5))
         }
+        .frame(maxWidth: .infinity)
+        .overlay(alignment: .trailing) {
+            if session.canAttachPhoto, session.phase != .idle, session.phase != .starting, !isFailed {
+                Button {
+                    session.toggleCamera()
+                } label: {
+                    Image(systemName: session.cameraOpen ? "camera.fill" : "camera")
+                        .font(.title3)
+                        .frame(width: 44, height: 44)
+                        .background(Circle().fill(session.cameraOpen ? Color.white : Color.white.opacity(0.14)))
+                        .foregroundStyle(session.cameraOpen ? Color.black : Color.white)
+                }
+                .accessibilityLabel(session.cameraOpen ? "Close camera" : "Open camera")
+                .accessibilityHint("Show the assistant a photo while you talk")
+            }
+        }
         .padding(.top, 16)
+    }
+
+    private var isFailed: Bool {
+        if case .failed = session.phase { return true }
+        return false
+    }
+
+    /// The photo going with the user's next turn, and how its read is going.
+    private func pendingPhotoChip(_ photo: PendingPhoto) -> some View {
+        HStack(spacing: 10) {
+            PhotoThumbnail(data: photo.jpeg, contentMode: .fill)
+                .frame(width: 40, height: 40)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            Text(photo.failed ? PendingPhoto.unreadable : photo.finished ? "Photo ready for your question" : VoiceSession.readingPhoto)
+                .font(.footnote)
+                .foregroundStyle(.white.opacity(0.75))
+                .lineLimit(2)
+            Spacer(minLength: 0)
+            Button {
+                session.removePhoto()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+            .accessibilityLabel("Remove photo")
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.08)))
     }
 
     @ViewBuilder
@@ -80,8 +142,11 @@ struct VoiceModeView: View {
                 .buttonStyle(.bordered)
                 .tint(.white)
             } else {
+                if let photo = session.pendingPhoto {
+                    pendingPhotoChip(photo)
+                }
                 if let activity = session.activity {
-                    Label(activity, systemImage: "globe")
+                    Label(activity, systemImage: activity == VoiceSession.readingPhoto ? "text.viewfinder" : "globe")
                         .font(.subheadline)
                         .foregroundStyle(.white.opacity(0.7))
                         .symbolEffect(.pulse, options: .repeating)
@@ -177,6 +242,7 @@ struct VoiceModeView: View {
     private var hintText: String? {
         switch session.phase {
         case .listening where !session.userCaption.isEmpty: return "Tap the orb to send now"
+        case .listening where session.pendingPhoto != nil: return "Ask about the photo, or tap the orb"
         case .listening: return "Go ahead, I'm listening"
         case .thinking, .speaking: return "Tap the orb or just start talking to interrupt"
         default: return nil

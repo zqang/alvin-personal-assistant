@@ -8,5 +8,11 @@ build/
 .build/
 .swiftpm/
 
+# Python
+__pycache__/
+
 # macOS
 .DS_Store
+
+# MiniCPM runtime built locally by scripts/prepare_minicpm.sh; the package pins the release asset
+MiniCPM/Frameworks/*.xcframework/

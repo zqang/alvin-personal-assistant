@@ -58,6 +58,10 @@ final class ChatMessage {
     var errorText: String?
     /// JSON for `toolRounds`; nil when the reply ran no tools.
     var toolRoundsData: Data? = nil
+    /// The photo the user attached, as a JPEG.
+    @Attribute(.externalStorage) var photoData: Data? = nil
+    /// What the on-device vision model read in `photoData`; nil until it has.
+    var photoNote: String? = nil
     var conversation: Conversation?
 
     init(role: ChatRole, text: String, isVoice: Bool, status: StoredMessage.Status = .complete) {
@@ -95,6 +99,6 @@ final class ChatMessage {
     }
 
     var stored: StoredMessage {
-        StoredMessage(role: role, text: text, createdAt: createdAt, isVoice: isVoice, status: status, toolRounds: toolRounds)
+        StoredMessage(role: role, text: text, createdAt: createdAt, isVoice: isVoice, status: status, toolRounds: toolRounds, photoNote: photoNote)
     }
 }

@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Take a photo for the assistant to read on this iPhone. The photo is never sent to a model provider; it stays in the chat on this iPhone until you delete the chat.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>The assistant reads your schedule and adds events when you ask it to.</string>
 	<key>NSRemindersFullAccessUsageDescription</key>

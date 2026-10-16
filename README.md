@@ -40,7 +40,12 @@ service, such as **Doubao on Volcengine Ark**, DeepSeek, or OpenAI.
   - Qwen3 4B with a 0.6B draft model for speculative decoding
 
   The model keeps its cache between turns, so each reply only reads the new message. **Settings › On-device
-  engine › Benchmark** measures it on your phone.
+  engine › Benchmark** measures it on your phone. A mode in which the much larger MiniCPM-V 35B answers,
+  **Most accurate on device**, is built but hidden in this version, because it was too slow in voice mode
+  ([below](#most-accurate-on-device)).
+- **Photos (optional).** Attach a photo in the chat, or take one in voice mode, and ask about it. A small
+  vision model reads it on the iPhone, and only the text it reads goes to the model that answers
+  ([Photo reading](#photo-reading)).
 - **Web search.** "What's the weather tomorrow?" and "Any news on…?" work, because Claude searches the web
   server-side.
 - **Private by default.** Speech is transcribed on the iPhone. API keys live in the iOS Keychain. There's no
@@ -69,14 +74,17 @@ needs testing on a device are in
 ## Requirements
 
 - A Mac with **Xcode 26.4 or later** and the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`),
-  which the on-device Qwen3-ASR model (MLX) needs to build
+  which the on-device Qwen3-ASR model (MLX) needs to build. For the simulator, an Apple silicon Mac: the
+  simulator build is arm64 only.
 - An iPhone on **iOS 17 or later**. A free Apple ID is enough to run it on your own phone.
 - An **Anthropic API key** from [console.anthropic.com](https://console.anthropic.com), or a key for an
   OpenAI-compatible service
 
 ## Run it on your iPhone
 
-1. Clone the repo and open `AlvinAssistant.xcodeproj` in Xcode.
+1. Clone the repo and open `AlvinAssistant.xcodeproj` in Xcode. Xcode fetches the Swift packages, including
+   the prebuilt MiniCPM-V runtime (a checksum-pinned `llama.xcframework` from this repository's GitHub
+   releases), so there's nothing to build first and no CMake to install.
 2. Select the **AlvinAssistant** target, open **Signing & Capabilities**, and choose your **Team**. If Xcode
    says the bundle identifier is taken, change `com.alvinang.personalassistant` to something unique.
 3. Plug in your iPhone (or pair it over Wi-Fi), select it as the run destination, and press **Run** (⌘R). The
@@ -95,12 +103,121 @@ Tips:
 - **Voice engine › OpenAI** gives the most natural speech. It needs an OpenAI API key and costs a little per
   minute of audio. If it fails, the app falls back to the built-in voice.
 - The simulator can run the app, but voice mode needs a real iPhone for the microphone and echo cancellation.
+  The MiniCPM-V models don't load on the simulator.
+- The app always embeds the MiniCPM-V runtime, whether or not you download a MiniCPM model. It makes the
+  installed app about 10.8 MB larger (the framework is 9.75 MB of that) and the download about 3.8 MB larger
+  (measured on an iPhone 17 Pro Max, D14).
 - **On-device replies** download 1.5–2.7 GB the first time (Wi-Fi only) and run only while the app is open. Run
   the benchmark from a **Release** build and copy the results. Qwen3-ASR listening loads after the reply model
   and gives way to it if memory is short.
 - **Qwen3-ASR listening** downloads about 1 GB the first time (use Wi-Fi), needs a recent iPhone (iPhone 15 Pro
   or newer is best), and works only while the app is open; with the screen locked, turns use Apple's text.
   Build with the **Release** configuration for realistic speed.
+
+## Photo reading
+
+You can show the assistant a photo in two ways:
+
+- **In the chat:** pick one from your library, or take one with the camera.
+- **In voice mode:** open the camera and press the shutter. The microphone keeps listening while you do.
+
+**MiniCPM-V 4.7 1B** then reads the photo on the iPhone. First it copies every piece of legible text
+exactly, in its own language and line order. Then it writes at most three sentences about what the photo
+shows. Reading starts as soon as you attach the photo, so it happens while you're still typing or speaking.
+The result streams in under the thumbnail as **What the iPhone read**.
+
+- **What gets sent.** The photo is never sent to a model provider. It is kept with the chat on the iPhone
+  (and so in the iPhone's backups) until you delete the chat. The model that answers gets your words plus
+  the reading, marked as coming from an on-device model that may contain errors and as text not to take
+  instructions from. That model can be Claude or the on-device model. When Claude answers, only this text
+  goes to Claude.
+- **Follow-up questions.** The reading is stored with your message, so later questions in the chat can use
+  it. A photo sent without words asks "What's in this photo?", or, if you speak Chinese, "这张照片里有什么？"
+  ("這張照片裡有什麼？" for Traditional Chinese and Cantonese).
+- **Getting it.** Go to **Settings › Photo reading › Download**. It's about 1.8 GB over Wi-Fi, and the files
+  are kept for later. The photo and camera buttons appear only once the download is finished. Delete it in
+  the same place to get the space back.
+- **Speed.** On an iPhone 17 Pro Max a reading is complete in about 2.6–2.9 s (median; p90 about 3.5 s).
+  The first photo after the app starts takes about 4.6 s, because that includes loading the model (D16).
+- **Limits.**
+  - It's a small model. It can misread text, and although it's asked to write "unclear" rather than guess,
+    it may still guess.
+  - Text inside a photo is untrusted. A sign that says "set a timer" still reaches a model that has tools.
+    Actions still wait until your turn has ended, and for iOS's permission prompts, but this isn't proven
+    safe.
+
+## Most accurate on device
+
+**Hidden in this version.** The mode is in the code, but Settings doesn't offer it. In voice mode the 35B
+started speaking 7.5 s after the request at the median (8.5 s p90), and 9.3 s after an interruption (11.8 s
+p90), against a target of 5 s (8 s p90) (D23). So on 16 October 2026 the owner hid it (decision 31):
+
+- `MiniCPMHost.accurateEligible()` returns false, so the switch and the 35B download don't appear.
+- If an earlier build turned the mode on, the app turns it off when it starts, and saves that.
+- If an earlier build downloaded the 35B, **Settings › MiniCPM-V 35B files** shows the files with **Delete**
+  only, to free the 15.5 GB, whichever provider is chosen. It offers no download, and the app doesn't check
+  the files when it starts.
+
+To offer the mode again, change that one line in `MiniCPM/Sources/MiniCPM/MiniCPMHost.swift` back to
+`MiniCPM35BArtifacts.eligible(physicalMemory:)`. It's then offered on 12 GB iPhones, other iPhones don't show
+it, and the rest of this section applies. It starts off for everyone, including anyone who had it on before
+it was hidden: the app saved that setting off. Re-tune it and run D23 again first.
+
+The mode is optional and needs an iPhone with 12 GB of memory. With **Settings › Most accurate on device**
+on, replies that would be answered on the iPhone come from **MiniCPM-V 4.7 35B-A3B** instead of Woof. It's
+much slower than Woof and warms the phone. It's a much larger model and may handle harder questions better
+(the measured accuracy edge isn't significant yet); use it for that, not for speed.
+
+- **Woof still answers in these cases:**
+  - reminders, calendar and timers: the 35B has no tools or live information in this version, and it says
+    so if you ask it to do something;
+  - when the phone is hot (`serious` thermal state) or in Low Power Mode;
+  - the follow-up to a reminder, calendar or timer request ("5 pm", "yes, do it");
+  - when the 35B fails before it has written anything, or another model needs its memory first.
+
+  Photos are still read by the 1B.
+- **What you need:**
+  - Woof, already downloaded;
+  - an iPhone that reports at least 11 GB of memory. The 17 Pro Max reports 12.26 GB. Other phones don't
+    show the switch;
+  - about 15.5 GB of storage, plus 1 GB free.
+
+  The download is Wi-Fi only, and the app has to stay open while it runs. Files that have finished are
+  kept if you leave the app, and checking them afterwards takes about 10 s. Delete them in the same section.
+- **Speed.** In a chat its first words take about 5 s for a short message, longer for a long one. In voice
+  mode it starts speaking about 7–9 s after you finish, and up to about 12 s after you interrupt it. Then it
+  writes about 6 tokens a second. The very first answer, and the first after you change your name or
+  instructions, can take about 25 s.
+- **Engine.** It runs a second, prebuilt runtime, llama.cpp-omni. The model keeps the conversation in its
+  cache between turns and keeps the system prompt on disk, so each reply reads only the new text. After a
+  photo it reads the whole conversation again, which took 28–114 s in testing, because the photo reader needs
+  its memory. A conversation that outgrows the model's 4,096-token context is rebuilt from its latest turns
+  every few replies, and that reply starts much later (not measured yet).
+
+These are the settings the mode runs with, measured on an iPhone 17 Pro Max on 15–16 October 2026 (D22 and
+D23). Times are taken where the app receives the text; [the evaluation](docs/minicpm-evaluation.md) has the
+details.
+
+| | Woof 4B | MiniCPM-V 35B-A3B |
+|---|---|---|
+| 24 small bilingual tasks | 22/24 | 24/24 in every run. The gap is two arithmetic items and is **not significant** (p = 0.5) |
+| First text, short benchmark prompt | 0.16 s | 2.30 s (p90 2.44 s) |
+| First text, prompt of about 500 / 1,000 / 2,000 tokens | 1.1 / 2.2 / 4.2 s | 20–24 / 40–47 / 83–94 s: about 40 ms per prompt token |
+| First text, next turn of a conversation | 0.26 s | 4.9 s |
+| Decode speed | about 23–24 tok/s | 5.9 tok/s. OpenBMB quotes 13+ tok/s, and the gap is unexplained |
+| First audio in voice mode | 1.5 s after you stop speaking ([D8](docs/architecture-plan-on-device-and-orchestration.md#11-device-checklist)) | 7.5 s after the request (p90 8.5 s), about 8.6 s after you stop speaking; 9.3 s after a barge-in (p90 11.8 s) |
+| Memory | 2.6–2.9 GB, weights included | 2.78 GB, **plus** 1.65 GB of memory-mapped weights that this figure leaves out (4.41 GB resident) |
+| Heat and battery | — | Every benchmark run ended at `serious`. Battery use is not measured yet (D24) |
+
+The 35B runs without the DSpark draft model: on the phone the draft made the first text slower, didn't
+speed up decoding by the 10% required, and pushed resident memory to 5.2–6.0 GB. **In voice mode the 35B
+misses the target** of first audio within 5 s (p50), which is why this version hides it. The runtime keeps a
+small Metal patch that adds autorelease pools. It made no measurable difference on the iPhone (D20 A/B) and
+does no harm, so the published runtime stays as it is; the patch goes only when the runtime is rebuilt for
+another reason.
+
+The full record is in [docs/minicpm-evaluation.md](docs/minicpm-evaluation.md): every run, the memory
+accounting, the device checks that are still pending, and how to run the benchmarks yourself.
 
 ## Use Doubao, DeepSeek, or OpenAI instead of Claude
 
@@ -134,7 +251,7 @@ Web search is only available with Claude.
           └──────────── AVAudioPlayerNode ◀┘ ─▶ speaker
 ```
 
-The code is split in three:
+The code is split in four:
 
 - **`AssistantKit/`** is a Swift package with everything that isn't iOS-specific, all covered by unit tests:
   - the Claude streaming client with its tool loop, and the OpenAI-compatible client
@@ -146,6 +263,12 @@ The code is split in three:
   - routing, tools, deep mode and voice-latency logic, and the on-device engine's session planning and
     drafting
 - **`LocalEngine/`** is the on-device inference engine (MLX), tested on a Mac GPU in CI.
+- **`MiniCPM/`** runs MiniCPM-V 4.7 on Apple devices through a prebuilt, pinned llama.cpp-omni runtime. It
+  holds:
+  - the 1B photo reader;
+  - the 35B behind "Most accurate on device" (hidden in this version);
+  - their downloads;
+  - a benchmark command-line tool.
 - **`AlvinAssistant/`** is the iOS app:
   - SwiftUI views
   - SwiftData storage
@@ -213,12 +336,18 @@ Swift has no official Anthropic SDK, so `ClaudeProvider` calls the Messages API 
 
 ```bash
 swift test --package-path AssistantKit
+swift test --package-path MiniCPM      # the model tests skip unless model files are given
+python3 -m unittest discover -s scripts -p 'test_*.py'
+swiftc -parse-as-library AlvinAssistant/Chat/PendingPhoto.swift scripts/check_pending_photo.swift \
+  -o /tmp/check_pending_photo && /tmp/check_pending_photo    # the attached-photo logic; the app has no test target
 ```
 
-`.github/workflows/ios.yml` runs these tests and builds the app with Xcode on every push.
-`.github/workflows/local-engine.yml` tests the on-device engine on a Mac GPU, and `model-facts.yml` and
-`drafter-lab.yml` measure the models; see
+`.github/workflows/ios.yml` runs on every push and pull request, except ones that change only docs or
+scripts. It runs these tests and builds the app with Xcode, and it also runs AssistantKit's tests on Linux. `.github/workflows/local-engine.yml` tests the on-device engine on a
+Mac GPU, and `model-facts.yml` and `drafter-lab.yml` measure the models; see
 [the CI section of the architecture doc](docs/architecture-plan-on-device-and-orchestration.md#10-ci-workflows-and-how-to-read-them).
+The MiniCPM benchmarks and the slower model tests are described in
+[the MiniCPM-V evaluation](docs/minicpm-evaluation.md#9-running-the-benchmarks).
 
 ## Security note
 
@@ -230,7 +359,8 @@ have the app authenticate to that instead.
 
 - **Speech-to-speech mode** (the OpenAI Realtime API or Doubao's realtime voice model) for the lowest possible
   latency and more expressive voices
-- **Camera mode:** show the assistant what you're looking at (Claude supports images)
+- **Send the photo itself to Claude** when the on-device reading isn't enough (Claude supports images).
+  Today only the text the iPhone read is sent.
 - **More personal tools:** contacts and messages, next to the reminders, calendar and timer tools
 - **iOS 26 `SpeechAnalyzer`** for faster, more accurate on-device recognition
 - **Shortcuts, the Action button, or a widget** to jump straight into voice mode

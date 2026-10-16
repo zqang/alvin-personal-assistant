@@ -1,4 +1,6 @@
 import AssistantKit
+import MiniCPM
+import PhotosUI
 import SwiftUI
 import UIKit
 
@@ -7,11 +9,19 @@ struct ChatView: View {
     var openSettings: () -> Void
 
     @Environment(SettingsStore.self) private var store
+    @Environment(\.scenePhase) private var scenePhase
     @State private var controller = ChatController()
     @State private var draft = ""
     /// "Think deeper" is on for the next message.
     @State private var thinkDeeper = false
     @State private var voiceSession: VoiceSession?
+    /// The photo attached to the next message, read while the user types.
+    @State private var photo: PendingPhoto?
+    @State private var showsPhotoPicker = false
+    @State private var pickedPhoto: PhotosPickerItem?
+    @State private var showsCamera = false
+    /// The last photo picked or taken couldn't be opened.
+    @State private var photoUnopened = false
     @FocusState private var composerFocused: Bool
 
     var body: some View {
@@ -27,6 +37,7 @@ struct ChatView: View {
                             message: message,
                             activity: message.status == .streaming ? controller.activity : nil,
                             routedEngine: controller.engine(for: message),
+                            livePhotoNote: controller.livePhotoNote(for: message),
                             // Only a failed reply offers Retry; this reads its tool rounds.
                             canRetry: message.status != .failed || controller.canRetry(message),
                             onRetry: { controller.retry(message, in: conversation, store: store) }
@@ -53,6 +64,12 @@ struct ChatView: View {
             // Opening the composer warms the connection, and the on-device model when it may answer.
             if composerFocused {
                 pipeline.prewarm(inputIsVoice: false)
+            }
+        }
+        .onChange(of: scenePhase) {
+            // Leaving the screen stopped the attached photo's read; it runs again on return.
+            if scenePhase == .active {
+                photo?.startReading { MiniCPMHost.shared.readPhoto($0) }
             }
         }
     }
@@ -85,7 +102,20 @@ struct ChatView: View {
             if canThinkDeeper {
                 thinkDeeperToggle
             }
+            if let photo {
+                pendingPhotoRow(photo)
+            } else if photoUnopened {
+                Label("That photo couldn't be opened.", systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             HStack(alignment: .bottom, spacing: 10) {
+                if photoReaderReady {
+                    photoMenu
+                        .font(.system(size: 34))
+                        .symbolRenderingMode(.hierarchical)
+                }
                 TextField("Message", text: $draft, axis: .vertical)
                     .lineLimit(1...6)
                     .focused($composerFocused)
@@ -102,6 +132,97 @@ struct ChatView: View {
         .padding(.horizontal)
         .padding(.vertical, 8)
         .background(.bar)
+        // Compatible: a JPEG or HEIC rendition rather than, say, a 75 MB ProRAW original.
+        .photosPicker(isPresented: $showsPhotoPicker, selection: $pickedPhoto, matching: .images, preferredItemEncoding: .compatible)
+        .onChange(of: pickedPhoto) {
+            guard let item = pickedPhoto else { return }
+            pickedPhoto = nil
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    await attach(data)
+                } else {
+                    photoUnopened = true
+                }
+            }
+        }
+        .fullScreenCover(isPresented: $showsCamera) {
+            ZStack(alignment: .topLeading) {
+                Color.black.ignoresSafeArea()
+                CameraFeedView { data in
+                    showsCamera = false
+                    Task { await attach(data) }
+                }
+                Button("Cancel") { showsCamera = false }
+                    .foregroundStyle(.white)
+                    .padding()
+            }
+        }
+    }
+
+    /// Photo controls show only once the on-device photo reader is ready; Settings says how to get it.
+    private var photoReaderReady: Bool {
+        MiniCPMHost.shared.status[.photoReader] == .ready
+    }
+
+    private var photoMenu: some View {
+        Menu {
+            Button {
+                showsCamera = true
+            } label: {
+                Label("Take Photo", systemImage: "camera")
+            }
+            Button {
+                showsPhotoPicker = true
+            } label: {
+                Label("Choose Photo", systemImage: "photo.on.rectangle")
+            }
+        } label: {
+            Image(systemName: "camera.circle.fill")
+        }
+        .accessibilityLabel("Attach a photo")
+    }
+
+    /// The attached photo and what the iPhone reads in it so far.
+    private func pendingPhotoRow(_ photo: PendingPhoto) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            PhotoThumbnail(data: photo.jpeg, contentMode: .fill)
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(photo.failed ? PendingPhoto.unreadable : photo.finished ? "What the iPhone read" : "Reading the photo…")
+                    .font(.footnote.weight(.medium))
+                if !photo.failed, !photo.note.trimmed.isEmpty {
+                    Text(photo.note.trimmed)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                photo.cancel()
+                self.photo = nil
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Remove photo")
+        }
+    }
+
+    /// Attaches a photo from the camera or the library and starts reading it.
+    private func attach(_ data: Data) async {
+        // A large photo takes a moment to decode, so off the main actor.
+        guard let prepared = await Task.detached(priority: .userInitiated, operation: { PendingPhoto(imageData: data) }).value else {
+            photoUnopened = true
+            return
+        }
+        photoUnopened = false
+        photo?.cancel()
+        prepared.startReading { MiniCPMHost.shared.readPhoto($0) }
+        photo = prepared
     }
 
     @ViewBuilder
@@ -113,7 +234,7 @@ struct ChatView: View {
                 Image(systemName: "stop.circle.fill")
             }
             .accessibilityLabel("Stop generating")
-        } else if draft.trimmed.isEmpty {
+        } else if draft.trimmed.isEmpty, photo == nil {
             Button {
                 startVoice()
             } label: {
@@ -152,13 +273,15 @@ struct ChatView: View {
 
     private func send() {
         let text = draft
-        guard !text.trimmed.isEmpty else { return }
+        guard !text.trimmed.isEmpty || photo != nil else { return }
         let deep = thinkDeeper && canThinkDeeper
         let sent = deep
-            ? controller.sendDeep(text, in: conversation, store: store)
-            : controller.send(text, in: conversation, store: store)
+            ? controller.sendDeep(text, photo: photo, in: conversation, store: store)
+            : controller.send(text, photo: photo, in: conversation, store: store)
         guard sent else { return }
         draft = ""
+        photo = nil
+        photoUnopened = false
         if deep {
             thinkDeeper = false
         }
@@ -175,6 +298,8 @@ struct MessageRow: View {
     var activity: String?
     /// The engine that answered, when known; "On device" shows for the on-device model.
     var routedEngine: ReplyEngine? = nil
+    /// What the iPhone has read so far in the message's photo, while the read runs.
+    var livePhotoNote: String? = nil
     /// False for a failed reply that called a tool that acts (a reminder, an event, a timer):
     /// answering again would repeat the action, so it offers no Retry.
     var canRetry: Bool = true
@@ -193,6 +318,15 @@ struct MessageRow: View {
         HStack {
             Spacer(minLength: 48)
             VStack(alignment: .trailing, spacing: 4) {
+                if let photo = message.photoData {
+                    PhotoThumbnail(data: photo)
+                        .frame(maxWidth: 220, maxHeight: 220)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    if let note = message.photoNote ?? livePhotoNote {
+                        PhotoNoteView(note: note, reading: message.photoNote == nil)
+                            .frame(maxWidth: 220)
+                    }
+                }
                 Text(message.text)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
@@ -272,6 +406,27 @@ struct MessageRow: View {
             UIPasteboard.general.string = message.text
         } label: {
             Label("Copy", systemImage: "doc.on.doc")
+        }
+    }
+}
+
+/// What the iPhone read in a sent photo, folded away under its thumbnail.
+private struct PhotoNoteView: View {
+    let note: String
+    /// The read is still running, so `note` is still growing.
+    var reading = false
+
+    var body: some View {
+        DisclosureGroup {
+            Text(note.trimmed)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            Label(reading ? "Reading the photo…" : "What the iPhone read", systemImage: "text.viewfinder")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
     }
 }
