@@ -58,7 +58,8 @@ import UIKit
 
     /// What `model` needs free to load, as `os_proc_available_memory` counts it (mapped weights
     /// aside): its peak footprint plus `runBytes` (decision 21: 4.3 GB for the 35B, 2.2 GB for the
-    /// 1B). D18 measured peaks of 2.12–2.73 GB for the 35B and 1.26–1.38 GB for the 1B.
+    /// 1B). D18 measured load-and-reply peaks of 2.12–2.69 GB for the 35B (about 2.73 GB in use
+    /// once its expert cache filled) and 1.26–1.38 GB for the 1B.
     nonisolated static func loadBytes(_ model: Model) -> Int {
         (model == .accurate ? 3_700_000_000 : 1_600_000_000) + runBytes
     }
@@ -80,6 +81,8 @@ import UIKit
 
     /// Tests pass their own folders; the app uses the artifacts' own. Files found there are
     /// verified now (hashed once, then compared by size and date), so `status` is known early.
+    /// While "Most accurate on device" is hidden, the 35B's files are only shown to be deleted, so
+    /// they aren't checked and its status stays `.notDownloaded`.
     init(photoReaderDirectory: URL = MiniCPMArtifacts.directory, accurateDirectory: URL = MiniCPM35BArtifacts.directory) {
         self.photoReaderDirectory = photoReaderDirectory
         self.accurateDirectory = accurateDirectory
@@ -98,7 +101,8 @@ import UIKit
             MainActor.assumeIsolated { self?.becameActive() }
         }
         #endif
-        for model in [Model.photoReader, .accurate] where FileManager.default.fileExists(atPath: directory(model).path) {
+        let checked: [Model] = Self.accurateEligible() ? [.photoReader, .accurate] : [.photoReader]
+        for model in checked where FileManager.default.fileExists(atPath: directory(model).path) {
             start(model, download: false)
         }
     }
@@ -140,7 +144,8 @@ import UIKit
 
     /// Whether "Most accurate on device" is offered. The owner hid it on 16 Oct 2026 (decision 31):
     /// in voice mode the 35B's first words took p50 7.5 s / p90 8.5 s against D23's 5 s / 8 s line.
-    /// Return `MiniCPM35BArtifacts.eligible(physicalMemory:)` (12 GB iPhones) to offer it again.
+    /// Return `MiniCPM35BArtifacts.eligible(physicalMemory:)` (12 GB iPhones) to offer it again; it
+    /// then starts off for everyone, as `SettingsStore` saved it off while hidden.
     public static func accurateEligible(physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Bool {
         false
     }

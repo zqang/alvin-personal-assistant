@@ -550,11 +550,13 @@ on. The engine shows as "On device · MiniCPM-V 35B".
 **Eligibility and files.**
 
 - **Who can turn the mode on.** Nobody, in this version: `MiniCPMHost.accurateEligible()` returns false
-  (decision 31, after D23 failed). `SettingsStore` turns off a setting an earlier build left on, and when 35B
-  files are on the phone, Settings shows a "MiniCPM-V 35B files" section with their state and Delete only, no
-  download. To offer the mode again, return `MiniCPM35BArtifacts.eligible(physicalMemory:)` there. It is then
-  offered when `physicalMemory ≥ 11e9`; a 12 GB iPhone reports 12.26e9, so a 12 GiB test would reject it.
-  Turning it on needs Woof downloaded, plus the missing bytes and 1 GB free.
+  (decision 31, after D23 failed). `SettingsStore` turns off and saves a setting an earlier build left on.
+  When 35B files are on the phone, Settings shows a "MiniCPM-V 35B files" section with Delete only, no
+  download, under every provider; `MiniCPMHost` doesn't check those files at launch. To offer the mode again,
+  return `MiniCPM35BArtifacts.eligible(physicalMemory:)` there. It is then offered when
+  `physicalMemory ≥ 11e9`; a 12 GB iPhone reports 12.26e9, so a 12 GiB test would reject it. It starts off
+  for everyone, since the setting was saved off while hidden. Turning it on needs Woof downloaded, plus the
+  missing bytes and 1 GB free.
 - **Loading.** Loading needs `os_proc_available_memory() ≥ 4.3 GB` after Woof is evicted: 3.7 GB for the
   model (decision 21's 3.65 GB, which was the `balanced` profile with the draft) plus `runBytes` (600 MB).
   D18 passed with it; the production profile's own load-and-reply peak was 2.12–2.69 GB.
@@ -781,7 +783,7 @@ offset, such as `2026-10-07T17:00`.
 | `fillerDelay` | Voice responsiveness › Say "One moment" after | 1.8 s | 1.0–4.0 s. |
 | `turnChime` | Voice responsiveness › Chime when I finish speaking | off | |
 | `bargeInDucking` | Voice responsiveness › Lower the voice when I talk over it | on | |
-| `accurateOnDevice` | Most accurate on device | off | **Hidden in this version** (decision 31), and turned off at launch if an earlier build left it on. When 35B files are on the phone, a "MiniCPM-V 35B files" section shows them with Delete only. Offered again, it shows when `physicalMemory ≥ 11e9` and needs Woof downloaded and the 35B files (about 15.5 GB). See [§4.12](#412-minicpm-v-on-device). |
+| `accurateOnDevice` | Most accurate on device | off | **Hidden in this version** (decision 31), and turned off and saved at launch if an earlier build left it on. When 35B files are on the phone, a "MiniCPM-V 35B files" section shows them with Delete only, under every provider. Offered again, it shows when `physicalMemory ≥ 11e9` and needs Woof downloaded and the 35B files (about 15.5 GB). See [§4.12](#412-minicpm-v-on-device). |
 
 Routing and Deep thinking appear with Claude as the provider; On-device engine with "On this iPhone" or
 automatic routing; Tools unless the provider is OpenAI-compatible. Settings saved by older builds load with
@@ -889,7 +891,7 @@ What only a run on an iPhone can settle. Run the benchmark from a **Release** bu
 | D17 | Photo flow end to end, and the camera next to the voice audio engine | Chat answered by Woof and by Claude (only the note sent); a poster becomes a calendar event through the permission prompt; in voice mode, the shutter works while listening, echo cancellation and barge-in hold, a barge-in during a read cancels without a reload, and the next turn carries the photo | [Evaluation § Photo flow](minicpm-evaluation.md#7-photo-flow) |
 | D18 | Memory over 20 turns each of Woof + Qwen3-ASR + 1B, and of 35B + Qwen3-ASR + 1B | Peak `phys_footprint`, `resident_size` and `weights_bytes`; no jetsam | The 4.3 GB and 600 MB constants; [evaluation § Memory](minicpm-evaluation.md#4-memory) |
 | D19 | Locking or switching apps during a 1B read, a 35B reply and a prefix save | By hand, with Mac logs | Pass: no GPU abort or crash, and replies work again on return |
-| D20 | Whether the Metal autorelease patch helps | 3 load/unload cycles of 35B → Woof → 1B | Keep the patch if the footprint returns to within 300 MB of baseline and Woof loads; drop it if it has no effect |
+| D20 | Whether the Metal autorelease patch helps | 3 load/unload cycles of 35B → Woof → 1B | Keep the patch if the footprint returns to within 300 MB of baseline and Woof loads; drop it if it has no effect. It had none, and the owner kept it anyway: dropping it alone would change the release asset (results below) |
 | D21 | 35B eligibility and download | Record `physicalMemory`. Check that it refuses below the missing bytes + 1 GB free, that the existing folder is reused, that the projector is removed (1.12 GB), the first verification time, backup exclusion, and that Delete frees about 15.5 GB | The sheet's size and time copy |
 | D22 | 35B profile | ABBA with target-only, `baseline` and `balanced`: the 24-task suite, 8 performance prompts, 500/1,000/2,000-token prompts and 5-turn reuse | `MiniCPMSession.production` under the rule in [§4.12](#412-minicpm-v-on-device); G1b; the README table and the sheet's tok/s |
 | D23 | 35B voice latency to first audio, p50 and p90: cold start from the disk prefix and without one (the prefix file is written first), append, barge-in then `replaceLastReply`, a replaced tentative turn, and a voice and a typed conversation that run past the context budget (the rebuild's stall and how often it comes); checkpoint size and time | Voice sessions with the latency report | Pass: append and barge-in p50 ≤ 5 s and p90 ≤ 8 s, cold start ≤ 10 s. Otherwise the copy is corrected and the owner re-tunes or hides the mode (`MiniCPMHost.accurateEligible` returns false) |

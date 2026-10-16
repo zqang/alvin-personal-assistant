@@ -124,7 +124,9 @@ private struct MiniCPMModelRows: View {
                         }
                     }
                 } message: {
-                    Text("This frees \(Self.size(bytesOnDisk)). Using it again means downloading about \(Self.size(downloadBytes)) over Wi-Fi.")
+                    Text(allowsDownload
+                         ? "This frees \(Self.size(bytesOnDisk)). Using it again means downloading about \(Self.size(downloadBytes)) over Wi-Fi."
+                         : "This frees \(Self.size(bytesOnDisk)).")
                 }
         }
     }
@@ -132,6 +134,7 @@ private struct MiniCPMModelRows: View {
     private var statusText: String {
         switch status {
         case .notDownloaded:
+            if !allowsDownload { return "Not used in this version." }
             return bytesOnDisk > 0
                 ? "Partly downloaded: \(Self.size(bytesOnDisk)) of about \(Self.size(downloadBytes)). Finished files are kept."
                 : "Not downloaded. It downloads over Wi-Fi only."

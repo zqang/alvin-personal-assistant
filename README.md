@@ -153,13 +153,15 @@ started speaking 7.5 s after the request at the median (8.5 s p90), and 9.3 s af
 p90), against a target of 5 s (8 s p90) (D23). So on 16 October 2026 the owner hid it (decision 31):
 
 - `MiniCPMHost.accurateEligible()` returns false, so the switch and the 35B download don't appear.
-- If an earlier build turned the mode on, the app turns it off when it starts.
+- If an earlier build turned the mode on, the app turns it off when it starts, and saves that.
 - If an earlier build downloaded the 35B, **Settings › MiniCPM-V 35B files** shows the files with **Delete**
-  only, to free the 15.5 GB. It offers no download.
+  only, to free the 15.5 GB, whichever provider is chosen. It offers no download, and the app doesn't check
+  the files when it starts.
 
 To offer the mode again, change that one line in `MiniCPM/Sources/MiniCPM/MiniCPMHost.swift` back to
 `MiniCPM35BArtifacts.eligible(physicalMemory:)`. It's then offered on 12 GB iPhones, other iPhones don't show
-it, and the rest of this section applies. Re-tune it and run D23 again first.
+it, and the rest of this section applies. It starts off for everyone, including anyone who had it on before
+it was hidden: the app saved that setting off. Re-tune it and run D23 again first.
 
 The mode is optional and needs an iPhone with 12 GB of memory. With **Settings › Most accurate on device**
 on, replies that would be answered on the iPhone come from **MiniCPM-V 4.7 35B-A3B** instead of Woof. It's

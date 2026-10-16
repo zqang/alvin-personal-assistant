@@ -179,8 +179,12 @@ struct SettingsView: View {
         if routesAutomatically {
             onDeviceModelSection
         }
-        if usesOnDeviceModel {
+        // Hidden, the mode's section only shows 35B files an earlier build left, to delete them
+        // under any provider.
+        if usesOnDeviceModel || !MiniCPMHost.accurateEligible() {
             AccurateOnDeviceSection(store: store)
+        }
+        if usesOnDeviceModel {
             OnDeviceEngineSection(store: store)
         }
         if store.settings.provider != .openAICompatible {
@@ -309,7 +313,7 @@ struct SettingsView: View {
                         }
                     }
                 } message: {
-                    Text("On-device replies, photo reading, Most accurate on device and Qwen3-ASR listening stop until their models are downloaded again, over Wi-Fi.")
+                    Text("On-device replies, photo reading and Qwen3-ASR listening stop until their models are downloaded again, over Wi-Fi.")
                 }
             }
             NavigationLink("Acknowledgements") { AcknowledgementsView() }

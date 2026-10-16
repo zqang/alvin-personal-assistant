@@ -462,10 +462,10 @@ scripted conversations of 10 requests plus 2 cold starts without a prefix file; 
 
 **Decision 31: the mode is hidden.** On 16 October 2026 the owner chose to merge with the mode hidden
 rather than re-tune it now. `MiniCPMHost.accurateEligible` returns false, so Settings doesn't offer the mode,
-a setting an earlier build left on is turned off when the app starts, and 35B files an earlier build
-downloaded are shown only to be deleted. The code, the Settings copy with the measured times and the
-benchmarks stay. Before the mode is offered again, re-tune it (for example a shorter turn scaffold, or
-speaking a first clause sooner) and run D23 again.
+a setting an earlier build left on is turned off and saved when the app starts, and 35B files an earlier
+build downloaded are shown only to be deleted, under every provider. The code, the Settings copy with the
+measured times and the benchmarks stay. Before the mode is offered again, re-tune it (for example a shorter
+turn scaffold, or speaking a first clause sooner) and run D23 again. It then starts off for everyone.
 
 **D24 (manual), not needed while the mode is hidden.** A 10-minute 35B voice conversation, then Low Power
 Mode. Record the battery % per 10 minutes and the time until `.serious`. Check that Woof takes over within

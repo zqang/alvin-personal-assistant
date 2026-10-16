@@ -22,7 +22,7 @@ struct OnDeviceEngineSection: View {
             Text("On-device engine")
         } footer: {
             if showsAdvanced {
-                Text("The Alvin engine keeps the conversation in memory between replies, keeps the processed system prompt on disk, checks several drafted words at once, and lets the model use your reminders, calendar and timers. “Automatic” uses it once its self-test has passed on this iPhone for this model and app version, and MLX's stock session until then. Speed is measured once per model on this iPhone. Fast GPU kernels can be switched on once “Test fast kernels” shows they cut the time to check 8 drafted words by at least \(Int(EngineSetup.kernelGainThreshold * 100))% here. Checks need the model loaded. MiniCPM-V, which reads photos and answers in Most accurate on device, runs on its own engine, so none of these apply to it.")
+                Text("The Alvin engine keeps the conversation in memory between replies, keeps the processed system prompt on disk, checks several drafted words at once, and lets the model use your reminders, calendar and timers. “Automatic” uses it once its self-test has passed on this iPhone for this model and app version, and MLX's stock session until then. Speed is measured once per model on this iPhone. Fast GPU kernels can be switched on once “Test fast kernels” shows they cut the time to check 8 drafted words by at least \(Int(EngineSetup.kernelGainThreshold * 100))% here. Checks need the model loaded. MiniCPM-V, which reads photos, runs on its own engine, so none of these apply to it.")
             } else {
                 Text("The defaults suit most iPhones. Advanced settings choose the engine and speculative decoding, and run the self-test and benchmark.")
             }
