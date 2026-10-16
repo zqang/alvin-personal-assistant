@@ -65,8 +65,9 @@ struct ProcessMemory: Equatable {
     }
 }
 
-/// Waits while the app's MiniCPM host downloads or verifies `model`'s files (it checks them at
-/// launch), so a benchmark never writes the same folder and finds them verified.
+/// Waits while the app's MiniCPM host downloads or verifies `model`'s files (it checks the 1B, and
+/// the 35B while its mode is offered, at launch), so a benchmark never writes the same folder and
+/// finds them verified.
 // ponytail: polls once a second; observation tracking is the upgrade if the wait ever matters.
 @MainActor
 func waitForMiniCPMFiles(_ model: MiniCPMHost.Model, progress: (String) -> Void) async throws {

@@ -55,6 +55,8 @@ struct SettingsView: View {
         }
         .onChange(of: LocalModelHost.shared.status) { downloadedBytes = LocalModelHost.downloadedBytes() }
         .onChange(of: MiniCPMHost.shared.status) { downloadedBytes = LocalModelHost.downloadedBytes() }
+        // While the 35B mode is hidden its status never changes, so its Delete shows up only here.
+        .onChange(of: MiniCPMHost.shared.bytesOnDisk(.accurate) > 0) { downloadedBytes = LocalModelHost.downloadedBytes() }
         .onChange(of: anthropicKey) { store.setSecret(anthropicKey, for: .anthropic) }
         .onChange(of: compatibleKey) { store.setSecret(compatibleKey, for: .compatible) }
         .onChange(of: openAIKey) { store.setSecret(openAIKey, for: .openAI) }
