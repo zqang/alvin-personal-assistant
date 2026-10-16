@@ -3,6 +3,7 @@ import MiniCPM
 import PhotosUI
 import SwiftUI
 import UIKit
+import VoiceKit
 
 struct ChatView: View {
     let conversation: Conversation
@@ -79,10 +80,9 @@ struct ChatView: View {
         controller.pipeline(for: store)
     }
 
-    /// Whether "Think deeper" is offered: the pipeline routes deep replies, Claude answers, and
-    /// deep mode isn't off.
+    /// Whether "Think deeper" is offered: Claude answers, and deep mode isn't off.
     private var canThinkDeeper: Bool {
-        !(pipeline is LegacyReplyPipeline) && store.settings.provider == .anthropic && store.settings.deepMode != .off
+        store.settings.provider == .anthropic && store.settings.deepMode != .off
     }
 
     private var composer: some View {
@@ -289,7 +289,7 @@ struct ChatView: View {
 
     private func startVoice() {
         composerFocused = false
-        voiceSession = VoiceSession(conversation: conversation, store: store)
+        voiceSession = VoiceSession(conversation: conversation, pipeline: OrchestratedReplyPipeline(store: store), host: store)
     }
 }
 

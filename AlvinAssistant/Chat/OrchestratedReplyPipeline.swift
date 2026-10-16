@@ -1,12 +1,13 @@
 import AssistantKit
 import Foundation
 import MiniCPM
+import VoiceKit
 
 /// The app's reply pipeline: routing between Claude and the on-device model, client tools, deep
 /// mode, early start and connection prewarm (plan §5).
 ///
 /// Each reply:
-/// 1. reads the conversation (plus `pendingUser`, for a voice reply started early) into turns;
+/// 1. reads the request's messages (plus `pendingUser`, for a voice reply started early) into turns;
 /// 2. builds the engines: Claude with the device tools, deep mode, the on-device model with its
 ///    tool subset (when downloaded) or, in "Most accurate on device", MiniCPM-V 35B (see
 ///    `accurateAnswers`), or the OpenAI-compatible service;
@@ -46,7 +47,7 @@ final class OrchestratedReplyPipeline: ReplyPipeline {
 
     func stream(_ request: ReplyRequest) -> AsyncThrowingStream<AssistantEvent, Error> {
         let settings = store.settings
-        var messages = request.conversation.orderedMessages.map(\.stored)
+        var messages = request.messages
         if let pendingUser = request.pendingUser {
             messages.append(pendingUser)
         }

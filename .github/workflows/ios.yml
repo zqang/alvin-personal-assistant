@@ -33,13 +33,20 @@ jobs:
       - name: Unit tests (MiniCPM)
         run: swift test --package-path MiniCPM
 
-      # scripts/** is in paths-ignore, so these run with the code they check.
-      - name: Script and photo checks
+      # VoiceKit is iOS only (audio session, UIKit), so its tests run on the first iPhone simulator this
+      # Xcode offers.
+      - name: Unit tests (VoiceKit)
+        working-directory: VoiceKit
         run: |
-          python3 -m unittest discover -s scripts -p 'test_*.py'
-          swiftc -parse-as-library AlvinAssistant/Chat/PendingPhoto.swift scripts/check_pending_photo.swift \
-            -o "$RUNNER_TEMP/check_pending_photo"
-          "$RUNNER_TEMP/check_pending_photo"
+          id=$(xcodebuild -showdestinations -scheme VoiceKit \
+            | awk -F'id:' '/platform:iOS Simulator/ && /name:iPhone/ && !found { split($2, a, ","); print a[1]; found = 1 }')
+          test -n "$id"
+          xcodebuild test -quiet -scheme VoiceKit -destination "platform=iOS Simulator,id=$id" \
+            -derivedDataPath ../build/VoiceKitDerivedData -skipPackagePluginValidation -skipMacroValidation
+
+      # scripts/** is in paths-ignore, so these run with the code they check.
+      - name: Script checks
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
       - name: Install the Metal Toolchain
         run: |

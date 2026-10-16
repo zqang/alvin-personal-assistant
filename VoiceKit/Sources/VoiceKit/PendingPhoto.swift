@@ -9,19 +9,20 @@ import UniformTypeIdentifiers
 /// turn's request then waits for the note (`noteUnread`), which goes into the turn's context.
 @MainActor
 @Observable
-final class PendingPhoto {
-    /// The note of a photo whose read failed.
-    static let unreadable = "The photo couldn't be read on this iPhone."
+public final class PendingPhoto {
+    /// The note of a photo whose read failed. It stays in English whatever the language: it's what
+    /// the model reads, and hosts match it to read such a photo again.
+    public static let unreadable = "The photo couldn't be read on this iPhone."
     /// The longest edge a photo keeps: three 448-px slices of the reader's grid.
     nonisolated static let maxPixelSize = 1344
 
     /// The photo as stored and read: upright, at most `maxPixelSize`, JPEG.
-    let jpeg: Data
+    public let jpeg: Data
     /// What the reader has written so far.
-    private(set) var note = ""
+    public private(set) var note = ""
     /// The read ended, with `note` or in failure.
-    private(set) var finished = false
-    private(set) var failed = false
+    public private(set) var finished = false
+    public private(set) var failed = false
     @ObservationIgnored private var task: Task<Void, Never>?
     /// Which read is current, so a cancelled one can't write over its restart.
     @ObservationIgnored private var run = 0
@@ -32,7 +33,7 @@ final class PendingPhoto {
 
     /// Camera or library image data (HEIC, JPEG, PNG…) made ready to read. Nil when it isn't an
     /// image. Decoding can take a moment for a large photo, so it may run off the main actor.
-    nonisolated init?(imageData: Data) {
+    public nonisolated init?(imageData: Data) {
         guard let image = Self.downscaled(imageData, maxPixelSize: Self.maxPixelSize) else { return nil }
         let out = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
@@ -44,7 +45,7 @@ final class PendingPhoto {
 
     /// Starts reading with `read`, unless a read is running or finished. A read that was cancelled,
     /// by the caller or by the reader (the host stopping it), starts over.
-    func startReading(_ read: (Data) -> AsyncThrowingStream<String, Error>) {
+    public func startReading(_ read: (Data) -> AsyncThrowingStream<String, Error>) {
         guard !finished, task?.isCancelled ?? true else { return }
         run += 1
         let run = run
@@ -84,13 +85,13 @@ final class PendingPhoto {
         return failed ? Self.unreadable : note.trimmed
     }
 
-    func cancel() {
+    public func cancel() {
         task?.cancel()
     }
 
     /// What a photo sent without words asks, in the language the user speaks: Traditional Chinese
     /// for Taiwan, Hong Kong, Macau and Cantonese.
-    static func defaultQuestion(localeIdentifier: String) -> String {
+    public static func defaultQuestion(localeIdentifier: String) -> String {
         let id = localeIdentifier.lowercased().replacingOccurrences(of: "_", with: "-")
         guard id.hasPrefix("zh") || id.hasPrefix("yue") else { return "What's in this photo?" }
         let traditional = !id.contains("hans") && (id.hasPrefix("yue") || ["hant", "-tw", "-hk", "-mo"].contains { id.contains($0) })
@@ -103,9 +104,9 @@ final class PendingPhoto {
     /// `whileReading` runs once, when a note isn't ready yet. Throws `PhotoReadStopped` when the
     /// attached photo's read was cancelled; another photo's stopped read is left for a later turn
     /// (the host refuses reads in the background, where voice replies still run).
-    static func noteUnread(
-        _ messages: [ChatMessage],
-        attached: (user: ChatMessage, photo: PendingPhoto)?,
+    public static func noteUnread(
+        _ messages: [any VoiceMessage],
+        attached: (user: any VoiceMessage, photo: PendingPhoto)?,
         read: (Data) -> AsyncThrowingStream<String, Error>,
         whileReading: () -> Void
     ) async throws {
@@ -142,19 +143,24 @@ final class PendingPhoto {
 
 /// A photo's read stopped before it finished, so its turn has no note yet.
 struct PhotoReadStopped: LocalizedError {
-    var errorDescription: String? { "Reading the photo stopped before it finished. Try again." }
+    var errorDescription: String? { String(localized: "Reading the photo stopped before it finished. Try again.", bundle: .module) }
 }
 
 /// A stored photo, decoded once at a small size.
-struct PhotoThumbnail: View {
+public struct PhotoThumbnail: View {
     let data: Data
-    var contentMode: ContentMode = .fit
+    var contentMode: ContentMode
     @State private var image: CGImage?
 
-    var body: some View {
+    public init(data: Data, contentMode: ContentMode = .fit) {
+        self.data = data
+        self.contentMode = contentMode
+    }
+
+    public var body: some View {
         Group {
             if let image {
-                Image(image, scale: 1, label: Text("Attached photo"))
+                Image(image, scale: 1, label: Text("Attached photo", bundle: .module))
                     .resizable()
                     .aspectRatio(contentMode: contentMode)
             } else {

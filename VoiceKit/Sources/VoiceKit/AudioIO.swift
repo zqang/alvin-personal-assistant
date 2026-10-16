@@ -4,7 +4,7 @@ enum AudioError: LocalizedError {
     case microphoneUnavailable
 
     var errorDescription: String? {
-        "The microphone isn't available."
+        String(localized: "The microphone isn't available.", bundle: .module)
     }
 }
 

@@ -13,15 +13,12 @@ extension AssistantProfile {
     static let app = AlvinProfile.profile
 }
 
-/// Wires the app together at launch: the reply pipeline, the on-device host's prompt and network
-/// seams, MiniCPM-V's GPU lease, the engine extensions and the timer notifications.
+/// Wires the app together at launch: the on-device host's prompt and network seams, MiniCPM-V's
+/// GPU lease, the engine extensions and the timer notifications.
 /// `AlvinAssistantApp.init` calls `install(store:)` once, with the store the app then uses.
 @MainActor
 enum AppSetup {
     static func install(store: SettingsStore) {
-        // Routing, client tools, deep mode and early start for the chat and voice screens.
-        ReplyPipelines.make = { OrchestratedReplyPipeline(store: $0) }
-
         // The prewarm renders exactly the system prompt and tools that replies send.
         LocalModelHost.systemProvider = { settings in
             let prompt = LocalPromptFactory.make(settings: settings, store: store)
