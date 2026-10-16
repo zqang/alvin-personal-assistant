@@ -946,7 +946,7 @@ need a hand stay **manual**. Details, sample sizes and the harnesses used are in
 | D23 | **Fail.** First audio p50 / p90: append 7.53 / 8.47 s (n=30), barge-in then `replaceLastReply` 9.26 / 11.75 s (n=12), against 5 / 8 s. Cold start from the disk prefix 7.05 / 8.93 s (passes ≤ 10 s); without the prefix file 22.8 and 27.2 s. A replaced tentative turn 7.86 / 11.32 s. Checkpoints are 62.8 MiB, taken in 1.8–6.7 ms; rewinds take 2–13 ms. The time is the prefill of about 50 fed tokens (78.7 ms each) plus waiting for the first sentence. **Manual:** live speech, Qwen3-ASR on real audio, a conversation past the context budget. | Sheet copy corrected. **Decision 31: the mode is hidden** (`accurateEligible` returns false, 16 Oct). Its manual parts aren't needed for this merge; re-tune and run D23 again before offering the mode. |
 | D24 | **Manual**, not run. | Not needed while the 35B mode is hidden. |
 | D25 | **Manual**, not run. | Not needed while the 35B mode is hidden. |
-| D26 | Not run: it belongs to PR B (VoiceKit). | — |
+| D26 | **Pass, by hand** (16 Oct, the Release build of `b7eeaa8`, PR B before its rebase onto `main`): basic turns, barge-in, taking the turn back, speed, cues, mute, tap orb and the camera in voice mode behave the same as the PR A build. The Mac-captured console showed no errors and no crash. Not recorded separately: early start, ducking, Qwen3-ASR refinement, a headphone route change and the latency report's p50. | Voice behaviour unchanged by the VoiceKit move. |
 
 **Still to do by hand for this merge** (the photo reading that ships): Acknowledgements and the camera alert
 on the phone (D14), the 1B download (D15), the 4 real scenes (D16), the photo flow end to end (D17), and

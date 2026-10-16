@@ -745,3 +745,7 @@ The tests check these things:
   - the default question is in Simplified Chinese, Traditional Chinese or English.
 
 `.github/workflows/ios.yml` runs the same command on the first available iPhone simulator.
+
+On a device, voice mode hosted through VoiceKit behaved the same as before the move (check D26 in
+[the architecture doc's §11](architecture-plan-on-device-and-orchestration.md#11-device-checklist), passed by
+hand on an iPhone 17 Pro Max on 16 October 2026).
