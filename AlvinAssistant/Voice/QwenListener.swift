@@ -1,6 +1,7 @@
 import AssistantKit
 import Foundation
 import HuggingFace
+import LocalEngineHost
 import MLX
 import MLXAudioCore
 import MLXAudioSTT
@@ -72,7 +73,7 @@ final class QwenListener {
     /// Downloads the model the first time (about 1 GB, Wi-Fi only), then, if a voice session is
     /// open, loads and warms it up.
     func load() {
-        guard !LocalModelHost.shared.externalBenchmarkInProgress else { return }
+        guard !LocalEngineHost.shared.externalBenchmarkInProgress else { return }
         guard model == nil, loading == nil else { return }
         #if targetEnvironment(simulator)
         status = .failed("Qwen3-ASR needs a real iPhone. The Simulator uses Apple's recognizer.")
@@ -182,8 +183,8 @@ final class QwenListener {
         do {
             // Before about 1 GB comes down. Memory is checked only once it's downloaded: it is
             // short only while the reply model holds it, and the download is good for later.
-            if !LocalModelHost.shared.isDownloaded(Self.modelID),
-               let shortfall = LocalModelHost.storageShortfall("Qwen3-ASR", bytes: 1_000_000_000) {
+            if !LocalEngineHost.shared.isDownloaded(Self.modelID),
+               let shortfall = LocalEngineHost.storageShortfall("Qwen3-ASR", bytes: 1_000_000_000) {
                 status = .failed(shortfall)
                 loading = nil
                 return

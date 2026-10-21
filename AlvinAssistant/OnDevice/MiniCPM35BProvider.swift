@@ -1,5 +1,6 @@
 import AssistantKit
 import Foundation
+import LocalEngineHost
 import MiniCPM
 import UIKit
 

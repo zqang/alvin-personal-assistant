@@ -2,7 +2,7 @@ import AssistantKit
 import Foundation
 
 /// The system prompt and tools of on-device replies. Replies (`OrchestratedReplyPipeline`) and the
-/// prewarm (`LocalModelHost.systemProvider`) both take them from here, so the system prefix the
+/// prewarm (`LocalEngineHost.systemProvider`) both take them from here, so the system prefix the
 /// engine prepares ahead of time is exactly the one replies use.
 @MainActor
 enum LocalPromptFactory {

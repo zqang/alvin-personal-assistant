@@ -1,4 +1,5 @@
 import AssistantKit
+import LocalEngineHost
 import MiniCPM
 import SwiftUI
 
@@ -59,7 +60,7 @@ struct AccurateOnDeviceSection: View {
     }
 
     private var fallbackDownloaded: Bool {
-        LocalModelHost.shared.isDownloaded(store.settings.localModelID)
+        LocalEngineHost.shared.isDownloaded(store.settings.localModelID)
     }
 
     private var footer: String {

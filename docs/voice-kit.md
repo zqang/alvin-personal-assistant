@@ -248,17 +248,23 @@ when the turn is final.
 ## 6. Languages
 
 **What's on screen** comes from `VoiceKit/Sources/VoiceKit/Localizable.xcstrings`, in English and
-Simplified Chinese, looked up with `bundle: .module`. iOS resolves a package's strings in the app's own
-language, picked from the localizations the app declares (`CFBundleLocalizations` or its `.lproj` folders):
+Simplified Chinese. It follows the latest session's `settings.speechLocale`, from among the languages the
+app declares (`CFBundleLocalizations` or its `.lproj` folders). `VoiceSession` picks the catalog's matching
+localization when it's created and when it starts (`Bundle.voiceKitStrings`). When the app doesn't declare
+that language, the app's own language wins, as iOS would pick it:
 
-- **This app** is English-only (`knownRegions` is `en`), so the voice screen stays English even on a Chinese
-  iPhone.
-- **An app that declares `zh-Hans`** gets the Chinese strings when iOS runs it in Chinese. That depends on the
-  iPhone's language or the app's language in iOS Settings.
+- **This app** is English-only (`knownRegions` is `en`), so the voice screen stays English, even with Chinese
+  speech or on a Chinese iPhone.
+- **An app that declares `zh-Hans`** (Roam) gets the Chinese strings whenever its host's `speechLocale` is
+  Chinese, whatever the iPhone's language. It needs no extra host member.
 
-The SwiftUI `\.locale` environment doesn't change these strings, and neither does the `locale:` argument
-of `String(localized:)`. Both only affect formatting. A check on this Mac confirmed it: with the language
-set to `zh-Hans` and a bundle that has a `zh-Hans.lproj`:
+Until a session is created, iOS picks, as before. The catalog's English entry for "Thinking…" exists only so
+the built bundle has an `en.lproj`, which lets an app's English setting win on a Chinese iPhone. Keep it.
+
+VoiceKit picks the bundle itself because nothing else switches a package's strings at run time. The SwiftUI
+`\.locale` environment doesn't change them, and neither does the `locale:` argument of `String(localized:)`.
+Both only affect formatting. A check on this Mac confirmed it: with the language set to `zh-Hans` and a
+bundle that has a `zh-Hans.lproj`:
 
 - an executable that declares only `en` got the English string, even with `locale: zh-Hans`;
 - one that declares `en` and `zh-Hans` got the Chinese string.
@@ -268,10 +274,9 @@ set to `zh-Hans` and a bundle that has a `zh-Hans.lproj`:
 - speech recognition;
 - the built-in voice's language;
 - the spoken cues (`SpokenCue.phrase`, Chinese for any `zh…` locale);
-- the default question for a photo sent without words.
-
-Two spoken apologies are still English only: "Sorry, something went wrong." and "Sorry, I can't help with that
-one." Work item R8 fixes that.
+- the default question for a photo sent without words;
+- the two spoken apologies, "Sorry, something went wrong." and "Sorry, I can't help with that one."
+  (`VoiceSession.apology`, Chinese for any `zh…` locale, like the cues).
 
 **A new string** goes into the catalog with its Chinese translation. `testEveryCatalogKeyHasChinese` fails
 for any key without one.
@@ -290,13 +295,9 @@ Roam needs voice mode that:
 - works in both of its languages.
 
 The code in this section is a sketch for the Roam round (section 7.8), and nothing here compiles it. It
-was checked once, when this guide was written, against this branch's VoiceKit and AssistantKit for an iOS 18
-simulator. That check used stand-ins for:
-
-- Roam's `RoamStore`, `RoamRecord`, `AIResult` and `JSONValue`, using the names and signatures in
-  `ios/Roam/Core`;
-- two types the round adds or makes public: `LocalEngineHost` and `LocalProvider` (R1), and
-  `CommitGatedProvider` (R2).
+was last checked after R1, R2 and R8, against this branch's VoiceKit, AssistantKit and LocalEngine for an
+iOS 18 simulator. That check used stand-ins only for Roam's own `RoamStore`, `RoamRecord`, `AIResult` and
+`JSONValue`, using the names and signatures in `ios/Roam/Core`.
 
 R3–R5 write the real code in Roam and test it there.
 
@@ -317,6 +318,8 @@ packages:
     path: Vendor/personal-assistant/VoiceKit
   AssistantKit:
     path: Vendor/personal-assistant/AssistantKit
+  LocalEngine:
+    path: Vendor/personal-assistant/LocalEngine
 ```
 
 Both the `Roam` and `RoamPreview` targets need these dependencies:
@@ -324,10 +327,23 @@ Both the `Roam` and `RoamPreview` targets need these dependencies:
 ```yaml
 - package: VoiceKit
 - package: AssistantKit
+- package: LocalEngine
+  product: LocalEngineHost
 ```
 
-VoiceKit finds AssistantKit through its own `../AssistantKit` path inside the submodule. After R1, the
-on-device engine needs one more package entry. This repository needs no change for any of this.
+VoiceKit and LocalEngine find AssistantKit through their own `../AssistantKit` path inside the submodule.
+LocalEngine brings MLX, swift-transformers and swift-huggingface, pinned to exact versions in its
+`Package.swift`. This repository needs no change for any of this.
+
+**Building and running the on-device model:**
+
+- MLX compiles Metal shaders, so the Mac building Roam needs Xcode's Metal toolchain
+  (`xcodebuild -downloadComponent MetalToolchain`).
+- Both targets need the `com.apple.developer.kernel.increased-memory-limit` entitlement, as this app has in
+  `Config/AlvinAssistant.entitlements`. Without it, the default Woof 4B will likely fail the host's memory
+  check before it loads.
+- The model runs only on a real iPhone. In the simulator, the host's status is `.failed` and replies go to
+  the backend.
 
 The Info.plist already has the microphone, speech, camera and `audio` background entries (section 2). Its
 `zh-Hans.lproj/InfoPlist.strings` translates them.
@@ -570,14 +586,24 @@ struct RoamAssistantFailed: LocalizedError {
 
 - **The route.** `RouteDecider` runs with `.automatic(preferLocal:)`, which is true only for requests the
   profile classifies as app actions:
-  - an app action goes on device once the model is loaded, with the backend as the fallback (before that, it
-    goes to the backend);
+  - an app action goes on device once the model is loaded and the engine answers, with the backend as the
+    fallback (before that, it goes to the backend);
   - small talk in voice goes on device once the model is loaded;
   - offline, or without an account, everything goes on device;
   - everything else goes to the backend. When the backend can't be reached, the reply falls back to the
     device, except for complex questions (long or multi-part ones, comparisons and plans).
 - **The on-device side.** The model gets Roam's tools and `handoff_to_cloud`, so it can pass a question it
-  can't answer to the backend.
+  can't answer to the backend. Only the engine offers tools. Under the default `localEngineMode`
+  (`.automatic`), replies use the engine once its self-test has passed on that iPhone, which the first load
+  runs. Until then, MLX's stock session answers. It has no tools and no `SuccessClaim` guard, so it could say
+  "Saved" without saving. The route therefore treats the model as not ready for an app action until
+  `usesEngine(settings)` is true, as this app's `decide()` does. Offline nothing else can answer, so R5
+  decides what Roam says to an app action then.
+- **One set of settings.** Replies, the prewarm and the download all use the voice host's settings
+  (section 7.2). The model is `settings.localModelID`: Woof 4B by default, about 2.5 GB.
+- **Launch setup.** Roam calls `RoamVoiceSetup.install(store:)` once at launch. It sets the host's profile,
+  the prompt and tools the prewarm renders (the same ones replies send), whether the backend can be reached,
+  and the language of the host's own lines.
 - **Deep mode.** Roam has none.
 
 ```swift
@@ -595,19 +621,24 @@ final class RoamReplyPipeline: ReplyPipeline {
     var supportsEarlyStart: Bool { true }
 
     private var signedIn: Bool { store.session != nil && !store.isDemo }
+    /// The voice host's settings: replies, the prewarm and the download use the same ones.
+    private var settings: AssistantSettings { RoamVoiceHost(store: store).settings }
 
     func stream(_ request: ReplyRequest) -> AsyncThrowingStream<AssistantEvent, Error> {
+        let settings = settings
         let turns = PromptBuilder.turns(from: request.messages + [request.pendingUser].compactMap { $0 })
-        let system = PromptBuilder.systemPrompt(userName: store.session?.user.name ?? "", customInstructions: "", profile: .roam)
+        let system = RoamVoiceSetup.systemPrompt(store: store)
         let intents = AssistantProfile.roam.intents.classify(turns.last(where: { $0.role == .user })?.text ?? "")
         let local = LocalEngineHost.shared
+        let downloaded = local.isDownloaded(settings.localModelID)
         let signals = RouteSignals(
             // Roam's own actions prefer the device; everything else prefers the backend.
             policy: .automatic(preferLocal: intents.contains(.deviceAction)),
             isOnline: !store.isOffline,
             cloudConfigured: signedIn,
-            localAvailable: local.isDownloaded,
-            localReady: local.status == .ready,
+            localAvailable: downloaded,
+            // An app action needs the engine: the stock session has no tools.
+            localReady: local.status == .ready && (!intents.contains(.deviceAction) || local.usesEngine(settings)),
             inputIsVoice: request.inputIsVoice,
             deepMode: .off
         )
@@ -631,23 +662,67 @@ final class RoamReplyPipeline: ReplyPipeline {
         let tools = ToolRunner(registry: RoamTools.registry(store: store, tripID: tripID, handoff: signedIn), lenientInput: true)
         let engines = Orchestrator.Engines(
             cloud: signedIn ? backend : nil,
-            local: local.isDownloaded ? LocalProvider(settings: AssistantSettings(), tools: tools, handoffAvailable: signedIn, commitGate: gate) : nil
+            local: downloaded ? LocalProvider(settings: settings, tools: tools, handoffAvailable: signedIn, commitGate: gate) : nil
         )
         return Orchestrator(decision: decision, engines: engines).streamEvents(system: system, turns: turns)
     }
 
     func missingSetup() -> String? {
-        if signedIn || LocalEngineHost.shared.isDownloaded { return nil }
+        if signedIn || LocalEngineHost.shared.isDownloaded(settings.localModelID) { return nil }
         return store.l("Sign in, or download the on-device model, to talk to Roam.", "请登录或下载设备端模型，再与 Roam 对话。")
     }
 
     func prewarm(inputIsVoice: Bool) {
-        LocalEngineHost.shared.prewarm()
+        // Loads a downloaded model and makes its system prompt resident. It never downloads.
+        LocalEngineHost.shared.prewarm(settings: settings)
     }
 
     func displayName(for decision: RouteDecision?) -> String {
         decision?.engine == .local ? store.l("On this iPhone", "本机") : store.l("Roam assistant", "Roam 助手")
     }
+}
+
+/// The on-device host's ties to Roam, set once at launch.
+@MainActor
+enum RoamVoiceSetup {
+    /// The base system prompt of on-device replies. The prewarm renders the same one.
+    static func systemPrompt(store: RoamStore) -> String {
+        PromptBuilder.systemPrompt(userName: store.session?.user.name ?? "", customInstructions: "", profile: .roam)
+    }
+
+    static func install(store: RoamStore) {
+        LocalEngineHost.profile = .roam
+        // Exactly the prompt and tools that replies send, so the prefix the prewarm makes resident is
+        // reused. The tools' definitions don't depend on the trip.
+        LocalEngineHost.systemProvider = { _ in
+            let signedIn = store.session != nil && !store.isDemo
+            return (systemPrompt(store: store), RoamTools.registry(store: store, tripID: "", handoff: signedIn).definitions)
+        }
+        LocalEngineHost.isOnline = { !store.isOffline }
+        // The host's status lines and errors in Roam's language. Roam has one model, so its own
+        // wording drops the host's "pick a smaller model".
+        LocalEngineHost.localize = { english in
+            if english.hasPrefix("Not enough memory") {
+                return store.l("Not enough memory for the on-device model.", "内存不足，无法加载设备端模型。")
+            }
+            if english.hasPrefix("Not enough storage") {
+                return store.l("Not enough storage for the on-device model. Free up space and try again.", "存储空间不足，无法下载设备端模型。请释放空间后重试。")
+            }
+            if english.hasPrefix("The on-device model couldn't load") {
+                return store.l("The on-device model couldn't load. Try again.", "设备端模型无法加载，请重试。")
+            }
+            return store.l(english, hostChinese[english] ?? english)
+        }
+    }
+
+    private static let hostChinese = [
+        "On-device models need a real iPhone.": "设备端模型需要在 iPhone 真机上运行。",
+        "Connect to Wi-Fi to download the on-device model.": "请连接 Wi-Fi 以下载设备端模型。",
+        "Checking the on-device engine…": "正在检查设备端引擎…",
+        "Measuring the on-device engine's speed…": "正在测量设备端引擎的速度…",
+        "Loading the on-device model": "正在加载设备端模型",
+        "The on-device model isn't loaded. Try again.": "设备端模型尚未加载，请重试。",
+    ]
 }
 
 struct TripVoiceButton: View {
@@ -664,6 +739,12 @@ struct TripVoiceButton: View {
 }
 ```
 
+**The download.** `prewarm(settings:)` never downloads. Roam's settings screen offers the download: a
+button calls `LocalEngineHost.shared.prepare(settings)` with the voice host's settings, and shows
+`LocalEngineHost.shared.status` (`.loading(fraction)`, `.ready` or `.failed(message)`) and `statusText`. The
+download is about 2.5 GB, over Wi-Fi only. Roam's host settings never change the model, so it needn't call
+`apply(_:)`; an app whose settings can change the model, draft model or kernels calls it after each change.
+
 **Orientation.** Roam supports portrait and both landscape orientations, but voice mode is portrait only
 (section 2). While the cover is up, an app delegate (`@UIApplicationDelegateAdaptor`) returns `.portrait`
 from `application(_:supportedInterfaceOrientationsFor:)`. If the iPhone is in landscape when the cover opens,
@@ -678,16 +759,17 @@ Roam's language reaches each part of voice mode as follows:
 | Recognition, the built-in voice, spoken cues | `settings.speechLocale`, which the host derives from `store.language` (section 7.2). It's read when a session starts. |
 | Tool activity lines and stored summaries | `RoamTools.registry`, built for each reply from `store.language` |
 | `missingSetup()` and `displayName(for:)` | `store.l(…)` in the pipeline |
-| The voice screen's own text (VoiceKit's catalog) | Today: the iPhone's language for Roam, as section 6 explains, which may differ from `store.language`. After R8: `settings.speechLocale`, as long as the app declares that language. |
-| The two spoken apologies | English today; after R8, `settings.speechLocale` |
+| The voice screen's own text (VoiceKit's catalog) | `settings.speechLocale`, because Roam's built app declares `zh-Hans` (its `zh-Hans.lproj`). VoiceKit picks it when a session is created and when it starts (section 6). |
+| The two spoken apologies | `settings.speechLocale` (`VoiceSession.apology`) |
+| On-device model status and errors (`LocalEngineHost`) | `LocalEngineHost.localize`, which Roam maps with `store.l(…)` at launch (section 7.5). It's read when each line is made, so a failure shown before a language change stays in the old language. |
 
-The voice screen's own text is the one gap. Roam's in-app language changes at run time without a relaunch,
-and nothing in a package's string lookup sees it. R8 closes the gap inside VoiceKit:
+Roam's in-app language changes at run time without a relaunch. Nothing in a package's string lookup sees
+that, so VoiceKit resolves its strings itself:
 
 - VoiceKit's lookups use the catalog's localization that matches `settings.speechLocale`, chosen with
   `Bundle.preferredLocalizations(from:forPreferences:)` from among the languages the app declares.
 - This app declares only English, so it stays English. Roam follows `store.language`.
-- No new host member is needed.
+- No new host member is needed. The next session picks up a language change.
 
 ### 7.7 Navigation audio (R7)
 
@@ -712,16 +794,32 @@ Two things need a check on a device:
 
 | | Where | Work | Done when |
 |---|---|---|---|
-| **R1** `LocalEngineHost` package | this repository | Move `LocalModelHost` and `LocalProvider` from the app into a package. The app's ties become hooks, like the existing `systemProvider` and `isOnline`: the device tools in the prewarm prompt, MiniCPM-V and Qwen3-ASR. | This app behaves as before, and Roam can answer on device |
-| **R2** public `CommitGatedProvider` | this repository | Move the private struct in `OrchestratedReplyPipeline.swift` into AssistantKit as public, with a test | AssistantKit tests cover it; the app uses the public one |
+| **R1** `LocalEngineHost` package (**done**) | this repository | Move `LocalModelHost` and `LocalProvider` from the app into a package. The app's ties become hooks, like the existing `systemProvider` and `isOnline`: the device tools in the prewarm prompt, MiniCPM-V and Qwen3-ASR. | This app behaves as before, and Roam can answer on device |
+| **R2** public `CommitGatedProvider` (**done**) | this repository | Move the private struct in `OrchestratedReplyPipeline.swift` into AssistantKit as public, with a test | AssistantKit tests cover it; the app uses the public one |
 | **R3** Roam provider | Roam | `RoamAssistantProvider` (section 7.4). `RoamStore.askAssistant` takes the request ID instead of making its own. | A test with a stub API: one POST per reply; `.responseStarted` on the first 202; no POST after an uncertain failure; nothing sent before the gate opens |
 | **R4** Roam tools and profile | Roam | `RoamTools` and `AssistantProfile.roam` (section 7.3) | Tool tests against a demo store; the profile classifies the English and Chinese action phrases |
 | **R5** Roam pipeline | Roam | `RoamReplyPipeline`, `RoamVoiceHost`, the conversation and a voice button that keeps voice mode in portrait (sections 7.2 and 7.5) | Routing tests for each row of section 7.5; turning the iPhone during voice mode leaves the screen in portrait |
 | **R6** submodule and XcodeGen | Roam | Section 7.1 | `xcodegen generate` and the Roam and RoamPreview builds pass. VoiceKit builds for Roam's iOS 18. |
 | **R7** navigation audio | Roam | Section 7.7 | On a device: voice mode during guidance, then guidance after it |
-| **R8** localized spoken fallbacks and the in-app language | this repository | Speak the two apologies in `settings.speechLocale`, the way `SpokenCue.phrase` does. Resolve the voice screen's strings for that locale (section 7.6). | VoiceKit tests in both languages. Launched with `-AppleLanguages "(zh-Hans)"`, this app's voice screen stays English. |
+| **R8** localized spoken fallbacks and the in-app language (**done**) | this repository | Speak the two apologies in `settings.speechLocale`, the way `SpokenCue.phrase` does. Resolve the voice screen's strings for that locale (section 7.6). | VoiceKit tests in both languages. Launched with `-AppleLanguages "(zh-Hans)"`, this app's voice screen stays English. |
 
-**Order.** R1, R2 and R8 come first, here, under a new tag. Then R6, R4, R3, R5 and R7, in Roam.
+**Order.** R1, R2 and R8 came first, here, on the `roam-ready` branch. Roam pins its submodule to that
+branch's commit until a tag exists. Then R6, R4, R3, R5 and R7, in Roam.
+
+**What Roam calls from R1, R2 and R8:**
+
+- **`LocalEngineHost`** (`import LocalEngineHost`, from the `LocalEngineHost` product):
+  - `LocalEngineHost.shared`, with `status` (`.off`, `.loading(Double)`, `.ready`, `.failed(String)`),
+    `statusText`, `isDownloaded(_:)`, `usesEngine(_:)`, `prepare(_:prewarm:)`, `prewarm(settings:)`,
+    `apply(_:)`, `settle()`, `unload(stopDownload:)` and `deleteDownloads()`;
+  - the launch hooks: `profile`, `systemProvider`, `isOnline` and `localize`. The optional ones are
+    `beforeLoad`, `finishOtherGPUWork` and `memoryAdvice`, which is empty by default.
+  - The module and the class share the name, so `LocalEngineHost.x` always means the class's member.
+    Roam has no clash with it today.
+- **`LocalProvider(settings:tools:handoffAvailable:commitGate:)`**, in the same module.
+- **`CommitGatedProvider(base:gate:)`**, in AssistantKit.
+- **VoiceKit:** nothing new to call. The host's `settings.speechLocale` sets the voice screen's language
+  and the spoken apologies.
 
 ## 8. Tests and CI
 

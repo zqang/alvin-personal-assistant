@@ -2,6 +2,7 @@ import AssistantKit
 import AVFoundation
 import Foundation
 import Observation
+import os
 import UIKit
 
 /// A hands-free voice conversation: listens, detects the end of the user's turn, streams the
@@ -100,12 +101,22 @@ public final class VoiceSession: Identifiable {
     private static let duckRamp: TimeInterval = 0.08
     private static let cameraIdleLimit: TimeInterval = 120
     /// The activity while a turn waits for its photo's read.
-    static var readingPhoto: String { String(localized: "Reading the photo…", bundle: .module) }
+    static var readingPhoto: String { String(localized: "Reading the photo…", bundle: .voiceKit) }
+
+    /// What voice mode says when a reply fails, or the model declines it, in the speech language
+    /// the way `SpokenCue.phrase` picks it: Chinese for any "zh" locale, otherwise English.
+    static func apology(refused: Bool, localeIdentifier: String) -> String {
+        let chinese = localeIdentifier.lowercased().hasPrefix("zh")
+        if refused { return chinese ? "抱歉，这个我帮不上忙。" : "Sorry, I can't help with that one." }
+        return chinese ? "抱歉，出了点问题。" : "Sorry, something went wrong."
+    }
 
     public init(conversation: any VoiceConversation, pipeline: any ReplyPipeline, host: any VoiceSessionHost) {
         self.conversation = conversation
         self.pipeline = pipeline
         self.host = host
+        // Here as well as in `start()`, so the screen's first frame is already in this language.
+        Bundle.useVoiceKitStrings(for: host.settings.speechLocale)
     }
 
     var modelName: String {
@@ -135,16 +146,17 @@ public final class VoiceSession: Identifiable {
 
     func start() async {
         guard phase == .idle else { return }
+        Bundle.useVoiceKitStrings(for: host.settings.speechLocale)
         phase = .starting
         notice = nil
         if let problem = pipeline.missingSetup() {
             return fail(problem)
         }
         guard await AVAudioApplication.requestRecordPermission() else {
-            return fail(String(localized: "Microphone access is off. Turn it on in Settings › Privacy & Security › Microphone.", bundle: .module))
+            return fail(String(localized: "Microphone access is off. Turn it on in Settings › Privacy & Security › Microphone.", bundle: .voiceKit))
         }
         guard await SpeechRecognizer.requestAuthorization() else {
-            return fail(String(localized: "Speech recognition is off. Turn it on in Settings › Privacy & Security › Speech Recognition.", bundle: .module))
+            return fail(String(localized: "Speech recognition is off. Turn it on in Settings › Privacy & Security › Speech Recognition.", bundle: .voiceKit))
         }
         guard phase == .starting else { return }
 
@@ -153,7 +165,7 @@ public final class VoiceSession: Identifiable {
         // Keep twice the longest clip the host's second pass reads, so a full one always fits.
         let recognizer = SpeechRecognizer(localeIdentifier: settings.speechLocale, recordingCapacity: refineClipSamples > 0 ? 2 * refineClipSamples : nil)
         guard recognizer.isAvailable else {
-            return fail(String(localized: "Speech recognition for \(settings.speechLocale) isn't available right now. Check your connection or pick another language in Settings.", bundle: .module))
+            return fail(String(localized: "Speech recognition for \(settings.speechLocale) isn't available right now. Check your connection or pick another language in Settings.", bundle: .voiceKit))
         }
         recognizer.onEvent = { [weak self] event in self?.handle(event) }
         self.recognizer = recognizer
@@ -165,7 +177,7 @@ public final class VoiceSession: Identifiable {
         speaker.onCueStarted = { [weak self] _ in self?.cueStarted() }
         speaker.onDrained = { [weak self] in self?.speechDrained() }
         speaker.onFallback = { [weak self] message in
-            self?.notice = String(localized: "\(message) Using the built-in voice instead.", bundle: .module)
+            self?.notice = String(localized: "\(message) Using the built-in voice instead.", bundle: .voiceKit)
         }
         self.speaker = speaker
         let cuePlayer = CuePlayer(speaker: speaker, localeIdentifier: settings.speechLocale)
@@ -185,7 +197,7 @@ public final class VoiceSession: Identifiable {
         do {
             try audio.start(echoCancellation: settings.echoCancellation)
         } catch {
-            return fail(String(localized: "Couldn't start the microphone: \(error.localizedDescription)", bundle: .module))
+            return fail(String(localized: "Couldn't start the microphone: \(error.localizedDescription)", bundle: .voiceKit))
         }
 
         observeAudioSession()
@@ -344,7 +356,7 @@ public final class VoiceSession: Identifiable {
             if error is SpeechRecognitionUnavailable {
                 unavailableEndings += 1
                 if unavailableEndings >= 5 {
-                    return fail(String(localized: "Speech recognition isn't available right now. Check your internet connection, or pick a language in Settings that your iPhone can recognize offline.", bundle: .module))
+                    return fail(String(localized: "Speech recognition isn't available right now. Check your internet connection, or pick a language in Settings that your iPhone can recognize offline.", bundle: .voiceKit))
                 }
             }
             // The recognizer ended this request (silence limit or a hiccup). Keep the mic live.
@@ -703,7 +715,7 @@ public final class VoiceSession: Identifiable {
                         speaker?.stop()
                         speaker?.beginReply()
                         chunker.reset()
-                        speak("Sorry, I can't help with that one.")
+                        speak(Self.apology(refused: true, localeIdentifier: host.settings.speechLocale))
                     }
                 case .toolRound(let round):
                     reply.toolRounds.append(round)
@@ -729,7 +741,7 @@ public final class VoiceSession: Identifiable {
             reply.errorText = error.localizedDescription
             notice = error.localizedDescription
             chunker.reset()
-            speak("Sorry, something went wrong.")
+            speak(Self.apology(refused: false, localeIdentifier: host.settings.speechLocale))
         }
         guard reply === self.reply, !Task.isCancelled else { return }
         for chunk in chunker.flush() {
@@ -811,7 +823,7 @@ public final class VoiceSession: Identifiable {
         case .openAI:
             let key = host.openAIKey
             guard !key.isEmpty else {
-                notice = String(localized: "Add an OpenAI API key in Settings to use OpenAI voices. Using the built-in voice.", bundle: .module)
+                notice = String(localized: "Add an OpenAI API key in Settings to use OpenAI voices. Using the built-in voice.", bundle: .voiceKit)
                 return .apple(voiceIdentifier: settings.appleVoiceIdentifier, rate: rate)
             }
             return .openAI(OpenAISpeechConfiguration(apiKey: key, model: settings.openAISpeechModel, voice: settings.openAIVoice))
@@ -927,7 +939,7 @@ public final class VoiceSession: Identifiable {
 
     private func audioInterrupted() {
         guard phase != .idle else { return }
-        fail(String(localized: "Voice chat stopped because another app or a call took over the audio.", bundle: .module))
+        fail(String(localized: "Voice chat stopped because another app or a call took over the audio.", bundle: .voiceKit))
     }
 
     private func audioRouteChanged() {
@@ -938,7 +950,7 @@ public final class VoiceSession: Identifiable {
             if phase != .listening { cancelReply() }
             listen(continuing: phase == .listening ? userCaption : "")
         } catch {
-            fail(String(localized: "The audio route changed and the microphone couldn't restart.", bundle: .module))
+            fail(String(localized: "The audio route changed and the microphone couldn't restart.", bundle: .voiceKit))
         }
     }
 
@@ -1046,4 +1058,40 @@ private final class TentativeReply {
 
 extension String {
     var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
+}
+
+extension Bundle {
+    /// VoiceKit's strings, in the language of the latest voice session's `settings.speechLocale`
+    /// when the app declares that language: an app's own language setting wins over the iPhone's,
+    /// and an English-only app stays English. Until a session sets it, iOS picks (the app's language).
+    /// ponytail: one language for the whole process, the latest session's; a bundle per session is
+    /// the upgrade path if sessions in two languages ever run at once.
+    static var voiceKit: Bundle { voiceKitCurrent.withLock { $0 } }
+
+    static let voiceKitCurrent = OSAllocatedUnfairLock(initialState: Bundle.module)
+
+    /// The languages the app declares (tests stand in another app's).
+    static var voiceKitAppLanguages = Bundle.main.localizations
+
+    static func useVoiceKitStrings(for localeIdentifier: String) {
+        let strings = voiceKitStrings(for: localeIdentifier)
+        voiceKitCurrent.withLock { $0 = strings }
+    }
+
+    /// The catalog's localization for `localeIdentifier`, from among the languages the app
+    /// declares; when the app lacks that language, the app's own language, as iOS would pick it.
+    static func voiceKitStrings(for localeIdentifier: String, appLanguages: [String] = voiceKitAppLanguages) -> Bundle {
+        // App catalogs may declare a region (en-US, zh-CN) where ours declares a language or
+        // script (en, zh-Hans). Match their resolved language and script before choosing a bundle.
+        // Keep scripts distinct: declaring Traditional Chinese must not enable Simplified Chinese.
+        let appLanguages = appLanguages.map {
+            Locale.Language(identifier: Locale.canonicalLanguageIdentifier(from: $0))
+        }
+        let declared = Bundle.module.localizations.filter { localization in
+            let language = Locale.Language(identifier: Locale.canonicalLanguageIdentifier(from: localization))
+            return appLanguages.contains { $0.languageCode == language.languageCode && $0.script == language.script }
+        }
+        let language = Bundle.preferredLocalizations(from: declared, forPreferences: [localeIdentifier] + Locale.preferredLanguages).first
+        return language.flatMap { Bundle.module.path(forResource: $0, ofType: "lproj") }.flatMap(Bundle.init(path:)) ?? .module
+    }
 }

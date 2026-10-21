@@ -314,10 +314,17 @@ Pass `.app` wherever a profile is asked for: `PromptBuilder.systemPrompt` and `l
 The rules after the persona (spoken and typed replies, brevity, the tool cue) are shared `PromptBuilder` text, not
 part of the profile.
 
+On-device replies come from the `LocalEngineHost` product of the `LocalEngine` package: `LocalProvider` answers
+through `LocalEngineHost.shared`, which downloads, loads and prewarms the model. Launch setup sets its hooks once:
+`profile`, `systemProvider` (the base prompt and tool definitions your replies send, so the prewarm matches them),
+`isOnline` and `localize` (its status lines and errors in your app's language). The optional `beforeLoad`,
+`finishOtherGPUWork` and `memoryAdvice` are for apps with other on-device models, as `AlvinAssistant/App/AppSetup.swift`
+shows. The app needs the increased-memory-limit entitlement.
+
 To measure your tools on a phone, define a tool-call scenario with stand-in results, as
 `AlvinProfile/ToolBenchmark.swift` does, and list it after the shared ones (`LocalBenchmark.scenarios + [yours]`). The
 screen that plays it (`LocalBenchmarkRunner` and `BenchmarkToolExecutor` in `AlvinAssistant/OnDevice/LocalBenchmarkView.swift`)
-is app code tied to `LocalModelHost`, so copy and adapt it.
+is app code tied to this app's settings and tools, so copy and adapt it.
 
 For hands-free voice mode, add the `VoiceKit` package too. Give it your conversation, your reply pipeline and a
 small host; everything else is optional. [The VoiceKit guide](docs/voice-kit.md) shows how, with a complete

@@ -19,6 +19,7 @@
 		A1000000000000000000003A /* AlvinProfile in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000039 /* AlvinProfile */; };
 		A1000000000000000000003D /* MiniCPM in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000003C /* MiniCPM */; };
 		A10000000000000000000040 /* VoiceKit in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000003F /* VoiceKit */; };
+		A10000000000000000000041 /* LocalEngineHost in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000042 /* LocalEngineHost */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -51,6 +52,7 @@
 				A1000000000000000000003A /* AlvinProfile in Frameworks */,
 				A1000000000000000000003D /* MiniCPM in Frameworks */,
 				A10000000000000000000040 /* VoiceKit in Frameworks */,
+				A10000000000000000000041 /* LocalEngineHost in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -114,6 +116,7 @@
 				A10000000000000000000039 /* AlvinProfile */,
 				A1000000000000000000003C /* MiniCPM */,
 				A1000000000000000000003F /* VoiceKit */,
+				A10000000000000000000042 /* LocalEngineHost */,
 			);
 			productName = AlvinAssistant;
 			productReference = A10000000000000000000004 /* AlvinAssistant.app */;
@@ -512,6 +515,10 @@
 		A1000000000000000000003F /* VoiceKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = VoiceKit;
+		};
+		A10000000000000000000042 /* LocalEngineHost */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LocalEngineHost;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

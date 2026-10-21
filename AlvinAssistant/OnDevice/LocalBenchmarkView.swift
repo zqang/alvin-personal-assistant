@@ -1,6 +1,7 @@
 import AlvinProfile
 import AssistantKit
 import LocalEngine
+import LocalEngineHost
 import SwiftUI
 import UIKit
 
@@ -8,7 +9,7 @@ import UIKit
 /// time to first text, prefill and generation speed, cache reuse, speculative decoding, tool-call
 /// accuracy and peak memory. "Compare engines" plays the scenario with the Alvin engine, then with
 /// MLX's stock session over the same loaded model. "Compare tool modes" plays it on the Alvin
-/// engine in each `LocalModelHost.ToolMode`.
+/// engine in each `LocalEngineHost.ToolMode`.
 struct LocalBenchmarkView: View {
     @Bindable var store: SettingsStore
     @State private var runner = LocalBenchmarkRunner()
@@ -60,7 +61,7 @@ struct LocalBenchmarkView: View {
                     runner.runSelfTest(settings: store.settings)
                 }
                 .disabled(runner.isRunning)
-                if LocalModelHost.shared.fastKernelsAvailable {
+                if LocalEngineHost.shared.fastKernelsAvailable {
                     Button("Test fast kernels") {
                         runner.measureFastKernels(settings: store.settings)
                     }
@@ -102,7 +103,7 @@ final class LocalBenchmarkRunner {
         case nothing
         /// The Alvin engine, then the stock session.
         case engines
-        /// The Alvin engine in each `LocalModelHost.ToolMode`.
+        /// The Alvin engine in each `LocalEngineHost.ToolMode`.
         case toolModes
     }
 
@@ -120,7 +121,7 @@ final class LocalBenchmarkRunner {
             progress = "Measuring…"
             defer { progress = nil }
             do {
-                let curve = try await LocalModelHost.shared.measureSpeed()
+                let curve = try await LocalEngineHost.shared.measureSpeed()
                 return Self.curveReport(curve, model: Self.modelName(settings))
             } catch {
                 return "The speed measurement stopped: \(error.localizedDescription)"
@@ -134,7 +135,7 @@ final class LocalBenchmarkRunner {
             guard await ensureLoaded(settings) else { return "" }
             progress = "Checking the engine…"
             defer { progress = nil }
-            guard let result = await LocalModelHost.shared.runSelfTest() else {
+            guard let result = await LocalEngineHost.shared.runSelfTest() else {
                 return "The self-test was interrupted. Keep the app open and try again."
             }
             return Self.selfTestReport(result, model: Self.modelName(settings))
@@ -148,14 +149,14 @@ final class LocalBenchmarkRunner {
             progress = "Testing the fast kernels…"
             defer { progress = nil }
             do {
-                let summary = try await LocalModelHost.shared.measureFastKernels()
+                let summary = try await LocalEngineHost.shared.measureFastKernels()
                 return [
                     "On-device fast kernels",
                     "Model: \(Self.modelName(settings))",
                     "Device: \(Self.deviceModel())",
                     "",
                     summary,
-                    LocalModelHost.shared.fastKernelsSummary,
+                    LocalEngineHost.shared.fastKernelsSummary,
                 ].joined(separator: "\n")
             } catch {
                 return "The fast-kernel test stopped: \(error.localizedDescription)"
@@ -184,7 +185,7 @@ final class LocalBenchmarkRunner {
 
     /// Loads the model if it isn't; false, with `progress` saying why, when it can't.
     private func ensureLoaded(_ settings: AssistantSettings) async -> Bool {
-        let host = LocalModelHost.shared
+        let host = LocalEngineHost.shared
         progress = "Downloading or loading the model…"
         host.prepare(settings, prewarm: false)
         await host.settle()
@@ -203,20 +204,20 @@ final class LocalBenchmarkRunner {
     // MARK: Scenarios
 
     private func benchmark(_ scenario: LocalBenchmark.Scenario, settings: AssistantSettings, comparing: Comparison) async -> String {
-        let host = LocalModelHost.shared
+        let host = LocalEngineHost.shared
         // A fresh load, so its time is measured and no earlier session is reused.
         host.unload(stopDownload: true)
         guard await ensureLoaded(settings) else { return "" }
         let loadTime = host.lastLoadTime
 
-        let sections: [(engine: LocalEngineMode, toolMode: LocalModelHost.ToolMode, label: String?)]
+        let sections: [(engine: LocalEngineMode, toolMode: LocalEngineHost.ToolMode, label: String?)]
         switch comparing {
         case .nothing:
             sections = [(settings.localEngineMode, .guided, nil)]
         case .engines:
             sections = [(.alvin, .guided, "Alvin engine"), (.stock, .guided, "MLX stock session")]
         case .toolModes:
-            sections = LocalModelHost.ToolMode.allCases.map { (.alvin, $0, $0.rawValue) }
+            sections = LocalEngineHost.ToolMode.allCases.map { (.alvin, $0, $0.rawValue) }
         }
         var reports: [String] = []
         for section in sections {
@@ -247,7 +248,7 @@ final class LocalBenchmarkRunner {
     }
 
     /// What a tool mode changes, for its section's header.
-    private static func detail(_ mode: LocalModelHost.ToolMode) -> String {
+    private static func detail(_ mode: LocalEngineHost.ToolMode) -> String {
         switch mode {
         case .guided: return "forced call openings, name selector, claim guard"
         case .native: return "the model alone (no forcing, no name selector, no claim guard), same prompt"
@@ -256,9 +257,9 @@ final class LocalBenchmarkRunner {
 
     /// Plays the scenario's actions; returns the rows and, if it stopped early, why.
     private func play(
-        _ scenario: LocalBenchmark.Scenario, settings: AssistantSettings, toolMode: LocalModelHost.ToolMode, label: String?
+        _ scenario: LocalBenchmark.Scenario, settings: AssistantSettings, toolMode: LocalEngineHost.ToolMode, label: String?
     ) async -> (rows: [LocalBenchmark.Row], stopped: String?) {
-        let host = LocalModelHost.shared
+        let host = LocalEngineHost.shared
         var settings = settings
         let system = PromptBuilder.systemPrompt(userName: settings.userName, customInstructions: "", profile: .app)
         let definitions = DeviceTools.localRegistry(settings: settings, handoff: false).definitions
@@ -336,10 +337,10 @@ final class LocalBenchmarkRunner {
     /// One reply; with `cancelAfter`, cancelled once its text reaches that many tokens, as a
     /// barge-in would.
     private func reply(
-        turns: [ChatTurn], system: String, settings: AssistantSettings, tools: BenchmarkToolExecutor, toolMode: LocalModelHost.ToolMode,
+        turns: [ChatTurn], system: String, settings: AssistantSettings, tools: BenchmarkToolExecutor, toolMode: LocalEngineHost.ToolMode,
         cancelAfter: Int?
     ) async throws -> Outcome {
-        let host = LocalModelHost.shared
+        let host = LocalEngineHost.shared
         let recorder = ReplyRecorder()
         let reply = Task { @MainActor in
             try await host.respond(system: system, turns: turns, settings: settings, tools: tools, toolMode: toolMode) { event in
