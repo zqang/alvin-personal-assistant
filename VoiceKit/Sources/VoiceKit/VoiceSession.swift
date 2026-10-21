@@ -1081,7 +1081,16 @@ extension Bundle {
     /// The catalog's localization for `localeIdentifier`, from among the languages the app
     /// declares; when the app lacks that language, the app's own language, as iOS would pick it.
     static func voiceKitStrings(for localeIdentifier: String, appLanguages: [String] = voiceKitAppLanguages) -> Bundle {
-        let declared = Bundle.module.localizations.filter(appLanguages.contains)
+        // App catalogs may declare a region (en-US, zh-CN) where ours declares a language or
+        // script (en, zh-Hans). Match their resolved language and script before choosing a bundle.
+        // Keep scripts distinct: declaring Traditional Chinese must not enable Simplified Chinese.
+        let appLanguages = appLanguages.map {
+            Locale.Language(identifier: Locale.canonicalLanguageIdentifier(from: $0))
+        }
+        let declared = Bundle.module.localizations.filter { localization in
+            let language = Locale.Language(identifier: Locale.canonicalLanguageIdentifier(from: localization))
+            return appLanguages.contains { $0.languageCode == language.languageCode && $0.script == language.script }
+        }
         let language = Bundle.preferredLocalizations(from: declared, forPreferences: [localeIdentifier] + Locale.preferredLanguages).first
         return language.flatMap { Bundle.module.path(forResource: $0, ofType: "lproj") }.flatMap(Bundle.init(path:)) ?? .module
     }

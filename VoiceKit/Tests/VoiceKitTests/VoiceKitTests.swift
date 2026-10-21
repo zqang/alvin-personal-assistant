@@ -190,6 +190,33 @@ final class VoiceKitTests: XCTestCase {
         XCTAssertEqual(Bundle.voiceKit.bundleURL.lastPathComponent, "en.lproj")
     }
 
+    func testScreenTextMatchesRegionalAppLocalizations() {
+        let cases: [(app: [String], speech: String, expected: String)] = [
+            (["en-US", "zh-Hans"], "en-US", "en.lproj"),
+            (["en", "zh-CN"], "zh-CN", "zh-Hans.lproj"),
+            (["en-GB", "zh-SG"], "en-US", "en.lproj"),
+            (["en-GB", "zh-SG"], "zh-CN", "zh-Hans.lproj"),
+            (["English", "zh-Hans"], "en-US", "en.lproj"),
+        ]
+        for item in cases {
+            let bundle = Bundle.voiceKitStrings(for: item.speech, appLanguages: item.app)
+            XCTAssertEqual(bundle.bundleURL.lastPathComponent, item.expected, "app=\(item.app), speech=\(item.speech)")
+        }
+    }
+
+    func testRegionalEnglishOnlyAppDoesNotEnableChineseText() {
+        let bundle = Bundle.voiceKitStrings(for: "zh-CN", appLanguages: ["en-US"])
+        XCTAssertEqual(bundle.bundleURL.lastPathComponent, "en.lproj")
+        XCTAssertEqual(String(localized: "Thinking…", bundle: bundle), "Thinking…")
+    }
+
+    func testTraditionalChineseDeclarationDoesNotEnableSimplifiedChineseText() {
+        for chinese in ["zh-TW", "zh-Hant", "zh-HK"] {
+            let bundle = Bundle.voiceKitStrings(for: "zh-CN", appLanguages: ["en-US", chinese])
+            XCTAssertEqual(bundle.bundleURL.lastPathComponent, "en.lproj", chinese)
+        }
+    }
+
     /// Every string in the catalog has Simplified Chinese, and the built bundle serves it.
     func testEveryCatalogKeyHasChinese() throws {
         struct Catalog: Decodable {
