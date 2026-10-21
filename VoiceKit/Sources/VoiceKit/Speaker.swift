@@ -3,8 +3,8 @@ import AVFoundation
 import NaturalLanguage
 
 /// Installed system voices, best quality first.
-enum VoiceCatalog {
-    static func voices(forLanguage language: String) -> [AVSpeechSynthesisVoice] {
+public enum VoiceCatalog {
+    public static func voices(forLanguage language: String) -> [AVSpeechSynthesisVoice] {
         let base = baseLanguage(language)
         return AVSpeechSynthesisVoice.speechVoices()
             .filter { $0.language == language || baseLanguage($0.language) == base }
@@ -18,19 +18,19 @@ enum VoiceCatalog {
             }
     }
 
-    static func bestVoice(forLanguage language: String) -> AVSpeechSynthesisVoice? {
+    public static func bestVoice(forLanguage language: String) -> AVSpeechSynthesisVoice? {
         voices(forLanguage: language).first ?? AVSpeechSynthesisVoice(language: language)
     }
 
-    static func qualityLabel(_ voice: AVSpeechSynthesisVoice) -> String {
+    public static func qualityLabel(_ voice: AVSpeechSynthesisVoice) -> String {
         switch voice.quality {
-        case .premium: return "Premium"
-        case .enhanced: return "Enhanced"
-        default: return "Standard"
+        case .premium: return String(localized: "Premium", bundle: .module)
+        case .enhanced: return String(localized: "Enhanced", bundle: .module)
+        default: return String(localized: "Standard", bundle: .module)
         }
     }
 
-    static func baseLanguage(_ identifier: String) -> String {
+    public static func baseLanguage(_ identifier: String) -> String {
         String(identifier.split(whereSeparator: { $0 == "-" || $0 == "_" }).first ?? Substring(identifier)).lowercased()
     }
 
@@ -452,7 +452,7 @@ final class Speaker {
                             if body.count >= 4096 { break }
                         }
                         let message = (try? JSONValue.parse(body))?["error"]?["message"]?.stringValue ?? "HTTP \(status)"
-                        throw SpeechSynthesisError(message: "OpenAI voice failed: \(message)")
+                        throw SpeechSynthesisError(message: String(localized: "OpenAI voice failed: \(message)", bundle: .module))
                     }
                     let chunkBytes = 9_600
                     var decoder = PCM16Decoder()

@@ -1,0 +1,496 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "%@ Using the built-in voice instead." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 改用内置语音。"
+          }
+        }
+      }
+    },
+    "Add an OpenAI API key in Settings to use OpenAI voices. Using the built-in voice." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要使用 OpenAI 语音，请在设置中添加 OpenAI API 密钥。现在使用内置语音。"
+          }
+        }
+      }
+    },
+    "Ask about the photo, or tap the orb" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "就照片提问，或轻点圆球"
+          }
+        }
+      }
+    },
+    "Attached photo" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "附带的照片"
+          }
+        }
+      }
+    },
+    "Camera access is off. Turn it on in Settings › Privacy & Security › Camera." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相机权限已关闭。请在“设置”›“隐私与安全性”›“相机”中打开。"
+          }
+        }
+      }
+    },
+    "Camera preview" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相机预览"
+          }
+        }
+      }
+    },
+    "Close camera" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关闭相机"
+          }
+        }
+      }
+    },
+    "Connecting…" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在连接…"
+          }
+        }
+      }
+    },
+    "Couldn't start the microphone: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法启动麦克风：%@"
+          }
+        }
+      }
+    },
+    "Couldn't take the photo. Try again." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未能拍摄照片，请重试。"
+          }
+        }
+      }
+    },
+    "End voice chat" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "结束语音对话"
+          }
+        }
+      }
+    },
+    "Enhanced" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "增强"
+          }
+        }
+      }
+    },
+    "Go ahead, I'm listening" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请说，我在听"
+          }
+        }
+      }
+    },
+    "Listening…" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在聆听…"
+          }
+        }
+      }
+    },
+    "Microphone access is off. Turn it on in Settings › Privacy & Security › Microphone." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "麦克风权限已关闭。请在“设置”›“隐私与安全性”›“麦克风”中打开。"
+          }
+        }
+      }
+    },
+    "Mute microphone" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "将麦克风静音"
+          }
+        }
+      }
+    },
+    "Muted" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已静音"
+          }
+        }
+      }
+    },
+    "Off" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关闭"
+          }
+        }
+      }
+    },
+    "On for the next answer" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下一个回答启用"
+          }
+        }
+      }
+    },
+    "Open Settings" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开设置"
+          }
+        }
+      }
+    },
+    "Open camera" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开相机"
+          }
+        }
+      }
+    },
+    "OpenAI voice failed: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "OpenAI 语音出错：%@"
+          }
+        }
+      }
+    },
+    "Photo ready for your question" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "照片已就绪，请提问"
+          }
+        }
+      }
+    },
+    "Premium" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "高级"
+          }
+        }
+      }
+    },
+    "Reading the photo stopped before it finished. Try again." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "照片尚未读完就停止了，请重试。"
+          }
+        }
+      }
+    },
+    "Reading the photo…" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在读取照片…"
+          }
+        }
+      }
+    },
+    "Remove photo" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移除照片"
+          }
+        }
+      }
+    },
+    "Show the assistant a photo while you talk" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "边说话边给助手看照片"
+          }
+        }
+      }
+    },
+    "Speaking" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在说话"
+          }
+        }
+      }
+    },
+    "Speech recognition for %@ isn't available right now. Check your connection or pick another language in Settings." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "目前无法使用 %@ 的语音识别。请检查网络连接，或在设置中选择其他语言。"
+          }
+        }
+      }
+    },
+    "Speech recognition is off. Turn it on in Settings › Privacy & Security › Speech Recognition." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "语音识别已关闭。请在“设置”›“隐私与安全性”›“语音识别”中打开。"
+          }
+        }
+      }
+    },
+    "Speech recognition isn't available right now." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "目前无法使用语音识别。"
+          }
+        }
+      }
+    },
+    "Speech recognition isn't available right now. Check your internet connection, or pick a language in Settings that your iPhone can recognize offline." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "目前无法使用语音识别。请检查网络连接，或在设置中选择 iPhone 可以离线识别的语言。"
+          }
+        }
+      }
+    },
+    "Standard" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "标准"
+          }
+        }
+      }
+    },
+    "Take photo" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "拍照"
+          }
+        }
+      }
+    },
+    "Takes more time to answer your next question carefully" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "花更多时间仔细回答你的下一个问题"
+          }
+        }
+      }
+    },
+    "Tap the orb or just start talking to interrupt" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "轻点圆球或直接说话即可打断"
+          }
+        }
+      }
+    },
+    "Tap the orb to send now" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "轻点圆球立即发送"
+          }
+        }
+      }
+    },
+    "The audio route changed and the microphone couldn't restart." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "音频线路已更改，麦克风无法重新启动。"
+          }
+        }
+      }
+    },
+    "The camera isn't available." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相机不可用。"
+          }
+        }
+      }
+    },
+    "The microphone isn't available." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "麦克风不可用。"
+          }
+        }
+      }
+    },
+    "The model declined to answer this. Try rephrasing." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "模型拒绝回答这个问题。请换个说法再试。"
+          }
+        }
+      }
+    },
+    "The photo couldn't be read on this iPhone." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法在这台 iPhone 上读取这张照片。"
+          }
+        }
+      }
+    },
+    "Think deeper" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "深入思考"
+          }
+        }
+      }
+    },
+    "Thinking…" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在思考…"
+          }
+        }
+      }
+    },
+    "Try again" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重试"
+          }
+        }
+      }
+    },
+    "Unmute microphone" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取消麦克风静音"
+          }
+        }
+      }
+    },
+    "Voice chat stopped" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "语音对话已停止"
+          }
+        }
+      }
+    },
+    "Voice chat stopped because another app or a call took over the audio." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "其他应用或来电占用了音频，语音对话已停止。"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

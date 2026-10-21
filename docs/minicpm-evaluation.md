@@ -36,7 +36,7 @@ ran with the owner on 16 October 2026 on the `6a202c3` Release build and passed:
 download with a mid-file departure and resume (D15), real photos (D16), the photo flow (D17), locking the phone
 (D19), and deleting the 35B files (D21). With the 35B mode hidden, its own checks (Delete in D21, the live-voice parts of D23, D24 and
 D25) aren't needed for this merge; they come back if the mode is offered again. D26 belongs to the VoiceKit
-PR.
+PR; it passed by hand on 16 October 2026.
 
 ## Contents
 

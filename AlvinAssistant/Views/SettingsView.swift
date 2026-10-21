@@ -4,6 +4,7 @@ import MiniCPM
 import Speech
 import SwiftUI
 import UIKit
+import VoiceKit
 
 struct SettingsView: View {
     @Bindable var store: SettingsStore

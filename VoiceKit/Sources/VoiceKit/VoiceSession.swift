@@ -1,7 +1,6 @@
 import AssistantKit
 import AVFoundation
 import Foundation
-import MiniCPM
 import Observation
 import UIKit
 
@@ -13,7 +12,7 @@ import UIKit
 /// and are then either adopted (same request) or thrown away.
 @MainActor
 @Observable
-final class VoiceSession: Identifiable {
+public final class VoiceSession: Identifiable {
     enum Phase: Equatable {
         case idle
         case starting
@@ -23,7 +22,7 @@ final class VoiceSession: Identifiable {
         case failed(String)
     }
 
-    let id = UUID()
+    public let id = UUID()
     private(set) var phase: Phase = .idle
     /// What the user is saying (live) or just said.
     private(set) var userCaption = ""
@@ -49,8 +48,8 @@ final class VoiceSession: Identifiable {
     /// The live camera preview is open.
     private(set) var cameraOpen = false
 
-    private let conversation: Conversation
-    private let store: SettingsStore
+    private let conversation: any VoiceConversation
+    private let host: any VoiceSessionHost
     private let pipeline: any ReplyPipeline
     private let audio = AudioIO()
     @ObservationIgnored private var recognizer: SpeechRecognizer?
@@ -58,8 +57,8 @@ final class VoiceSession: Identifiable {
     @ObservationIgnored private var cuePlayer: CuePlayer?
     @ObservationIgnored private var turn = TurnDetector()
     @ObservationIgnored private var chunker = SentenceChunker()
-    @ObservationIgnored private var reply: ChatMessage?
-    @ObservationIgnored private var lastUserMessage: ChatMessage?
+    @ObservationIgnored private var reply: (any VoiceMessage)?
+    @ObservationIgnored private var lastUserMessage: (any VoiceMessage)?
     @ObservationIgnored private var replyTask: Task<Void, Never>?
     @ObservationIgnored private var replyStreamDone = false
     /// Earlier words of the current turn, when the user resumed talking after a pause.
@@ -91,27 +90,33 @@ final class VoiceSession: Identifiable {
     @ObservationIgnored private var lastUserPhoto: PendingPhoto?
     /// When the camera was last used (opened, a photo, a turn); it closes `cameraIdleLimit` after.
     @ObservationIgnored private var cameraUsedAt: TimeInterval = 0
+    /// The host's `refineClipSamples`, read when the session starts.
+    @ObservationIgnored private var refineClipSamples = 0
+    /// `voiceSessionWillStart` ran, so stopping owes the host one `voiceSessionDidStop`.
+    @ObservationIgnored private var hostStarted = false
 
     /// Playback volume while the user seems to talk over the assistant.
     private static let duckedGain: Float = 0.3
     private static let duckRamp: TimeInterval = 0.08
     private static let cameraIdleLimit: TimeInterval = 120
     /// The activity while a turn waits for its photo's read.
-    static let readingPhoto = "Reading the photo…"
+    static var readingPhoto: String { String(localized: "Reading the photo…", bundle: .module) }
 
-    init(conversation: Conversation, store: SettingsStore) {
+    public init(conversation: any VoiceConversation, pipeline: any ReplyPipeline, host: any VoiceSessionHost) {
         self.conversation = conversation
-        self.store = store
-        pipeline = ReplyPipelines.make(store)
+        self.pipeline = pipeline
+        self.host = host
     }
 
     var modelName: String {
         pipeline.displayName(for: lastDecision)
     }
 
-    /// Whether "Think deeper" does anything: the pipeline routes deep replies and deep mode is on.
+    /// Whether "Think deeper" does anything: Claude answers and deep mode is on.
+    /// ponytail: tied to the app's `provider`, so a host that routes per request turns deep mode
+    /// off instead; a `ReplyPipeline.supportsDeep` is the upgrade path once a second host needs it.
     var canGoDeep: Bool {
-        !usesLegacyPipeline && store.settings.provider == .anthropic && store.settings.deepMode != .off
+        host.settings.provider == .anthropic && host.settings.deepMode != .off
     }
 
     /// A one-line summary of the last turn's latency, for debug builds.
@@ -136,47 +141,31 @@ final class VoiceSession: Identifiable {
             return fail(problem)
         }
         guard await AVAudioApplication.requestRecordPermission() else {
-            return fail("Microphone access is off. Turn it on in Settings › Privacy & Security › Microphone.")
+            return fail(String(localized: "Microphone access is off. Turn it on in Settings › Privacy & Security › Microphone.", bundle: .module))
         }
         guard await SpeechRecognizer.requestAuthorization() else {
-            return fail("Speech recognition is off. Turn it on in Settings › Privacy & Security › Speech Recognition.")
+            return fail(String(localized: "Speech recognition is off. Turn it on in Settings › Privacy & Security › Speech Recognition.", bundle: .module))
         }
         guard phase == .starting else { return }
 
-        let settings = store.settings
-        // Keep twice the longest clip Qwen3-ASR reads, so a full one always fits.
-        let recognizer = SpeechRecognizer(localeIdentifier: settings.speechLocale, recordingCapacity: settings.usesQwenListening ? 2 * QwenListener.maxSamples : nil)
+        let settings = host.settings
+        refineClipSamples = host.refineClipSamples
+        // Keep twice the longest clip the host's second pass reads, so a full one always fits.
+        let recognizer = SpeechRecognizer(localeIdentifier: settings.speechLocale, recordingCapacity: refineClipSamples > 0 ? 2 * refineClipSamples : nil)
         guard recognizer.isAvailable else {
-            return fail("Speech recognition for \(settings.speechLocale) isn't available right now. Check your connection or pick another language in Settings.")
+            return fail(String(localized: "Speech recognition for \(settings.speechLocale) isn't available right now. Check your connection or pick another language in Settings.", bundle: .module))
         }
         recognizer.onEvent = { [weak self] event in self?.handle(event) }
         self.recognizer = recognizer
-        // "Most accurate on device" loads its own model, through the pipeline's prewarm.
-        if settings.provider == .onDevice, !settings.accurateOnDevice {
-            LocalModelHost.shared.prepare(settings)
-        }
-        if settings.usesQwenListening {
-            QwenListener.shared.isWanted = true
-            if settings.provider == .onDevice || settings.accurateOnDevice {
-                // One model loads at a time, and the reply model gets the memory first: the
-                // on-device model, or MiniCPM-V 35B, which `listen()`'s prewarm starts loading
-                // before this task runs.
-                Task {
-                    await LocalModelHost.shared.settle()
-                    await MiniCPMHost.shared.settle()
-                    if QwenListener.shared.isWanted { QwenListener.shared.load() }
-                }
-            } else {
-                QwenListener.shared.load()
-            }
-        }
+        host.voiceSessionWillStart(settings)
+        hostStarted = true
 
         let speaker = Speaker(audio: audio, engine: speechEngine(for: settings), languageHint: settings.speechLocale)
         speaker.onChunkStarted = { [weak self] text in self?.assistantStartedSpeaking(text) }
         speaker.onCueStarted = { [weak self] _ in self?.cueStarted() }
         speaker.onDrained = { [weak self] in self?.speechDrained() }
         speaker.onFallback = { [weak self] message in
-            self?.notice = "\(message) Using the built-in voice instead."
+            self?.notice = String(localized: "\(message) Using the built-in voice instead.", bundle: .module)
         }
         self.speaker = speaker
         let cuePlayer = CuePlayer(speaker: speaker, localeIdentifier: settings.speechLocale)
@@ -196,16 +185,15 @@ final class VoiceSession: Identifiable {
         do {
             try audio.start(echoCancellation: settings.echoCancellation)
         } catch {
-            return fail("Couldn't start the microphone: \(error.localizedDescription)")
+            return fail(String(localized: "Couldn't start the microphone: \(error.localizedDescription)", bundle: .module))
         }
 
         observeAudioSession()
         UIApplication.shared.isIdleTimerDisabled = true
         turn = TurnDetector(silenceTimeout: settings.endOfTurnDelay)
         // Ducking listens for the user over the assistant's voice, so it needs echo cancellation,
-        // and it only makes sense when talking over the assistant can interrupt it. The legacy
-        // pipeline keeps today's playback untouched.
-        duckingEnabled = !usesLegacyPipeline && settings.bargeInDucking && settings.voiceInterruptions && settings.echoCancellation
+        // and it only makes sense when talking over the assistant can interrupt it.
+        duckingEnabled = settings.bargeInDucking && settings.voiceInterruptions && settings.echoCancellation
         ducker.reset()
         startTicker()
         listen()
@@ -234,15 +222,17 @@ final class VoiceSession: Identifiable {
         pendingPhoto?.cancel()
         pendingPhoto = nil
         lastUserPhoto = nil
-        QwenListener.shared.isWanted = false
-        QwenListener.shared.unload()
+        if hostStarted {
+            hostStarted = false
+            host.voiceSessionDidStop()
+        }
         audio.stop()
         for observer in observers {
             NotificationCenter.default.removeObserver(observer)
         }
         observers.removeAll()
         UIApplication.shared.isIdleTimerDisabled = false
-        save()
+        conversation.save()
         phase = .idle
         level = 0
     }
@@ -262,7 +252,7 @@ final class VoiceSession: Identifiable {
             if !userCaption.trimmed.isEmpty {
                 commitUserTurn()
             } else if pendingPhoto != nil {
-                commitUserTurn(asking: PendingPhoto.defaultQuestion(localeIdentifier: store.settings.speechLocale))
+                commitUserTurn(asking: PendingPhoto.defaultQuestion(localeIdentifier: host.settings.speechLocale))
             }
         case .thinking, .speaking:
             cancelReply()
@@ -293,9 +283,14 @@ final class VoiceSession: Identifiable {
 
     // MARK: - Photos
 
-    /// Photos can be attached once the on-device photo reader is ready.
+    /// Photos can be attached while the host can read them.
     var canAttachPhoto: Bool {
-        MiniCPMHost.shared.status[.photoReader] == .ready
+        host.photoReader != nil
+    }
+
+    /// The host's photo reader; without one, a read fails, so the photo gets the unreadable note.
+    private var readPhoto: (Data) -> AsyncThrowingStream<String, Error> {
+        host.photoReader ?? { _ in AsyncThrowingStream { $0.finish(throwing: CocoaError(.featureUnsupported)) } }
     }
 
     func toggleCamera() {
@@ -309,7 +304,7 @@ final class VoiceSession: Identifiable {
         // A large photo takes a moment to decode, so off the main actor.
         guard let photo = await Task.detached(priority: .userInitiated, operation: { PendingPhoto(imageData: data) }).value, isLive else { return }
         pendingPhoto?.cancel()
-        photo.startReading { MiniCPMHost.shared.readPhoto($0) }
+        photo.startReading(readPhoto)
         pendingPhoto = photo
         cameraUsedAt = now
         // A reply started early didn't see the photo, and none starts while a photo is pending.
@@ -349,7 +344,7 @@ final class VoiceSession: Identifiable {
             if error is SpeechRecognitionUnavailable {
                 unavailableEndings += 1
                 if unavailableEndings >= 5 {
-                    return fail("Speech recognition isn't available right now. Check your internet connection, or pick a language in Settings that your iPhone can recognize offline.")
+                    return fail(String(localized: "Speech recognition isn't available right now. Check your internet connection, or pick a language in Settings that your iPhone can recognize offline.", bundle: .module))
                 }
             }
             // The recognizer ended this request (silence limit or a hiccup). Keep the mic live.
@@ -381,7 +376,7 @@ final class VoiceSession: Identifiable {
             // Nothing of the answer is playing yet, so new words mean the user wasn't finished.
             // Once a cue has played, though, the words may be its echo, misheard: talking over a
             // cue then follows the rule for talking over the answer.
-            if speaker?.hasPlayedCue == true, !store.settings.voiceInterruptions { return }
+            if speaker?.hasPlayedCue == true, !host.settings.voiceInterruptions { return }
             if let words = interruptions.interruption(in: text, assistantSpeech: speaker?.recentSpeech ?? "") {
                 if reopenPolicy.canReopen {
                     reopenUserTurn(with: words)
@@ -392,7 +387,7 @@ final class VoiceSession: Identifiable {
                 }
             }
         case .speaking:
-            guard store.settings.voiceInterruptions, let speaker else { return }
+            guard host.settings.voiceInterruptions, let speaker else { return }
             if let words = interruptions.interruption(in: text, assistantSpeech: speaker.recentSpeech) {
                 ducker.interruptionConfirmed()
                 // This request's audio also holds the assistant's voice, so keep the live text.
@@ -445,23 +440,22 @@ final class VoiceSession: Identifiable {
         var trace = TurnLatencyTrace()
         trace.mark(.speechEnded, at: min(turn.lastChange ?? time, time))
         trace.mark(.committed, at: time)
-        trace.engine = store.settings.provider == .onDevice ? ReplyEngine.local.rawValue : ReplyEngine.cloud.rawValue
+        trace.engine = host.settings.provider == .onDevice ? ReplyEngine.local.rawValue : ReplyEngine.cloud.rawValue
         if tentativeStartedThisTurn { trace.adoptedEarlyStart = false }
         self.trace = trace
-        if store.settings.turnChime { audio.playChime() }
+        if host.settings.turnChime { audio.playChime() }
 
-        let message = ChatMessage(role: .user, text: text, isVoice: true)
+        let message = conversation.appendMessage(role: .user, text: text, isVoice: true, status: .complete)
         let photo = pendingPhoto
         message.photoData = photo?.jpeg
         pendingPhoto = nil
         lastUserPhoto = photo
         cameraUsedAt = now
-        conversation.append(message)
         lastUserMessage = message
         // Take the turn's audio before the next request clears it.
         var samples: [Float] = []
         if let speechStart, let feeder = recognizer?.feeder {
-            samples = feeder.turnClip(speechStart: speechStart, maxLength: QwenListener.maxSamples)
+            samples = feeder.turnClip(speechStart: speechStart, maxLength: refineClipSamples)
         }
         startReply(refining: message, carried: carriedText, samples: samples, photo: photo)
         carriedText = ""
@@ -486,7 +480,7 @@ final class VoiceSession: Identifiable {
         // Its photo comes back too, unless a newer one was taken; a read the cancel cut short
         // starts again.
         pendingPhoto = pendingPhoto ?? lastUserPhoto
-        pendingPhoto?.startReading { MiniCPMHost.shared.readPhoto($0) }
+        pendingPhoto?.startReading(readPhoto)
         lastUserPhoto = nil
         phase = .listening
         carriedText = earlier
@@ -511,15 +505,15 @@ final class VoiceSession: Identifiable {
 
     /// Whether replies may start before the user's turn is committed.
     private var earlyStartAllowed: Bool {
-        let settings = store.settings
+        let settings = host.settings
         guard pipeline.supportsEarlyStart, settings.earlyReplyStart != .off else { return false }
         let localRoute = settings.provider == .onDevice || (settings.routingMode == .automatic && settings.preferOnDevice)
         // "On-device only" leaves cloud replies alone: an early start there may cost a request.
         // Automatic routing picks the route per request, so the pipeline also fails an early
         // reply it doesn't route on device; the reply then starts once the turn commits.
         if settings.earlyReplyStart == .onDeviceOnly, !localRoute { return false }
-        // Qwen3-ASR and the reply model would compete for the GPU.
-        if localRoute, settings.usesQwenListening { return false }
+        // A second transcription and the local reply model would compete for the GPU.
+        if localRoute, refineClipSamples > 0 { return false }
         return true
     }
 
@@ -570,7 +564,7 @@ final class VoiceSession: Identifiable {
         let gate = CommitGate()
         let deep = deepNextTurn
         let tentative = TentativeReply(pendingUser: pendingUser, gate: gate, deep: deep, startedAt: now)
-        tentative.start(pipeline.stream(ReplyRequest(conversation: conversation, pendingUser: pendingUser, commitGate: gate, inputIsVoice: true, deep: deep)))
+        tentative.start(pipeline.stream(ReplyRequest(messages: conversation.voiceMessages.map { $0.stored }, pendingUser: pendingUser, commitGate: gate, inputIsVoice: true, deep: deep)))
         self.tentative = tentative
         tentativeStartedThisTurn = true
     }
@@ -583,7 +577,7 @@ final class VoiceSession: Identifiable {
 
     /// The events of the reply to the committed `user` turn: the tentative reply's when it asked
     /// for the same thing, else a fresh reply's.
-    private func replyEvents(for user: ChatMessage, deep: Bool) -> AsyncThrowingStream<AssistantEvent, Error> {
+    private func replyEvents(for user: any VoiceMessage, deep: Bool) -> AsyncThrowingStream<AssistantEvent, Error> {
         let time = now
         let adopt = early.commit(finalText: user.text, at: time).contains(.adopt)
         if adopt, let tentative, !tentative.failed, tentative.deep == deep {
@@ -608,15 +602,15 @@ final class VoiceSession: Identifiable {
         }
         discardTentative()
         trace?.mark(.requestStarted, at: time)
-        return pipeline.stream(ReplyRequest(conversation: conversation, inputIsVoice: true, deep: deep))
+        return pipeline.stream(ReplyRequest(messages: conversation.voiceMessages.map { $0.stored }, inputIsVoice: true, deep: deep))
     }
 
     // MARK: - Replying
 
     /// Replies to `user`, first waiting for the note of its `photo` (and of any photo whose read was
-    /// cut short), then swapping in Qwen3-ASR's reading of the turn's audio when it's on.
+    /// cut short), then swapping in the host's second transcription of the turn's audio, if any.
     /// `carried` is earlier text of the turn that `samples` don't cover.
-    private func startReply(refining user: ChatMessage, carried: String, samples: [Float], photo: PendingPhoto?) {
+    private func startReply(refining user: any VoiceMessage, carried: String, samples: [Float], photo: PendingPhoto?) {
         phase = .thinking
         activity = nil
         notice = nil
@@ -628,20 +622,21 @@ final class VoiceSession: Identifiable {
         let deep = deepNextTurn
         deepNextTurn = false
         replyDeep = deep
-        cuePolicy = CuePolicy(enabled: cuesEnabled, isVoice: true, fillerDelay: store.settings.fillerDelay, deep: deep)
+        cuePolicy = CuePolicy(enabled: cuesEnabled, isVoice: true, fillerDelay: host.settings.fillerDelay, deep: deep)
         cuePolicy.replyStarted(at: now, expectedFirstText: LatencyLog.shared.expectedFirstText())
         reopenPolicy = TurnReopenPolicy()
 
-        let reply = ChatMessage(role: .assistant, text: "", isVoice: true, status: .streaming)
-        conversation.append(reply)
+        let reply = conversation.appendMessage(role: .assistant, text: "", isVoice: true, status: .streaming)
         self.reply = reply
-        let locale = store.settings.speechLocale
-        let messages = conversation.orderedMessages
+        let locale = host.settings.speechLocale
+        let messages = conversation.voiceMessages
+        let host = host
+        let readPhoto = readPhoto
         replyTask = Task { [weak self] in
             // The photo was being read since it was taken; the note goes in with the turn.
             var photoFailure: Error?
             do {
-                try await PendingPhoto.noteUnread(messages, attached: photo.map { (user, $0) }, read: { MiniCPMHost.shared.readPhoto($0) }) {
+                try await PendingPhoto.noteUnread(messages, attached: photo.map { (user, $0) }, read: readPhoto) {
                     self?.waitForPhoto()
                 }
             } catch {
@@ -652,10 +647,12 @@ final class VoiceSession: Identifiable {
                 self.activity = nil
             }
             let live = user.text
-            if !samples.isEmpty, let heard = await QwenListener.shared.transcribe(samples, locale: locale), !Task.isCancelled {
+            if !samples.isEmpty, let heard = await host.refineTurn(samples, locale: locale), !Task.isCancelled {
                 user.text = FinalTranscript.pick(live: live, carried: carried, refined: heard)
+                #if DEBUG
                 // ponytail: comparison line; delete after checking the results on the iPhone.
-                print("[ASR] apple=\(live) qwen=\(user.text)")
+                print("[ASR] apple=\(live) refined=\(user.text)")
+                #endif
                 self?.trace?.mark(.transcriptRefined, at: ProcessInfo.processInfo.systemUptime)
             }
             guard let self, !Task.isCancelled, reply === self.reply else { return }
@@ -667,9 +664,7 @@ final class VoiceSession: Identifiable {
                 events = self.replyEvents(for: user, deep: deep)
             }
             if user.text != live {
-                if self.conversation.title == Conversation.makeTitle(from: live) {
-                    self.conversation.title = Conversation.makeTitle(from: user.text)
-                }
+                self.conversation.userTurnRevised(from: live, to: user.text)
                 if self.phase == .thinking { self.userCaption = user.text }
             }
             await self.consume(events, into: reply)
@@ -684,7 +679,7 @@ final class VoiceSession: Identifiable {
         }
     }
 
-    private func consume(_ stream: AsyncThrowingStream<AssistantEvent, Error>, into reply: ChatMessage) async {
+    private func consume(_ stream: AsyncThrowingStream<AssistantEvent, Error>, into reply: any VoiceMessage) async {
         do {
             for try await event in stream {
                 guard reply === self.reply else { return }
@@ -774,7 +769,7 @@ final class VoiceSession: Identifiable {
         reply = nil
         lastUserMessage = nil
         lastUserPhoto = nil
-        save()
+        conversation.save()
         listen()
     }
 
@@ -796,7 +791,7 @@ final class VoiceSession: Identifiable {
 
     /// Records what the user actually heard of a reply that was cut short. A refused or failed
     /// reply keeps its status: only the spoken apology was cut off.
-    private func keepSpokenPart(of reply: ChatMessage) {
+    private func keepSpokenPart(of reply: any VoiceMessage) {
         guard reply.status == .streaming || reply.status == .complete else { return }
         let spoken = speaker?.spokenText ?? ""
         if spoken.trimmed.isEmpty, !reply.toolRounds.isEmpty {
@@ -814,9 +809,9 @@ final class VoiceSession: Identifiable {
         case .apple:
             return .apple(voiceIdentifier: settings.appleVoiceIdentifier, rate: rate)
         case .openAI:
-            let key = store.secret(.openAI)
+            let key = host.openAIKey
             guard !key.isEmpty else {
-                notice = "Add an OpenAI API key in Settings to use OpenAI voices. Using the built-in voice."
+                notice = String(localized: "Add an OpenAI API key in Settings to use OpenAI voices. Using the built-in voice.", bundle: .module)
                 return .apple(voiceIdentifier: settings.appleVoiceIdentifier, rate: rate)
             }
             return .openAI(OpenAISpeechConfiguration(apiKey: key, model: settings.openAISpeechModel, voice: settings.openAIVoice))
@@ -825,16 +820,10 @@ final class VoiceSession: Identifiable {
 
     // MARK: - Cues, ducking and traces
 
-    /// The legacy pipeline answers exactly as before this pipeline seam existed: no cues, no
-    /// early start, no deep mode.
-    private var usesLegacyPipeline: Bool {
-        pipeline is LegacyReplyPipeline
-    }
-
     /// Cues play while the microphone listens for the user, so they need echo cancellation to
     /// keep the assistant's own voice from reading as the user's.
     private var cuesWanted: Bool {
-        store.settings.spokenCues && store.settings.echoCancellation && !usesLegacyPipeline
+        host.settings.spokenCues && host.settings.echoCancellation
     }
 
     private var cuesEnabled: Bool {
@@ -938,7 +927,7 @@ final class VoiceSession: Identifiable {
 
     private func audioInterrupted() {
         guard phase != .idle else { return }
-        fail("Voice chat stopped because another app or a call took over the audio.")
+        fail(String(localized: "Voice chat stopped because another app or a call took over the audio.", bundle: .module))
     }
 
     private func audioRouteChanged() {
@@ -949,7 +938,7 @@ final class VoiceSession: Identifiable {
             if phase != .listening { cancelReply() }
             listen(continuing: phase == .listening ? userCaption : "")
         } catch {
-            fail("The audio route changed and the microphone couldn't restart.")
+            fail(String(localized: "The audio route changed and the microphone couldn't restart.", bundle: .module))
         }
     }
 
@@ -958,11 +947,6 @@ final class VoiceSession: Identifiable {
     private func fail(_ message: String) {
         stop()
         phase = .failed(message)
-    }
-
-    private func save() {
-        conversation.updatedAt = .now
-        try? conversation.modelContext?.save()
     }
 
     private static func join(_ first: String, _ second: String) -> String {
@@ -1058,4 +1042,8 @@ private final class TentativeReply {
         }
         marks.append(Reached(mark: mark, time: ProcessInfo.processInfo.systemUptime))
     }
+}
+
+extension String {
+    var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
 }

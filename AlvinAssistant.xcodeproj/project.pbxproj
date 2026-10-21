@@ -18,6 +18,7 @@
 		A10000000000000000000038 /* LocalEngine in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000037 /* LocalEngine */; };
 		A1000000000000000000003A /* AlvinProfile in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000039 /* AlvinProfile */; };
 		A1000000000000000000003D /* MiniCPM in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000003C /* MiniCPM */; };
+		A10000000000000000000040 /* VoiceKit in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000003F /* VoiceKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -49,6 +50,7 @@
 				A10000000000000000000038 /* LocalEngine in Frameworks */,
 				A1000000000000000000003A /* AlvinProfile in Frameworks */,
 				A1000000000000000000003D /* MiniCPM in Frameworks */,
+				A10000000000000000000040 /* VoiceKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -111,6 +113,7 @@
 				A10000000000000000000037 /* LocalEngine */,
 				A10000000000000000000039 /* AlvinProfile */,
 				A1000000000000000000003C /* MiniCPM */,
+				A1000000000000000000003F /* VoiceKit */,
 			);
 			productName = AlvinAssistant;
 			productReference = A10000000000000000000004 /* AlvinAssistant.app */;
@@ -149,6 +152,7 @@
 				A1000000000000000000002C /* XCRemoteSwiftPackageReference "swift-transformers" */,
 				A10000000000000000000036 /* XCLocalSwiftPackageReference "LocalEngine" */,
 				A1000000000000000000003B /* XCLocalSwiftPackageReference "MiniCPM" */,
+				A1000000000000000000003E /* XCLocalSwiftPackageReference "VoiceKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000003 /* Products */;
@@ -404,6 +408,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = MiniCPM;
 		};
+		A1000000000000000000003E /* XCLocalSwiftPackageReference "VoiceKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = VoiceKit;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -500,6 +508,10 @@
 		A1000000000000000000003C /* MiniCPM */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = MiniCPM;
+		};
+		A1000000000000000000003F /* VoiceKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = VoiceKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

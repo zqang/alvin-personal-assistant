@@ -7,20 +7,11 @@ import Foundation
 /// reply; side-effect tools wait for `commitGate` when one is given. `handoff_to_cloud` hands the
 /// request to the cloud assistant (the stream throws `ReplyHandoff`) only when
 /// `handoffAvailable`. The stock session offers no tools.
-///
-/// As a plain `ChatProvider` (`streamReply`) it streams only the `.reply` events.
 struct LocalProvider: AssistantProvider {
     let settings: AssistantSettings
     let tools: (any ToolExecutor)?
     let handoffAvailable: Bool
     let commitGate: CommitGate?
-
-    init(settings: AssistantSettings, tools: (any ToolExecutor)? = nil, handoffAvailable: Bool = false, commitGate: CommitGate? = nil) {
-        self.settings = settings
-        self.tools = tools
-        self.handoffAvailable = handoffAvailable
-        self.commitGate = commitGate
-    }
 
     func streamEvents(system: String, turns: [ChatTurn]) -> AsyncThrowingStream<AssistantEvent, Error> {
         let settings = settings

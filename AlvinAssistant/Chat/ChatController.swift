@@ -2,6 +2,7 @@ import AssistantKit
 import Foundation
 import MiniCPM
 import Observation
+import VoiceKit
 
 /// Sends typed messages and streams the replies into the conversation, through the app's
 /// `ReplyPipeline`.
@@ -23,12 +24,12 @@ final class ChatController {
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var cachedPipeline: (store: SettingsStore, pipeline: any ReplyPipeline)?
 
-    /// The pipeline replies go through, made once per store by `ReplyPipelines.make`.
+    /// The pipeline replies go through, made once per store.
     func pipeline(for store: SettingsStore) -> any ReplyPipeline {
         if let cachedPipeline, cachedPipeline.store === store {
             return cachedPipeline.pipeline
         }
-        let made = ReplyPipelines.make(store)
+        let made = OrchestratedReplyPipeline(store: store)
         cachedPipeline = (store, made)
         return made
     }
@@ -146,7 +147,7 @@ final class ChatController {
                 reading = nil
                 activity = nil
                 // Reads the conversation now; the empty reply above is no turn of its own yet.
-                let stream = pipeline.stream(ReplyRequest(conversation: conversation, inputIsVoice: false, deep: deep))
+                let stream = pipeline.stream(ReplyRequest(messages: conversation.orderedMessages.map(\.stored), inputIsVoice: false, deep: deep))
                 for try await event in stream {
                     switch event {
                     case .reply(.text(let text)):
