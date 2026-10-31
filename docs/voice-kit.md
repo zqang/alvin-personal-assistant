@@ -209,6 +209,23 @@ A host with its own look passes a `VoiceModeStyle` through the environment, `Voi
 third blob), the accent that fills an active control and the text on it, the ink for text and resting controls, the End button's colour, and two strengths, `glow` and `highlight` (0…1): the orb
 adds its colours with light, so a host with pale colours lowers them to keep the centre from burning white. Roam passes its Journal colours this way (§7).
 
+Two more fields pick what stands in the middle and the appearance. `avatar` is `.orb` (the default) or
+`.face(name:)`, a glossy, emoji-like face (`FaceView`) drawn from the same three colours per mood: the glow behind,
+the body, and the accent of its thought bubbles and listening arcs. Its mouth follows the voice level; under Reduce
+Motion it holds a still face per mood and the mouth steps between three sizes. The hints call it by `name` ("Tap
+Roamy to send now"), so pass the name in the user's language; with the orb they say "the orb". `colorScheme` is
+the appearance the screen forces, `.dark` by default; `nil` follows the app's, and on a light page the face goes
+pastel with a thin outline in `ink`, like a sticker, instead of glowing.
+
+The on-device voice is `settings.appleVoiceIdentifier`. `VoicePicker(voiceIdentifier:language:)` is a settings
+section a host can show: the user's own Personal Voices first (iOS 17, recorded in Settings › Accessibility ›
+Personal Voice; `VoiceCatalog.requestPersonalVoiceAccess()` asks once), then the installed system voices with a
+preview. iOS won't render a Personal Voice to buffers, so `Speaker` lets the synthesizer play it and follows its
+delegate: captions keep step, but that audio bypasses echo cancellation, so interrupting it by talking is weaker;
+tapping still works. `settings.openAISpeechBaseURL` points the OpenAI voice engine at any OpenAI-compatible speech
+server instead, such as VoiceStudio at home, with `openAIVoice` naming one of its cloned profiles; when it fails
+mid-reply, speech falls back to the chosen on-device voice.
+
 ## 5. The reply pipeline
 
 `ReplyPipeline` is the seam between voice mode and whatever answers. Voice mode calls it in two ways:
@@ -826,6 +843,22 @@ branch's commit until a tag exists. Then R6, R4, R3, R5 and R7, in Roam.
 - **`CommitGatedProvider(base:gate:)`**, in AssistantKit.
 - **VoiceKit:** nothing new to call. The host's `settings.speechLocale` sets the voice screen's language
   and the spoken apologies.
+
+### 7.9 Character and voice (owner review 2026-10-31)
+
+Design: https://claude.ai/artifact/5iFXbPDK6yarH6aitArsQD. VoiceKit's side is in this package (§4): the face
+avatar, `colorScheme`, Personal Voice in `Speaker` and `VoiceCatalog`, `VoicePicker`, and
+`settings.openAISpeechBaseURL` for a speech server at home. Roam's side is in the Roam checkout:
+
+- `VoiceModeStyle.journal` (`ios/Roam/Assistant/RoamVoiceMode.swift`) adds `avatar: .face(name: store.l("Roamy",
+  "小漫"))` and `colorScheme: nil` so the screen follows the app. The face uses each mood's second colour as its
+  body, so the Journal palette's translucent idle and failed colours should become opaque tokens there.
+- `RoamVoiceHost.settings` is built fresh each time; Roam stores the chosen `appleVoiceIdentifier` and shows
+  `VoicePicker` in its settings.
+- Roam's phone never calls the gateway directly, so a cloned voice from home needs a backend route to the
+  VoiceStudio server, and `openAISpeechBaseURL` then points at Roam's own backend.
+- Next round, not built: an own on-device clone, Qwen3-TTS through mlx-audio-swift, after a speed test on the
+  iPhone.
 
 ## 8. Tests and CI
 

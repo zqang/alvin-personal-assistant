@@ -60,20 +60,26 @@ public struct VoiceModeView: View {
             .padding(.horizontal, 24)
             .padding(.bottom, 12)
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(style.colorScheme)
         .sensoryFeedback(.impact(weight: .light), trigger: session.phase)
         .task { await session.start() }
         .onDisappear { session.stop() }
     }
 
+    /// The orb or the host's character, at either size.
     private var orb: some View {
-        OrbView(level: CGFloat(session.level), mood: OrbMood(session.phase))
-            .contentShape(Circle())
-            .onTapGesture { session.tapOrb() }
-            .accessibilityElement()
-            .accessibilityLabel(statusText)
-            .accessibilityHint(hintText ?? "")
-            .accessibilityAddTraits(.isButton)
+        Group {
+            switch style.avatar {
+            case .orb: OrbView(level: CGFloat(session.level), mood: OrbMood(session.phase))
+            case .face: FaceView(level: CGFloat(session.level), mood: OrbMood(session.phase))
+            }
+        }
+        .contentShape(Circle())
+        .onTapGesture { session.tapOrb() }
+        .accessibilityElement()
+        .accessibilityLabel(statusText)
+        .accessibilityHint(hintText ?? "")
+        .accessibilityAddTraits(.isButton)
     }
 
     private var header: some View {
@@ -249,12 +255,20 @@ public struct VoiceModeView: View {
         }
     }
 
+    /// What the hints call the thing in the middle: "the orb", or the face's name.
+    private var avatarName: String {
+        switch style.avatar {
+        case .orb: return String(localized: "the orb", bundle: .voiceKit)
+        case .face(let name): return name
+        }
+    }
+
     private var hintText: String? {
         switch session.phase {
-        case .listening where !session.userCaption.isEmpty: return String(localized: "Tap the orb to send now", bundle: .voiceKit)
-        case .listening where session.pendingPhoto != nil: return String(localized: "Ask about the photo, or tap the orb", bundle: .voiceKit)
+        case .listening where !session.userCaption.isEmpty: return String(localized: "Tap \(avatarName) to send now", bundle: .voiceKit)
+        case .listening where session.pendingPhoto != nil: return String(localized: "Ask about the photo, or tap \(avatarName)", bundle: .voiceKit)
         case .listening: return String(localized: "Go ahead, I'm listening", bundle: .voiceKit)
-        case .thinking, .speaking: return String(localized: "Tap the orb or just start talking to interrupt", bundle: .voiceKit)
+        case .thinking, .speaking: return String(localized: "Tap \(avatarName) or just start talking to interrupt", bundle: .voiceKit)
         default: return nil
         }
     }

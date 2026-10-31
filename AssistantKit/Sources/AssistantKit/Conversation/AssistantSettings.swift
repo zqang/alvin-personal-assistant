@@ -142,6 +142,9 @@ public struct AssistantSettings: Codable, Equatable, Sendable {
     public var speechRate = 1.0
     public var openAIVoice = "coral"
     public var openAISpeechModel = "gpt-4o-mini-tts"
+    /// Empty means OpenAI itself; otherwise an OpenAI-compatible speech server, such as VoiceStudio at home,
+    /// and `openAIVoice` names one of its voice profiles.
+    public var openAISpeechBaseURL = ""
     /// Seconds of silence that end the user's turn.
     public var endOfTurnDelay = 0.9
     public var voiceInterruptions = true
@@ -173,7 +176,7 @@ public struct AssistantSettings: Codable, Equatable, Sendable {
         case deviceToolsEnabled, disabledTools
         case deepMode, deepStrategy, deepDailyLimit, deepWorkerModel
         case userName, customInstructions
-        case speechLocale, voiceEngine, appleVoiceIdentifier, speechRate, openAIVoice, openAISpeechModel
+        case speechLocale, voiceEngine, appleVoiceIdentifier, speechRate, openAIVoice, openAISpeechModel, openAISpeechBaseURL
         case endOfTurnDelay, voiceInterruptions, echoCancellation, qwenListening
         case spokenCues, fillerDelay, turnChime, bargeInDucking, earlyReplyStart
     }
@@ -216,6 +219,7 @@ public struct AssistantSettings: Codable, Equatable, Sendable {
         speechRate = value(.speechRate, defaults.speechRate)
         openAIVoice = value(.openAIVoice, defaults.openAIVoice)
         openAISpeechModel = value(.openAISpeechModel, defaults.openAISpeechModel)
+        openAISpeechBaseURL = value(.openAISpeechBaseURL, defaults.openAISpeechBaseURL)
         endOfTurnDelay = value(.endOfTurnDelay, defaults.endOfTurnDelay)
         voiceInterruptions = value(.voiceInterruptions, defaults.voiceInterruptions)
         echoCancellation = value(.echoCancellation, defaults.echoCancellation)

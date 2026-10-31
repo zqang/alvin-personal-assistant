@@ -21,12 +21,22 @@
         }
       }
     },
-    "Ask about the photo, or tap the orb" : {
+    "Allow Personal Voice" : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "就照片提问，或轻点圆球"
+            "value" : "允许使用个人声音"
+          }
+        }
+      }
+    },
+    "Ask about the photo, or tap %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "就照片提问，或轻点%@"
           }
         }
       }
@@ -37,6 +47,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "附带的照片"
+          }
+        }
+      }
+    },
+    "Automatic (best installed)" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自动（已安装的最佳语音）"
           }
         }
       }
@@ -131,6 +151,16 @@
         }
       }
     },
+    "Hi! What can I help you with today?" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你好！有什么可以帮你的吗？"
+          }
+        }
+      }
+    },
     "Listening…" : {
       "localizations" : {
         "zh-Hans" : {
@@ -221,6 +251,36 @@
         }
       }
     },
+    "Personal Voice" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "个人声音"
+          }
+        }
+      }
+    },
+    "Personal Voice access was declined. Allow it in Settings › Accessibility › Personal Voice." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "个人声音的访问已被拒绝。请在“设置”›“辅助功能”›“个人声音”中允许。"
+          }
+        }
+      }
+    },
+    "Personal Voice is not available on this iPhone." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此 iPhone 不支持个人声音。"
+          }
+        }
+      }
+    },
     "Photo ready for your question" : {
       "localizations" : {
         "zh-Hans" : {
@@ -241,6 +301,16 @@
         }
       }
     },
+    "Preview voice" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "试听语音"
+          }
+        }
+      }
+    },
     "Reading the photo stopped before it finished. Try again." : {
       "localizations" : {
         "zh-Hans" : {
@@ -257,6 +327,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在读取照片…"
+          }
+        }
+      }
+    },
+    "Record one in Settings › Accessibility › Personal Voice, then allow apps to request it." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在“设置”›“辅助功能”›“个人声音”中录制，然后允许应用请求使用。"
           }
         }
       }
@@ -341,6 +421,16 @@
         }
       }
     },
+    "System voices" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "系统语音"
+          }
+        }
+      }
+    },
     "Take photo" : {
       "localizations" : {
         "zh-Hans" : {
@@ -361,22 +451,22 @@
         }
       }
     },
-    "Tap the orb or just start talking to interrupt" : {
+    "Tap %@ or just start talking to interrupt" : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "轻点圆球或直接说话即可打断"
+            "value" : "轻点%@或直接说话即可打断"
           }
         }
       }
     },
-    "Tap the orb to send now" : {
+    "Tap %@ to send now" : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "轻点圆球立即发送"
+            "value" : "轻点%@立即发送"
           }
         }
       }
@@ -494,6 +584,26 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "其他应用或来电占用了音频，语音对话已停止。"
+          }
+        }
+      }
+    },
+    "Your voice" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你的声音"
+          }
+        }
+      }
+    },
+    "the orb" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "圆球"
           }
         }
       }

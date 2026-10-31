@@ -18,10 +18,16 @@ public struct VoiceModeStyle: Sendable {
     /// meet) and how bright its top-left highlight is; both 0…1, 1 is the standard look.
     public var glow: Double
     public var highlight: Double
+    /// What stands in the middle: the orb, or a glossy face (`FaceView`) drawn from the same mood colours.
+    public var avatar: VoiceAvatar
+    /// The appearance the screen forces; nil follows the app's. The standard look forces dark.
+    public var colorScheme: ColorScheme?
 
-    public init(background: [Color], orb: [OrbMood: [Color]], accent: Color, onAccent: Color, ink: Color, stop: Color, glow: Double = 1, highlight: Double = 1) {
+    public init(background: [Color], orb: [OrbMood: [Color]], accent: Color, onAccent: Color, ink: Color, stop: Color, glow: Double = 1, highlight: Double = 1,
+                avatar: VoiceAvatar = .orb, colorScheme: ColorScheme? = .dark) {
         self.background = background; self.orb = orb; self.accent = accent; self.onAccent = onAccent; self.ink = ink; self.stop = stop
         self.glow = min(max(glow, 0), 1); self.highlight = min(max(highlight, 0), 1)
+        self.avatar = avatar; self.colorScheme = colorScheme
     }
 
     public static let standard = VoiceModeStyle(
@@ -38,6 +44,14 @@ public struct VoiceModeStyle: Sendable {
 
 extension EnvironmentValues {
     @Entry public var voiceModeStyle = VoiceModeStyle.standard
+}
+
+/// The character in the orb's place.
+public enum VoiceAvatar: Sendable, Equatable {
+    case orb
+    /// A glossy, emoji-like face whose body takes the mood's colour. `name` is what the hints call it
+    /// ("Tap Roamy to send now"), already in the user's language.
+    case face(name: String)
 }
 
 public enum OrbMood: Hashable {
@@ -57,7 +71,7 @@ public enum OrbMood: Hashable {
         }
     }
 
-    fileprivate func palette(_ style: VoiceModeStyle) -> [Color] {
+    func palette(_ style: VoiceModeStyle) -> [Color] {
         let colors = style.orb[self] ?? VoiceModeStyle.standard.orb[self] ?? []
         return colors.count >= 3 ? colors : VoiceModeStyle.standard.orb[self]!
     }
@@ -78,6 +92,7 @@ public struct OrbView: View {
     var level: CGFloat
     var mood: OrbMood
     @Environment(\.voiceModeStyle) private var style
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(level: CGFloat, mood: OrbMood) {
         self.level = level
@@ -85,7 +100,8 @@ public struct OrbView: View {
     }
 
     public var body: some View {
-        TimelineView(.animation) { timeline in
+        // Under Reduce Motion the orb holds still and the mood shows by colour alone.
+        TimelineView(.animation(paused: reduceMotion)) { timeline in
             let time = timeline.date.timeIntervalSinceReferenceDate
             GeometryReader { proxy in
                 let size = min(proxy.size.width, proxy.size.height)

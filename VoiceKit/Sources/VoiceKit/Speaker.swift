@@ -30,6 +30,27 @@ public enum VoiceCatalog {
         }
     }
 
+    /// The user's own Personal Voices (recorded in Settings › Accessibility › Personal Voice) that speak
+    /// `language`, visible once `requestPersonalVoiceAccess()` was allowed. Kept out of `voices(forLanguage:)`,
+    /// so pickers list them apart.
+    public static func personalVoices(forLanguage language: String) -> [AVSpeechSynthesisVoice] {
+        let base = baseLanguage(language)
+        return AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.voiceTraits.contains(.isPersonalVoice) && baseLanguage($0.language) == base }
+            .sorted { $0.name < $1.name }
+    }
+
+    public static var personalVoiceStatus: AVSpeechSynthesizer.PersonalVoiceAuthorizationStatus {
+        AVSpeechSynthesizer.personalVoiceAuthorizationStatus
+    }
+
+    /// Asks iOS for the Personal Voices (a system prompt the first time). True when allowed.
+    public static func requestPersonalVoiceAccess() async -> Bool {
+        await withCheckedContinuation { continuation in
+            AVSpeechSynthesizer.requestPersonalVoiceAuthorization { continuation.resume(returning: $0 == .authorized) }
+        }
+    }
+
     public static func baseLanguage(_ identifier: String) -> String {
         String(identifier.split(whereSeparator: { $0 == "-" || $0 == "_" }).first ?? Substring(identifier)).lowercased()
     }
@@ -46,6 +67,28 @@ public enum VoiceCatalog {
 struct SpeechSynthesisError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
+}
+
+/// Waits for an utterance the synthesizer plays itself (a Personal Voice) to finish or be stopped. The
+/// synthesizer calls its delegate on the main thread, where `Speaker` lives.
+private final class DirectSpeech: NSObject, AVSpeechSynthesizerDelegate {
+    private var waiting: [ObjectIdentifier: CheckedContinuation<Void, Never>] = [:]
+
+    func speak(_ utterance: AVSpeechUtterance, with synthesizer: AVSpeechSynthesizer) async {
+        synthesizer.delegate = self
+        await withCheckedContinuation { continuation in
+            waiting[ObjectIdentifier(utterance)] = continuation
+            synthesizer.speak(utterance)
+        }
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        waiting.removeValue(forKey: ObjectIdentifier(utterance))?.resume()
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        waiting.removeValue(forKey: ObjectIdentifier(utterance))?.resume()
+    }
 }
 
 /// Speaks reply chunks in order. Synthesis of the next chunk overlaps playback of the current
@@ -115,7 +158,15 @@ final class Speaker {
     private let audio: AudioIO
     private var engine: Engine
     private let languageHint: String
-    private let synthesizer = AVSpeechSynthesizer()
+    /// The on-device voice a failed cloud voice falls back to; empty means the best installed.
+    private let fallbackVoiceIdentifier: String
+    /// Uses the app's audio session, so a Personal Voice it plays itself doesn't reconfigure `AudioIO`'s.
+    private let synthesizer: AVSpeechSynthesizer = {
+        let synthesizer = AVSpeechSynthesizer()
+        synthesizer.usesApplicationAudioSession = true
+        return synthesizer
+    }()
+    private let directSpeech = DirectSpeech()
     /// Renders cues ahead of time, apart from the reply's synthesis.
     private let prerenderSynthesizer = AVSpeechSynthesizer()
     private var queue: [QueueItem] = []
@@ -128,10 +179,11 @@ final class Speaker {
     private var drainReported = false
     private var voiceCache: [String: AVSpeechSynthesisVoice] = [:]
 
-    init(audio: AudioIO, engine: Engine, languageHint: String) {
+    init(audio: AudioIO, engine: Engine, languageHint: String, fallbackVoiceIdentifier: String = "") {
         self.audio = audio
         self.engine = engine
         self.languageHint = languageHint
+        self.fallbackVoiceIdentifier = fallbackVoiceIdentifier
     }
 
     func beginReply() {
@@ -222,11 +274,11 @@ final class Speaker {
                 try await synthesizeWithOpenAI(text, configuration: configuration, generation: generation)
             } catch {
                 guard generation == self.generation, !Task.isCancelled else { return }
-                // Keep talking with the on-device voice rather than going silent.
-                engine = .apple(voiceIdentifier: "", rate: AVSpeechUtteranceDefaultSpeechRate)
+                // Keep talking with the user's on-device voice rather than going silent.
+                engine = .apple(voiceIdentifier: fallbackVoiceIdentifier, rate: AVSpeechUtteranceDefaultSpeechRate)
                 onFallback?(error.localizedDescription)
                 if playback.last?.produced == 0 {
-                    await synthesizeWithApple(text, voiceIdentifier: "", rate: AVSpeechUtteranceDefaultSpeechRate, generation: generation)
+                    await synthesizeWithApple(text, voiceIdentifier: fallbackVoiceIdentifier, rate: AVSpeechUtteranceDefaultSpeechRate, generation: generation)
                 }
             }
         }
@@ -292,6 +344,10 @@ final class Speaker {
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = voice(for: text, preferredIdentifier: voiceIdentifier)
         utterance.rate = rate
+        if Self.isPersonal(utterance.voice) {
+            await speakDirectly(utterance, generation: generation)
+            return
+        }
         let converter = PCMConverter(to: audio.playbackFormat)
         for await buffer in Self.renderedBuffers(of: utterance, with: synthesizer) {
             guard generation == self.generation else { return }
@@ -299,6 +355,30 @@ final class Speaker {
                 schedule(converted, generation: generation)
             }
         }
+    }
+
+    private static func isPersonal(_ voice: AVSpeechSynthesisVoice?) -> Bool {
+        voice?.voiceTraits.contains(.isPersonalVoice) ?? false
+    }
+
+    /// iOS won't render a Personal Voice to buffers (it plays it straight to the output), so the synthesizer
+    /// speaks it itself and the delegate says when it is done. The chunk counts as one buffer that is
+    /// "playing" meanwhile, so captions and `spokenText` keep step.
+    ///
+    /// ponytail: that audio bypasses `AudioIO`'s player, so echo cancellation can't hear it and interrupting
+    /// by talking over it is weaker; tapping still stops it. The upgrade is a cloned voice that streams.
+    private func speakDirectly(_ utterance: AVSpeechUtterance, generation: Int) async {
+        guard generation == self.generation, !playback.isEmpty else { return }
+        // Wait until everything queued before this chunk has left the player, or the two would overlap.
+        while generation == self.generation, playback.count > 1, playback.first?.outstanding ?? 0 > 0 {
+            try? await Task.sleep(nanoseconds: 40_000_000)
+        }
+        guard generation == self.generation, !playback.isEmpty else { return }
+        playback[playback.count - 1].produced += 1
+        playback[playback.count - 1].outstanding += 1
+        advancePlayback()
+        await directSpeech.speak(utterance, with: synthesizer)
+        bufferPlayed(generation: generation)
     }
 
     // MARK: - Rendering ahead
@@ -312,6 +392,8 @@ final class Speaker {
             let utterance = AVSpeechUtterance(string: text)
             utterance.voice = voice(for: text, preferredIdentifier: voiceIdentifier)
             utterance.rate = rate
+            // A Personal Voice can't be rendered ahead: it is spoken live.
+            if Self.isPersonal(utterance.voice) { return nil }
             let converter = PCMConverter(to: audio.playbackFormat)
             for await buffer in Self.renderedBuffers(of: utterance, with: prerenderSynthesizer) {
                 guard let converted = converter.convert(buffer) else { continue }

@@ -172,7 +172,7 @@ public final class VoiceSession: Identifiable {
         host.voiceSessionWillStart(settings)
         hostStarted = true
 
-        let speaker = Speaker(audio: audio, engine: speechEngine(for: settings), languageHint: settings.speechLocale)
+        let speaker = Speaker(audio: audio, engine: speechEngine(for: settings), languageHint: settings.speechLocale, fallbackVoiceIdentifier: settings.appleVoiceIdentifier)
         speaker.onChunkStarted = { [weak self] text in self?.assistantStartedSpeaking(text) }
         speaker.onCueStarted = { [weak self] _ in self?.cueStarted() }
         speaker.onDrained = { [weak self] in self?.speechDrained() }
@@ -826,7 +826,10 @@ public final class VoiceSession: Identifiable {
                 notice = String(localized: "Add an OpenAI API key in Settings to use OpenAI voices. Using the built-in voice.", bundle: .voiceKit)
                 return .apple(voiceIdentifier: settings.appleVoiceIdentifier, rate: rate)
             }
-            return .openAI(OpenAISpeechConfiguration(apiKey: key, model: settings.openAISpeechModel, voice: settings.openAIVoice))
+            var configuration = OpenAISpeechConfiguration(apiKey: key, model: settings.openAISpeechModel, voice: settings.openAIVoice)
+            // A VoiceStudio or other OpenAI-compatible speech server, at home say.
+            if !settings.openAISpeechBaseURL.isEmpty, let url = URL(string: settings.openAISpeechBaseURL) { configuration.baseURL = url }
+            return .openAI(configuration)
         }
     }
 
