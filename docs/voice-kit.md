@@ -206,8 +206,8 @@ screen shows the message, and nothing is recorded or added to the conversation.
 The screen draws in `VoiceModeStyle.standard` (a night gradient, a blue-to-violet orb, white controls, a red End).
 A host with its own look passes a `VoiceModeStyle` through the environment, `VoiceModeView(session:)
 .environment(\.voiceModeStyle, myStyle)`: the gradient behind, three colours per `OrbMood` (the glow, the core and the
-third blob), the accent that fills an active control and the text on it, the ink for text and resting controls, and
-the End button's colour. Roam passes its Journal colours this way (§7).
+third blob), the accent that fills an active control and the text on it, the ink for text and resting controls, the End button's colour, and two strengths, `glow` and `highlight` (0…1): the orb
+adds its colours with light, so a host with pale colours lowers them to keep the centre from burning white. Roam passes its Journal colours this way (§7).
 
 ## 5. The reply pipeline
 

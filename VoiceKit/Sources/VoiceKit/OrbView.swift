@@ -14,9 +14,14 @@ public struct VoiceModeStyle: Sendable {
     public var ink: Color
     /// The end-call button.
     public var stop: Color
+    /// How strongly the orb's three colours add up (they blend with light, so 1 burns the centre white where they
+    /// meet) and how bright its top-left highlight is; both 0…1, 1 is the standard look.
+    public var glow: Double
+    public var highlight: Double
 
-    public init(background: [Color], orb: [OrbMood: [Color]], accent: Color, onAccent: Color, ink: Color, stop: Color) {
+    public init(background: [Color], orb: [OrbMood: [Color]], accent: Color, onAccent: Color, ink: Color, stop: Color, glow: Double = 1, highlight: Double = 1) {
         self.background = background; self.orb = orb; self.accent = accent; self.onAccent = onAccent; self.ink = ink; self.stop = stop
+        self.glow = min(max(glow, 0), 1); self.highlight = min(max(highlight, 0), 1)
     }
 
     public static let standard = VoiceModeStyle(
@@ -94,11 +99,11 @@ public struct OrbView: View {
                             endRadius: size * 0.55
                         ))
                     ForEach(0..<3, id: \.self) { index in
-                        blob(index: index, color: colors[index], time: time, size: size)
+                        blob(index: index, color: colors[index].opacity(style.glow), time: time, size: size)
                     }
                     Circle()
                         .fill(RadialGradient(
-                            colors: [style.ink.opacity(0.35 + 0.3 * level), .clear],
+                            colors: [style.ink.opacity((0.35 + 0.3 * level) * style.highlight), .clear],
                             center: UnitPoint(x: 0.35, y: 0.3),
                             startRadius: 0,
                             endRadius: size * 0.45
