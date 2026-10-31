@@ -7,6 +7,7 @@ import SwiftUI
 public struct VoiceModeView: View {
     let session: VoiceSession
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.voiceModeStyle) private var style
 
     public init(session: VoiceSession) {
         self.session = session
@@ -15,7 +16,7 @@ public struct VoiceModeView: View {
     public var body: some View {
         ZStack {
             LinearGradient(
-                colors: [Color(red: 0.04, green: 0.05, blue: 0.11), .black],
+                colors: style.background,
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -41,13 +42,13 @@ public struct VoiceModeView: View {
                 }
                 Text(hintText ?? " ")
                     .font(.footnote)
-                    .foregroundStyle(.white.opacity(0.45))
+                    .foregroundStyle(style.ink.opacity(0.45))
                     .padding(.top, 20)
                 #if DEBUG
                 if let readout = session.latencyReadout {
                     Text(readout)
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.35))
+                        .foregroundStyle(style.ink.opacity(0.35))
                         .padding(.top, 6)
                 }
                 #endif
@@ -79,12 +80,12 @@ public struct VoiceModeView: View {
         VStack(spacing: 4) {
             Text(statusText)
                 .font(.headline)
-                .foregroundStyle(.white)
+                .foregroundStyle(style.ink)
                 .contentTransition(.opacity)
                 .animation(.easeInOut(duration: 0.2), value: statusText)
             Text(session.modelName)
                 .font(.caption)
-                .foregroundStyle(.white.opacity(0.5))
+                .foregroundStyle(style.ink.opacity(0.5))
         }
         .frame(maxWidth: .infinity)
         .overlay(alignment: .trailing) {
@@ -95,8 +96,8 @@ public struct VoiceModeView: View {
                     Image(systemName: session.cameraOpen ? "camera.fill" : "camera")
                         .font(.title3)
                         .frame(width: 44, height: 44)
-                        .background(Circle().fill(session.cameraOpen ? Color.white : Color.white.opacity(0.14)))
-                        .foregroundStyle(session.cameraOpen ? Color.black : Color.white)
+                        .background(Circle().fill(session.cameraOpen ? style.accent : style.ink.opacity(0.14)))
+                        .foregroundStyle(session.cameraOpen ? style.onAccent : style.ink)
                 }
                 .accessibilityLabel(Text(session.cameraOpen ? "Close camera" : "Open camera", bundle: .voiceKit))
                 .accessibilityHint(Text("Show the assistant a photo while you talk", bundle: .voiceKit))
@@ -120,7 +121,7 @@ public struct VoiceModeView: View {
             Text(photo.failed ? String(localized: "The photo couldn't be read on this iPhone.", bundle: .voiceKit)
                 : photo.finished ? String(localized: "Photo ready for your question", bundle: .voiceKit) : VoiceSession.readingPhoto)
                 .font(.footnote)
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(style.ink.opacity(0.75))
                 .lineLimit(2)
             Spacer(minLength: 0)
             Button {
@@ -128,12 +129,12 @@ public struct VoiceModeView: View {
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .font(.title3)
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(style.ink.opacity(0.6))
             }
             .accessibilityLabel(Text("Remove photo", bundle: .voiceKit))
         }
         .padding(8)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.08)))
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(style.ink.opacity(0.08)))
     }
 
     @ViewBuilder
@@ -141,7 +142,7 @@ public struct VoiceModeView: View {
         VStack(spacing: 14) {
             if case .failed(let message) = session.phase {
                 Text(message)
-                    .foregroundStyle(.white.opacity(0.85))
+                    .foregroundStyle(style.ink.opacity(0.85))
                     .multilineTextAlignment(.center)
                 Button {
                     Task { await session.restart() }
@@ -149,7 +150,7 @@ public struct VoiceModeView: View {
                     Label { Text("Try again", bundle: .voiceKit) } icon: { Image(systemName: "arrow.clockwise") }
                 }
                 .buttonStyle(.bordered)
-                .tint(.white)
+                .tint(style.ink)
             } else {
                 if let photo = session.pendingPhoto {
                     pendingPhotoChip(photo)
@@ -157,14 +158,14 @@ public struct VoiceModeView: View {
                 if let activity = session.activity {
                     Label(activity, systemImage: activity == VoiceSession.readingPhoto ? "text.viewfinder" : "globe")
                         .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(style.ink.opacity(0.7))
                         .symbolEffect(.pulse, options: .repeating)
                         .multilineTextAlignment(.center)
                 }
                 if session.phase == .speaking, !session.assistantCaption.isEmpty {
                     Text(session.assistantCaption)
                         .font(.title3)
-                        .foregroundStyle(.white)
+                        .foregroundStyle(style.ink)
                         .multilineTextAlignment(.center)
                         .lineLimit(5)
                         .minimumScaleFactor(0.8)
@@ -173,7 +174,7 @@ public struct VoiceModeView: View {
                 } else if !session.userCaption.isEmpty {
                     Text(session.userCaption)
                         .font(.title3)
-                        .foregroundStyle(.white.opacity(session.phase == .listening ? 0.9 : 0.55))
+                        .foregroundStyle(style.ink.opacity(session.phase == .listening ? 0.9 : 0.55))
                         .multilineTextAlignment(.center)
                         .lineLimit(5)
                         .minimumScaleFactor(0.8)
@@ -197,8 +198,8 @@ public struct VoiceModeView: View {
                 Image(systemName: session.isMuted ? "mic.slash.fill" : "mic.fill")
                     .font(.title2)
                     .frame(width: 64, height: 64)
-                    .background(Circle().fill(session.isMuted ? Color.white : Color.white.opacity(0.14)))
-                    .foregroundStyle(session.isMuted ? Color.black : Color.white)
+                    .background(Circle().fill(session.isMuted ? style.accent : style.ink.opacity(0.14)))
+                    .foregroundStyle(session.isMuted ? style.onAccent : style.ink)
             }
             .accessibilityLabel(Text(session.isMuted ? "Unmute microphone" : "Mute microphone", bundle: .voiceKit))
 
@@ -214,8 +215,8 @@ public struct VoiceModeView: View {
                         .minimumScaleFactor(0.8)
                         .padding(.horizontal, 16)
                         .frame(height: 44)
-                        .background(Capsule().fill(session.deepNextTurn ? Color.white : Color.white.opacity(0.14)))
-                        .foregroundStyle(session.deepNextTurn ? Color.black : Color.white)
+                        .background(Capsule().fill(session.deepNextTurn ? style.accent : style.ink.opacity(0.14)))
+                        .foregroundStyle(session.deepNextTurn ? style.onAccent : style.ink)
                 }
                 .accessibilityLabel(Text("Think deeper", bundle: .voiceKit))
                 .accessibilityValue(Text(session.deepNextTurn ? "On for the next answer" : "Off", bundle: .voiceKit))
@@ -230,8 +231,8 @@ public struct VoiceModeView: View {
                 Image(systemName: "xmark")
                     .font(.title2.weight(.semibold))
                     .frame(width: 64, height: 64)
-                    .background(Circle().fill(Color.red))
-                    .foregroundStyle(.white)
+                    .background(Circle().fill(style.stop))
+                    .foregroundStyle(style.onAccent)
             }
             .accessibilityLabel(Text("End voice chat", bundle: .voiceKit))
         }

@@ -203,6 +203,12 @@ Every start makes a new session. Before it touches the microphone, `start()` che
 `pipeline.missingSetup()`, then asks for microphone and speech-recognition access. If any of these fails, the
 screen shows the message, and nothing is recorded or added to the conversation.
 
+The screen draws in `VoiceModeStyle.standard` (a night gradient, a blue-to-violet orb, white controls, a red End).
+A host with its own look passes a `VoiceModeStyle` through the environment, `VoiceModeView(session:)
+.environment(\.voiceModeStyle, myStyle)`: the gradient behind, three colours per `OrbMood` (the glow, the core and the
+third blob), the accent that fills an active control and the text on it, the ink for text and resting controls, and
+the End button's colour. Roam passes its Journal colours this way (§7).
+
 ## 5. The reply pipeline
 
 `ReplyPipeline` is the seam between voice mode and whatever answers. Voice mode calls it in two ways:
